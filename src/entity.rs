@@ -22,6 +22,14 @@ const XP_SIZE: f32 = 0.18;
 const XP_HOMING_RADIUS: f32 = 4.0; // orbs start drifting toward the player within this range
 const XP_HOMING_SPEED: f32 = 9.0;
 
+// Mob AI (M28) tuning.
+const DETECT_RADIUS: f32 = 14.0; // hostile mobs notice the player within this (needs line-of-sight)
+const CALM_RADIUS: f32 = 22.0; // ...and give up the chase beyond this
+const FLEE_RADIUS: f32 = 5.0; // passive mobs bolt when the player gets this close (or after a hit)
+const ATTACK_RADIUS: f32 = 1.6; // hostile mobs lunge/attack when this close
+const CHASE_SPEED: f32 = 3.2;
+const FLEE_SPEED: f32 = 3.6;
+
 #[inline]
 fn comp(v: Vec3, axis: usize) -> f32 {
     match axis {
@@ -200,12 +208,23 @@ fn spider() -> Vec<Part> {
     v
 }
 
+/// Mob AI state (M28). Passive species cycle Idle/Wander and Flee; hostile species Chase + Attack.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ai {
+    Idle,
+    Wander,
+    Flee,
+    Chase,
+    Attack,
+}
+
 /// Per-mob state carried by `Kind::Mob`. `health`/`hurt` drive combat + the hurt-flash in M29.
 #[derive(Clone, Copy)]
 struct MobData {
     species: Species,
     health: f32,
     hurt: f32,
+    ai: Ai,
 }
 
 #[derive(Clone, Copy)]
@@ -231,7 +250,6 @@ struct Entity {
     age: f32,
     heading: f32,
     wander: f32,
-    idle: bool,
     rng: u64,
     dead: bool,
 }
@@ -251,6 +269,23 @@ impl Entities {
         self.list.len()
     }
 
+    /// One-line tally of mob AI states (headless verification of the M28 state machine).
+    pub fn ai_summary(&self) -> String {
+        let (mut idle, mut wander, mut flee, mut chase, mut attack) = (0, 0, 0, 0, 0);
+        for e in &self.list {
+            if let Kind::Mob(m) = e.kind {
+                match m.ai {
+                    Ai::Idle => idle += 1,
+                    Ai::Wander => wander += 1,
+                    Ai::Flee => flee += 1,
+                    Ai::Chase => chase += 1,
+                    Ai::Attack => attack += 1,
+                }
+            }
+        }
+        format!("mobs idle:{idle} wander:{wander} flee:{flee} chase:{chase} attack:{attack}")
+    }
+
     fn next_seed(&mut self) -> u64 {
         self.spawn_counter = self.spawn_counter.wrapping_add(1);
         // Mix the counter so seeds are well-spread and never zero.
@@ -267,6 +302,7 @@ impl Entities {
                 species,
                 health: species.max_health(),
                 hurt: 0.0,
+                ai: Ai::Wander,
             }),
             pos,
             vel: Vec3::ZERO,
@@ -274,7 +310,6 @@ impl Entities {
             age: 0.0,
             heading,
             wander: 1.0 + randf(&mut rng) * 2.0,
-            idle: false,
             rng,
             dead: false,
         });
@@ -293,7 +328,6 @@ impl Entities {
             age: 0.0,
             heading: 0.0,
             wander: 0.0,
-            idle: false,
             rng,
             dead: false,
         });
@@ -315,7 +349,6 @@ impl Entities {
             age: 0.0,
             heading: 0.0,
             wander: 0.0,
-            idle: false,
             rng,
             dead: false,
         });
@@ -331,29 +364,70 @@ impl Entities {
                 Kind::Mob(mut m) => {
                     m.hurt = (m.hurt - dt).max(0.0); // hurt-flash decays (set by combat in M29)
                     let (mw, mh) = m.species.size();
-                    e.wander -= dt;
-                    if e.wander <= 0.0 {
-                        e.wander = 2.0 + randf(&mut e.rng) * 3.0;
-                        e.idle = randf(&mut e.rng) < 0.3;
-                        e.heading = randf(&mut e.rng) * TAU;
+
+                    // Perception: distance to the player + (for hostiles) line-of-sight.
+                    let to_player = player_pos - e.pos;
+                    let dist = to_player.length();
+                    let eye = Vec3::new(0.0, mh * 0.5, 0.0);
+                    let target = player_pos + Vec3::new(0.0, 0.9, 0.0);
+
+                    // State transition.
+                    if m.species.hostile() {
+                        let sees = dist < DETECT_RADIUS
+                            && line_of_sight(e.pos + eye, target, &is_solid);
+                        m.ai = if dist <= ATTACK_RADIUS {
+                            Ai::Attack
+                        } else if sees || (matches!(m.ai, Ai::Chase | Ai::Attack) && dist < CALM_RADIUS) {
+                            Ai::Chase
+                        } else if matches!(m.ai, Ai::Chase | Ai::Attack) {
+                            Ai::Wander // lost the player
+                        } else {
+                            m.ai
+                        };
+                    } else if dist < FLEE_RADIUS || m.hurt > 0.0 {
+                        m.ai = Ai::Flee;
+                    } else if m.ai == Ai::Flee && dist > FLEE_RADIUS * 1.8 {
+                        m.ai = Ai::Wander;
                     }
-                    if e.idle {
-                        e.vel.x = 0.0;
-                        e.vel.z = 0.0;
-                    } else {
-                        e.vel.x = e.heading.cos() * MOB_SPEED;
-                        e.vel.z = e.heading.sin() * MOB_SPEED;
-                        // Occasional hop helps clear 1-block steps without real pathfinding.
-                        if e.on_ground && randf(&mut e.rng) < 0.02 {
-                            e.vel.y = 7.0;
+
+                    // Drive velocity from the state.
+                    let heading_to = |v: Vec3| v.z.atan2(v.x);
+                    let speed = match m.ai {
+                        Ai::Flee => {
+                            e.heading = heading_to(-to_player);
+                            FLEE_SPEED
                         }
+                        Ai::Chase => {
+                            e.heading = heading_to(to_player);
+                            CHASE_SPEED
+                        }
+                        Ai::Attack => {
+                            e.heading = heading_to(to_player); // face the player, hold (damage in M29)
+                            0.0
+                        }
+                        Ai::Idle | Ai::Wander => {
+                            e.wander -= dt;
+                            if e.wander <= 0.0 {
+                                e.wander = 2.0 + randf(&mut e.rng) * 3.0;
+                                m.ai = if randf(&mut e.rng) < 0.3 { Ai::Idle } else { Ai::Wander };
+                                e.heading = randf(&mut e.rng) * TAU;
+                            }
+                            if m.ai == Ai::Idle { 0.0 } else { MOB_SPEED }
+                        }
+                    };
+                    e.vel.x = e.heading.cos() * speed;
+                    e.vel.z = e.heading.sin() * speed;
+                    // Occasional hop helps clear 1-block steps without real pathfinding.
+                    if speed > 0.0 && e.on_ground && randf(&mut e.rng) < 0.05 {
+                        e.vel.y = 7.0;
                     }
+
                     e.vel.y -= GRAVITY * dt;
                     e.on_ground = collide_move(&mut e.pos, &mut e.vel, mw, mh, dt, &is_solid);
                     if e.pos.y < FALL_OUT_Y || m.health <= 0.0 {
                         e.dead = true;
                     }
-                    e.kind = Kind::Mob(m); // persist hurt decay
+                    e.kind = Kind::Mob(m); // persist hurt decay + ai state
                 }
                 Kind::Item(stack) => {
                     e.vel.y -= GRAVITY * dt;
@@ -446,6 +520,25 @@ impl Entities {
         }
         mesh
     }
+}
+
+/// Coarse voxel line-of-sight: true if no solid block lies between `from` and `to` (sampled ~twice
+/// per block). Used so hostile mobs only chase a player they can actually see.
+fn line_of_sight(from: Vec3, to: Vec3, is_solid: &impl Fn(IVec3) -> bool) -> bool {
+    let d = to - from;
+    let dist = d.length();
+    if dist < 1e-3 {
+        return true;
+    }
+    let steps = (dist * 2.0).ceil() as i32;
+    for i in 1..steps {
+        let p = from + d * (i as f32 / steps as f32);
+        let cell = IVec3::new(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        if is_solid(cell) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Move an AABB (width `w`, height `h`, feet at `pos`) by `vel*dt` with axis-separated voxel
@@ -610,5 +703,28 @@ fn push_box(geom: &mut Geometry, min: Vec3, max: Vec3, yaw: f32, tile: u32, emis
         }
         geom.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn los_blocked_by_wall() {
+        let wall = |p: IVec3| p.x == 2; // a wall plane between from and to
+        assert!(!line_of_sight(Vec3::new(0.5, 1.0, 0.5), Vec3::new(4.5, 1.0, 0.5), &wall));
+        let air = |_: IVec3| false;
+        assert!(line_of_sight(Vec3::new(0.5, 1.0, 0.5), Vec3::new(4.5, 1.0, 0.5), &air));
+    }
+
+    #[test]
+    fn hostility_split() {
+        for s in [Species::Zombie, Species::Skeleton, Species::Creeper, Species::Spider] {
+            assert!(s.hostile());
+        }
+        for s in [Species::Cow, Species::Pig, Species::Sheep, Species::Chicken] {
+            assert!(!s.hostile());
+        }
     }
 }

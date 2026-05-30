@@ -781,6 +781,11 @@ impl Game {
         self.entities.count()
     }
 
+    /// One-line mob AI-state tally (headless verification).
+    pub fn mob_ai_summary(&self) -> String {
+        self.entities.ai_summary()
+    }
+
     /// Build one GPU mesh for all entities this frame (mobs + items), lit by the chunk pass.
     pub fn build_entity_mesh(&self, gpu: &Gpu, renderer: &ChunkRenderer) -> Option<GpuMesh> {
         let data = self.entities.build_mesh();

@@ -907,6 +907,7 @@ impl ApplicationHandler for App {
                 for _ in 0..90 {
                     let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0);
                 }
+                log::info!("M28 AI after settle: {}", game.mob_ai_summary());
             }
 
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.

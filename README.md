@@ -102,10 +102,12 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
 - **Armor**: 4 equip slots (helmet/chestplate/leggings/boots) × leather/iron/gold/diamond, drag-to-equip
   in the inventory (each slot only accepts its piece). Equipped defense points reduce incoming damage
   (~4%/point, capped at 80%) for fall/lava/mob hits; a steel armor bar shows on the HUD.
-- **Typed mobs**: eight species (cow, pig, sheep, chicken, zombie, skeleton, creeper, spider), each
-  with its own size, health, and a distinct **multi-box model** (quadrupeds, humanoids, a tall
-  creeper, a wide-low spider), wandering as AABB entities lit by the same ray-traced pipeline as the
-  world. Dropped items + XP orbs share the same entity physics.
+- **Typed mobs + AI**: eight species (cow, pig, sheep, chicken, zombie, skeleton, creeper, spider),
+  each with its own size, health, and a distinct **multi-box model** (quadrupeds, humanoids, a tall
+  creeper, a wide-low spider), lit by the same ray-traced pipeline as the world. An **Idle / Wander /
+  Flee / Chase / Attack** state machine drives them: passive species flee when you crowd them, hostile
+  species **chase you on sight** (raycast line-of-sight) and close to attack range. Dropped items + XP
+  orbs share the same entity physics.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
 
 Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;
