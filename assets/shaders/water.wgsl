@@ -20,12 +20,13 @@ const RIPPLE_SCALE:     f32 = 0.55;   // spatial frequency of the dominant wave
 // textured water and, crucially, breaks the perfectly-flat mirror so reflection hit/miss edges
 // dither across a few pixels instead of snapping into hard blotches.
 fn ripple_grad(p: vec2<f32>) -> vec2<f32> {
+    let t = camera.time.x;
     let d0 = vec2<f32>( 0.80,  0.60); let f0 = RIPPLE_SCALE * 1.0; let a0 = 1.00;
     let d1 = vec2<f32>(-0.50,  0.87); let f1 = RIPPLE_SCALE * 1.7; let a1 = 0.55;
     let d2 = vec2<f32>( 0.20, -0.98); let f2 = RIPPLE_SCALE * 2.9; let a2 = 0.28;
-    var g = a0 * f0 * cos(dot(d0, p) * f0) * d0;
-    g += a1 * f1 * cos(dot(d1, p) * f1) * d1;
-    g += a2 * f2 * cos(dot(d2, p) * f2) * d2;
+    var g = a0 * f0 * cos(dot(d0, p) * f0 + t * 0.9) * d0;
+    g += a1 * f1 * cos(dot(d1, p) * f1 + t * 1.3) * d1;
+    g += a2 * f2 * cos(dot(d2, p) * f2 + t * 1.9) * d2;
     return g;
 }
 
@@ -166,7 +167,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     clarity = mix(clarity, 0.0, volume_edge_fade(in.world_pos));
     // The water's own color: its tinted albedo over shallow water, trending to WATER_TINT as the
     // floor is absorbed. Both lit the same way so the surface shades consistently.
-    let shallow_col = sample_tile(in.tile, in.uv) * lit;
+    let wuv = in.uv + vec2<f32>(camera.time.x * 0.04, camera.time.x * 0.025);
+    let shallow_col = sample_tile(in.tile, wuv) * lit;
     let deep_col = WATER_TINT * lit;
     var rgb = mix(deep_col, shallow_col, clarity);
     var alpha = clamp(1.0 - clarity, 0.12, 0.95);           // shallow -> floor shows, deep -> opaque

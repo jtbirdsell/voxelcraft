@@ -10,6 +10,7 @@ struct Camera {
     sky_color: vec4<f32>,
     fog_color: vec4<f32>,
     params: vec4<f32>, // fog_start, fog_end, ambient, sun_intensity
+    time: vec4<f32>,   // elapsed_seconds, day_fraction, _, _
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 

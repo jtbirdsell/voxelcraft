@@ -73,8 +73,14 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
-    let albedo = sample_tile(in.tile, in.uv);
     let emission = in.shade.x;
+    // Emissive (lava) crust flows: scroll + gently wobble its tile UV over time.
+    var tuv = in.uv;
+    if (emission > 0.5) {
+        tuv.y = tuv.y - camera.time.x * 0.10;
+        tuv.x = tuv.x + sin(camera.time.x * 0.7 + in.world_pos.x) * 0.03;
+    }
+    let albedo = sample_tile(in.tile, tuv);
     let sun = normalize(camera.sun_dir.xyz);
     let ambient = camera.params.z;
     let sun_intensity = camera.params.w;

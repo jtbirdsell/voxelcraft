@@ -73,6 +73,7 @@ struct State {
     fps_frames: u32,
     fps_smooth: f32,
     debug_f3: bool,
+    elapsed: f32,
 }
 
 struct App {
@@ -168,6 +169,7 @@ impl App {
         let dt = (now - state.last_frame).as_secs_f32().min(0.1);
         state.last_frame = now;
         state.environment.update(dt);
+        state.elapsed += dt;
 
         // Apply mouse look.
         let (yaw_d, pitch_d) = state.input.take_look();
@@ -237,6 +239,7 @@ impl App {
         state
             .camera_uniform
             .set_environment(&state.environment, FOG_START, FOG_END);
+        state.camera_uniform.set_time(state.elapsed, state.environment.time);
         state.renderer.update_camera(&state.gpu, &state.camera_uniform);
         state.renderer.set_sky(state.environment.wgpu_clear());
 
@@ -414,6 +417,11 @@ impl ApplicationHandler for App {
 
             camera_uniform.update(&camera, gpu.aspect());
             camera_uniform.set_environment(&environment, FOG_START, FOG_END);
+            let shot_time = std::env::var("VOXELCRAFT_TIME")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .unwrap_or(0.0);
+            camera_uniform.set_time(shot_time, environment.time);
             renderer.set_sky(environment.wgpu_clear());
             renderer.update_camera(&gpu, &camera_uniform);
 
@@ -511,6 +519,7 @@ impl ApplicationHandler for App {
             fps_frames: 0,
             fps_smooth: 0.0,
             debug_f3: false,
+            elapsed: 0.0,
         });
         self.set_grab(true);
     }

@@ -47,6 +47,8 @@ pub struct CameraUniform {
     pub fog_color: [f32; 4],
     /// (fog_start, fog_end, ambient, sun_intensity)
     pub params: [f32; 4],
+    /// (elapsed_seconds, day_fraction, _, _) — drives animated water/lava and later effects.
+    pub time: [f32; 4],
 }
 
 impl CameraUniform {
@@ -58,7 +60,13 @@ impl CameraUniform {
             sky_color: [0.46, 0.64, 0.92, 1.0],
             fog_color: [0.46, 0.64, 0.92, 1.0],
             params: [280.0, 370.0, 0.34, 1.0],
+            time: [0.0; 4],
         }
+    }
+
+    /// Update the animation clock: elapsed seconds + day fraction.
+    pub fn set_time(&mut self, secs: f32, day: f32) {
+        self.time = [secs, day, 0.0, 0.0];
     }
 
     pub fn update(&mut self, camera: &Camera, aspect: f32) {
