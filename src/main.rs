@@ -129,6 +129,10 @@ impl App {
                 flying: state.player.flying,
             };
             state.game.save(&level);
+            let dir = persistence::save_dir();
+            if let Err(e) = persistence::save_inventory(&dir, &state.inventory) {
+                log::error!("failed to save inventory: {e}");
+            }
         }
     }
 
@@ -625,6 +629,7 @@ impl ApplicationHandler for App {
             ),
         };
         let saved = persistence::load_chunks(&dir);
+        let inventory = persistence::load_inventory(&dir, flying);
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
         // A few mobs near spawn; they fall onto terrain as it streams in.
         for (dx, dz) in [(-3, -5), (3, -6), (6, 2), (-5, 3), (1, 7), (7, -2)] {
@@ -646,7 +651,7 @@ impl ApplicationHandler for App {
             camera,
             player,
             input: Input::default(),
-            inventory: Inventory::new(flying),
+            inventory,
             environment,
             camera_uniform,
             last_frame: Instant::now(),

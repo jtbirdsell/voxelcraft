@@ -9,9 +9,11 @@ use glam::IVec3;
 use rustc_hash::FxHashMap;
 
 use crate::block::BlockId;
+use crate::item::{Inventory, ItemStack, HOTBAR, SLOTS};
 use crate::world::{Chunk, CHUNK_VOLUME};
 
 const MAGIC: u32 = 0x5643_5231; // "VCR1"
+const INV_MAGIC: u32 = 0x5643_4956; // "VCIV" — inventory save_state.bin
 
 pub struct Level {
     pub seed: u64,
@@ -65,6 +67,60 @@ pub fn save_level(dir: &Path, level: &Level) -> std::io::Result<()> {
     b.extend_from_slice(&level.time.to_le_bytes());
     b.push(level.flying as u8);
     fs::write(dir.join("level.bin"), b)
+}
+
+/// Write the player inventory to `save_state.bin` (VCIV). Sparse: only non-empty slots are stored.
+pub fn save_inventory(dir: &Path, inv: &Inventory) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let mut b = Vec::new();
+    b.extend_from_slice(&INV_MAGIC.to_le_bytes());
+    b.push(1); // version
+    b.push(inv.selected as u8);
+    b.push(inv.creative as u8);
+    let filled: Vec<(usize, ItemStack)> = inv
+        .slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|s| (i, s)))
+        .collect();
+    b.push(filled.len() as u8);
+    for (i, s) in filled {
+        b.push(i as u8);
+        b.extend_from_slice(&s.item.to_le_bytes());
+        b.push(s.count);
+    }
+    fs::write(dir.join("save_state.bin"), b)
+}
+
+/// Load the player inventory, or a fresh one (`creative_default`) if absent/corrupt.
+pub fn load_inventory(dir: &Path, creative_default: bool) -> Inventory {
+    let mut inv = Inventory::new(creative_default);
+    let Ok(d) = fs::read(dir.join("save_state.bin")) else {
+        return inv;
+    };
+    if d.len() < 8 || rd_u32(&d, 0) != INV_MAGIC {
+        return inv;
+    }
+    inv.selected = (d[5] as usize).min(HOTBAR - 1);
+    inv.creative = d[6] != 0;
+    for s in inv.slots.iter_mut() {
+        *s = None; // saved state is authoritative (replaces the default palette)
+    }
+    let count = d[7] as usize;
+    let mut o = 8;
+    for _ in 0..count {
+        if o + 4 > d.len() {
+            break;
+        }
+        let slot = d[o] as usize;
+        let item = u16::from_le_bytes([d[o + 1], d[o + 2]]);
+        let cnt = d[o + 3];
+        if slot < SLOTS && cnt > 0 {
+            inv.slots[slot] = Some(ItemStack::new(item, cnt));
+        }
+        o += 4;
+    }
+    inv
 }
 
 pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
@@ -168,6 +224,28 @@ mod tests {
         assert_eq!(ll.spawn, [1.5, 2.5, 3.5]);
         assert!((ll.time - 0.33).abs() < 1e-6);
         assert!(ll.flying);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inventory_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("voxelcraft_inv_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut inv = Inventory::new(false);
+        inv.selected = 3;
+        inv.slots[0] = Some(ItemStack::new(1, 64));
+        inv.slots[10] = Some(ItemStack::new(5, 12));
+        save_inventory(&dir, &inv).unwrap();
+
+        let loaded = load_inventory(&dir, true);
+        assert_eq!(loaded.selected, 3);
+        assert!(!loaded.creative);
+        assert_eq!(loaded.slots[0].unwrap().item, 1);
+        assert_eq!(loaded.slots[0].unwrap().count, 64);
+        assert_eq!(loaded.slots[10].unwrap().count, 12);
+        assert!(loaded.slots[1].is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }
