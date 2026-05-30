@@ -238,7 +238,10 @@ impl Worldgen {
                             chunk.set(lx, ly, lz, id);
                         }
                     } else if wy < SEA_LEVEL {
-                        chunk.set(lx, ly, lz, block::WATER);
+                        // Snowy biomes freeze the water surface into ice.
+                        let frozen = matches!(biome, Biome::Snowy) && wy == SEA_LEVEL - 1;
+                        let fluid = if frozen { block::ICE } else { block::WATER };
+                        chunk.set(lx, ly, lz, fluid);
                     }
                 }
             }
@@ -255,6 +258,14 @@ impl Worldgen {
 
     /// Scatter cross-billboard plants (flowers, tall grass) on grass and cactus on sand. Deterministic
     /// and confined to each chunk's own columns (no cross-chunk writes), like `place_trees`.
+    /// True if any orthogonal neighbor column sits at/below sea level (i.e. holds water).
+    fn near_water(&self, wx: i32, wz: i32) -> bool {
+        self.height(wx + 1, wz) <= SEA_LEVEL
+            || self.height(wx - 1, wz) <= SEA_LEVEL
+            || self.height(wx, wz + 1) <= SEA_LEVEL
+            || self.height(wx, wz - 1) <= SEA_LEVEL
+    }
+
     fn place_decoration(&self, chunk: &mut Chunk, origin: IVec3) {
         let (ox, oy, oz) = (origin.x, origin.y, origin.z);
         for lz in 0..CHUNK_SIZE {
@@ -283,6 +294,8 @@ impl Worldgen {
                             Some(block::POPPY)
                         } else if r < 0.082 {
                             Some(block::DANDELION)
+                        } else if r < 0.0845 {
+                            Some(block::PUMPKIN) // rare patch
                         } else {
                             None
                         }
@@ -292,6 +305,12 @@ impl Worldgen {
                             Some(block::TALL_GRASS)
                         } else if r < 0.125 {
                             Some(block::DANDELION)
+                        } else if r < 0.150 {
+                            Some(block::FERN)
+                        } else if r < 0.156 {
+                            Some(block::RED_MUSHROOM)
+                        } else if r < 0.162 {
+                            Some(block::BROWN_MUSHROOM)
                         } else {
                             None
                         }
@@ -301,6 +320,23 @@ impl Worldgen {
                 };
                 if let Some(p) = plant {
                     chunk.set(lx, ly as usize, lz, p);
+                } else if matches!(below, block::SAND | block::GRASS | block::DIRT)
+                    && self.near_water(wx, wz)
+                {
+                    // Sugar cane grows in clumps along water edges, 1-2 tall.
+                    let rc = (hash2(self.seed ^ 0x5A1A_CA4E, wx, wz) % 1000) as f32 / 1000.0;
+                    if rc < 0.22 {
+                        chunk.set(lx, ly as usize, lz, block::SUGAR_CANE);
+                        let tall = 1 + (hash2(self.seed ^ 0xCA4E, wx, wz) % 2) as i32;
+                        for k in 1..tall {
+                            let yy = ly + k;
+                            if (0..CHUNK_SIZE_I).contains(&yy)
+                                && chunk.get(lx, yy as usize, lz) == block::AIR
+                            {
+                                chunk.set(lx, yy as usize, lz, block::SUGAR_CANE);
+                            }
+                        }
+                    }
                 }
             }
         }

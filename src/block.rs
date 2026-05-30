@@ -35,9 +35,16 @@ pub const POPPY: BlockId = 28;
 pub const DANDELION: BlockId = 29;
 pub const TALL_GRASS: BlockId = 30;
 pub const CACTUS: BlockId = 31;
+// M25 decoration.
+pub const FERN: BlockId = 32;
+pub const RED_MUSHROOM: BlockId = 33;
+pub const BROWN_MUSHROOM: BlockId = 34;
+pub const SUGAR_CANE: BlockId = 35;
+pub const PUMPKIN: BlockId = 36;
+pub const ICE: BlockId = 37;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = CACTUS;
+pub const MAX_BLOCK: BlockId = ICE;
 
 /// How a block is meshed: a full greedy cube, or an X-shaped cross billboard (plants).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,7 +56,9 @@ pub enum RenderKind {
 #[inline]
 pub fn render_kind(id: BlockId) -> RenderKind {
     match id {
-        POPPY | DANDELION | TALL_GRASS => RenderKind::Cross,
+        POPPY | DANDELION | TALL_GRASS | FERN | RED_MUSHROOM | BROWN_MUSHROOM | SUGAR_CANE => {
+            RenderKind::Cross
+        }
         _ => RenderKind::Cube,
     }
 }
@@ -145,6 +154,12 @@ pub fn display_name(id: BlockId) -> &'static str {
         DANDELION => "Dandelion",
         TALL_GRASS => "Tall Grass",
         CACTUS => "Cactus",
+        FERN => "Fern",
+        RED_MUSHROOM => "Red Mushroom",
+        BROWN_MUSHROOM => "Brown Mushroom",
+        SUGAR_CANE => "Sugar Cane",
+        PUMPKIN => "Pumpkin",
+        ICE => "Ice",
         _ => "Unknown",
     }
 }
@@ -200,6 +215,18 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         DANDELION => [0.90, 0.82, 0.20],
         TALL_GRASS => [0.34, 0.55, 0.24],
         CACTUS => [0.30, 0.52, 0.24],
+        FERN => [0.27, 0.46, 0.20],
+        RED_MUSHROOM => [0.80, 0.20, 0.18],
+        BROWN_MUSHROOM => [0.55, 0.40, 0.28],
+        SUGAR_CANE => [0.55, 0.72, 0.40],
+        PUMPKIN => {
+            if top {
+                [0.80, 0.52, 0.14]
+            } else {
+                [0.78, 0.48, 0.12]
+            }
+        }
+        ICE => [0.66, 0.80, 0.92],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -291,6 +318,8 @@ pub fn hardness(id: BlockId) -> f32 {
         | REDSTONE_ORE | LAPIS_ORE => 1.5,
         DEEPSLATE | FURNACE => 2.0,
         OBSIDIAN => 8.0,
+        ICE => 0.5,
+        PUMPKIN => 1.0,
         _ if is_plant(id) => 0.0,
         _ => 1.0,
     }
@@ -301,7 +330,8 @@ pub fn tool_class(id: BlockId) -> ToolClass {
     match id {
         STONE | COBBLESTONE | BRICKS | DEEPSLATE | OBSIDIAN | FURNACE | COAL_ORE | IRON_ORE
         | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE => ToolClass::Pickaxe,
-        WOOD | PLANKS | CRAFTING_TABLE | CHEST => ToolClass::Axe,
+        ICE => ToolClass::Pickaxe,
+        WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN => ToolClass::Axe,
         DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
         _ => ToolClass::None,
     }
@@ -321,6 +351,7 @@ pub fn drops(id: BlockId) -> Option<BlockId> {
         STONE => Some(COBBLESTONE),
         GRASS => Some(DIRT),
         LEAVES => None,
+        ICE => None, // melts away (no silk touch yet)
         _ => Some(id),
     }
 }
@@ -375,6 +406,13 @@ pub mod tile {
     pub const DANDELION: u32 = 32;
     pub const TALL_GRASS: u32 = 33;
     pub const CACTUS: u32 = 34;
+    pub const FERN: u32 = 35;
+    pub const RED_MUSHROOM: u32 = 36;
+    pub const BROWN_MUSHROOM: u32 = 37;
+    pub const SUGAR_CANE: u32 = 38;
+    pub const PUMPKIN_TOP: u32 = 39;
+    pub const PUMPKIN_SIDE: u32 = 40;
+    pub const ICE: u32 = 41;
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 
@@ -439,6 +477,18 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         DANDELION => tile::DANDELION,
         TALL_GRASS => tile::TALL_GRASS,
         CACTUS => tile::CACTUS,
+        FERN => tile::FERN,
+        RED_MUSHROOM => tile::RED_MUSHROOM,
+        BROWN_MUSHROOM => tile::BROWN_MUSHROOM,
+        SUGAR_CANE => tile::SUGAR_CANE,
+        PUMPKIN => {
+            if top || bottom {
+                tile::PUMPKIN_TOP
+            } else {
+                tile::PUMPKIN_SIDE
+            }
+        }
+        ICE => tile::ICE,
         _ => tile::MAGENTA,
     }
 }

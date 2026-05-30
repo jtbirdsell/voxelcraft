@@ -69,6 +69,13 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::DANDELION => [0.90, 0.82, 0.20],
         T::TALL_GRASS => [0.34, 0.55, 0.24],
         T::CACTUS => [0.30, 0.52, 0.24],
+        T::FERN => [0.27, 0.46, 0.20],
+        T::RED_MUSHROOM => [0.80, 0.20, 0.18],
+        T::BROWN_MUSHROOM => [0.55, 0.40, 0.28],
+        T::SUGAR_CANE => [0.55, 0.72, 0.40],
+        T::PUMPKIN_TOP => [0.80, 0.52, 0.14],
+        T::PUMPKIN_SIDE => [0.78, 0.48, 0.12],
+        T::ICE => [0.66, 0.80, 0.92],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -109,6 +116,53 @@ fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
             }
             [0, 0, 0, 0]
         }
+        T::FERN => {
+            // A bushy triangular spray of fronds, widest at the top, on a short stem.
+            let spread = ((y as i32) - 3).max(0) / 2 + 1;
+            let frond = (4..=14).contains(&y) && dx.abs() <= spread && (x ^ y) % 2 == 0;
+            let stalk = (7..=8).contains(&x) && y >= 9;
+            if frond || stalk {
+                let g = hashf(x, y, 3);
+                return [to_u8(0.16), to_u8(0.38 + g * 0.18), to_u8(0.14), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::RED_MUSHROOM => {
+            let stalk = (7..=8).contains(&x) && (9..=13).contains(&y);
+            let cap = dx * dx + (y as i32 - 8) * (y as i32 - 8) <= 25 && y <= 8;
+            if cap {
+                if hashf(x, y, 6) > 0.80 {
+                    return [to_u8(0.96), to_u8(0.96), to_u8(0.92), 255]; // white spots
+                }
+                return [to_u8(0.82), to_u8(0.16), to_u8(0.14), 255];
+            }
+            if stalk {
+                return [to_u8(0.93), to_u8(0.91), to_u8(0.83), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::BROWN_MUSHROOM => {
+            let stalk = (7..=8).contains(&x) && (10..=13).contains(&y);
+            let cap = dx * dx + (y as i32 - 9) * (y as i32 - 9) * 2 <= 20 && y <= 9;
+            if cap {
+                let d = hashf(x, y, 8) * 0.12;
+                return [to_u8(0.50 + d), to_u8(0.36 + d), to_u8(0.24), 255];
+            }
+            if stalk {
+                return [to_u8(0.85), to_u8(0.80), to_u8(0.70), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::SUGAR_CANE => {
+            // A jointed vertical green stalk filling the tile height.
+            if (6..=9).contains(&x) {
+                let joint = y % 5 == 0;
+                let base = if joint { 0.44 } else { 0.58 };
+                let g = hashf(x, y, 4) * 0.10;
+                return [to_u8(base * 0.78), to_u8(base + 0.16 + g), to_u8(base * 0.52), 255];
+            }
+            [0, 0, 0, 0]
+        }
         _ => [255, 0, 255, 255],
     }
 }
@@ -127,7 +181,16 @@ fn ore(fleck: [f32; 3], x: u32, y: u32) -> [f32; 3] {
 /// Paint one texel of a tile. Detail is brightness variation around the base color (mean-preserving),
 /// plus a few per-tile motifs (ore specks, bark columns, wood rings, a grassy top strip).
 fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
-    if matches!(tile, T::POPPY | T::DANDELION | T::TALL_GRASS) {
+    if matches!(
+        tile,
+        T::POPPY
+            | T::DANDELION
+            | T::TALL_GRASS
+            | T::FERN
+            | T::RED_MUSHROOM
+            | T::BROWN_MUSHROOM
+            | T::SUGAR_CANE
+    ) {
         return paint_plant(tile, x, y);
     }
     let base = base_color(tile);
@@ -303,6 +366,26 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             c = shade(base, (m - 0.5) * 0.16);
             if x % 7 == 0 {
                 c = shade(base, -0.24); // vertical ribs
+            }
+        }
+        T::PUMPKIN_TOP => {
+            c = shade(base, (n - 0.5) * 0.10);
+            if (7..=8).contains(&x) && (7..=8).contains(&y) {
+                c = [0.40, 0.30, 0.12]; // stem nub
+            } else if x % 4 == 0 {
+                c = shade(base, -0.16); // ridges
+            }
+        }
+        T::PUMPKIN_SIDE => {
+            c = shade(base, (m - 0.5) * 0.10);
+            if x % 4 == 0 {
+                c = shade(base, -0.20); // vertical ribs
+            }
+        }
+        T::ICE => {
+            c = shade(base, (m - 0.5) * 0.08);
+            if hashf(x, y, 19) > 0.92 {
+                c = [0.86, 0.93, 0.99]; // glint / hairline crack
             }
         }
         _ => {}

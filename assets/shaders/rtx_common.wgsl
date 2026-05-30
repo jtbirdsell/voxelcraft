@@ -123,6 +123,8 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 26u: { return vec3<f32>(0.38, 0.38, 0.40); } // furnace
         case 27u: { return vec3<f32>(0.55, 0.42, 0.24); } // chest
         case 31u: { return vec3<f32>(0.30, 0.52, 0.24); } // cactus (28-30 are non-opaque plants)
+        case 36u: { return vec3<f32>(0.79, 0.50, 0.13); } // pumpkin (32-35 are non-opaque plants)
+        case 37u: { return vec3<f32>(0.66, 0.80, 0.92); } // ice
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }
