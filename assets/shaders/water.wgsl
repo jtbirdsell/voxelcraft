@@ -85,6 +85,17 @@ fn water_depth(p: vec3<f32>) -> f32 {
     return DEPTH_MAX; // no floor within range -> treat as deep
 }
 
+// 1 at/beyond the voxel volume's horizontal boundary, 0 well inside it. The downward depth march
+// only has floor data inside the 256-block volume, so out-of-volume water would hard-cut to opaque
+// along the volume's axis-aligned edge (a sharp right-angle seam). This drives a smooth fade.
+fn volume_edge_fade(p: vec3<f32>) -> f32 {
+    let size = f32(volume.params.x);
+    let lx = p.x - f32(volume.origin.x);
+    let lz = p.z - f32(volume.origin.z);
+    let edge = min(min(lx, size - lx), min(lz, size - lz)); // blocks to the nearest xz edge
+    return 1.0 - smoothstep(0.0, 24.0, edge);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_n = normalize(in.normal);
@@ -116,7 +127,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         depth = max(depth, 4.0);
     }
     let transmit = exp(-WATER_EXTINCTION * depth);          // per-channel surviving-floor fraction
-    let clarity = (transmit.r + transmit.g + transmit.b) / 3.0;
+    var clarity = (transmit.r + transmit.g + transmit.b) / 3.0;
+    // Out-of-volume water has no depth data and would hard-cut to opaque at the volume's edge; fade
+    // it to deep/opaque approaching that edge so it reads as a smooth haze, not a right-angle seam.
+    clarity = mix(clarity, 0.0, volume_edge_fade(in.world_pos));
     // The water's own color: its tinted albedo over shallow water, trending to WATER_TINT as the
     // floor is absorbed. Both lit the same way so the surface shades consistently.
     let shallow_col = in.color.rgb * lit;

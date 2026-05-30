@@ -303,55 +303,23 @@ impl ApplicationHandler for App {
             );
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
             game.set_rtx_quality(64);
-            // A sloped sandy pool to verify depth-driven water clarity: shallow at the near (-X)
-            // shore, deepening away, filled to a flat surface (top at y=150). The sandy bottom shows
-            // through the shallows and fades to opaque blue-green with depth — driven by depth, not
-            // view angle. A colored strip atop the far wall is reflected in the deep end. The camera
-            // looks down the slope so the whole shallow->deep gradient is in frame.
+            // A long, uniformly shallow pool that runs PAST the voxel volume's ~128-block edge, to
+            // verify the volume-edge fade at a grazing angle (like the reported screenshot): near
+            // water (inside the volume) shows the sandy bottom, and as the columns cross the volume
+            // boundary — where the depth march has no floor data — clarity fades smoothly to opaque
+            // instead of hard-cutting to a right-angle seam.
+            // A natural lake vista (no built structures): with the volume now covering the render
+            // distance, the water's depth-driven clarity is consistent all the way out — no
+            // rectangular seam where the old 256-block volume used to end.
             let environment = Environment::new(0.30);
-            let player = Player::new(Vec3::new(4.0, 152.38, 20.0), false);
-            let camera = Camera::new(player.eye(), 0.0, -0.32);
+            let player = Player::new(Vec3::new(8.0, 96.0, 24.0), false);
+            let camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);
-
-            // Sand bottom that drops ~1 block every 3 along +X (water depth = 149 - floor_y, so it
-            // ramps from 1 at the near shore to ~9 at the far wall), with the water column above it.
-            for x in 8..=32 {
-                let floor_y = 148 - (x - 8) / 3;
-                for z in 10..=30 {
-                    game.set_block(&gpu, &renderer, IVec3::new(x, floor_y, z), block::SAND);
-                    for y in (floor_y + 1)..=149 {
-                        game.set_block(&gpu, &renderer, IVec3::new(x, y, z), block::WATER);
-                    }
-                }
-            }
-            // Stone side + far walls contain the pool (tops at the waterline, except the far wall).
-            for z in 9..=31 {
-                for y in 138..=150 {
-                    game.set_block(&gpu, &renderer, IVec3::new(33, y, z), block::STONE);
-                }
-            }
-            for x in 8..=33 {
-                for y in 138..=150 {
-                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 9), block::STONE);
-                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 31), block::STONE);
-                }
-            }
-            // A colored strip on the far wall above the water, reflected by the deep end.
-            for z in 10..=30 {
-                let id = match z % 3 {
-                    0 => block::LEAVES,
-                    1 => block::SNOW,
-                    _ => block::SAND,
-                };
-                for y in 151..=156 {
-                    game.set_block(&gpu, &renderer, IVec3::new(33, y, z), id);
-                }
-            }
             let highlight: Option<IVec3> = None;
 
-            // Populate the voxel volume so the depth march + reflections trace against the pool.
+            // Populate the voxel volume so shadows / GI / water depth trace across the full vista.
             game.prime_volume(&gpu, player.position);
 
             camera_uniform.update(&camera, gpu.aspect());

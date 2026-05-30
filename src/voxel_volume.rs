@@ -1,12 +1,14 @@
 //! GPU-resident voxel material volume for ray-traced lighting.
 //!
-//! A 256^3 `r16uint` 3D texture holds the opaque block id (0 = air/transparent) for the region
-//! around the player. Because 256 is a multiple of the 32-block chunk size, every chunk maps to
-//! exactly one non-wrapping 32^3 sub-box, so the volume is a toroidal ring buffer: a world
-//! voxel's texel is `worldPos mod 256`, and as the player moves, chunks scrolling in overwrite
-//! the texels of chunks scrolling out. Fragment shaders DDA-march this for sun shadows, and —
-//! because each texel now carries the block id (not just occupancy) — for ray-traced ambient
-//! occlusion and one-bounce colored global illumination (the bounce reads the hit block's color).
+//! An `r16uint` 3D texture holds the opaque block id (0 = air/transparent) for the region around
+//! the player. It is sized 768 (XZ) × 256 (Y) — wide enough that its horizontal extent covers the
+//! full render distance (so out-of-volume seams sit beyond the fog), and exactly the world height
+//! in Y (no wasted layers). Both extents are multiples of the 32-block chunk size, so every chunk
+//! maps to exactly one non-wrapping 32^3 sub-box: the volume is a toroidal ring buffer where a
+//! world voxel's texel is `worldPos mod size` per axis, and as the player moves, chunks scrolling
+//! in overwrite the texels of chunks scrolling out. Fragment shaders DDA-march this for sun
+//! shadows, ambient occlusion + global illumination (the bounce reads the hit block's color), and
+//! water reflections / depth.
 
 use glam::IVec3;
 use rustc_hash::FxHashMap;
@@ -15,15 +17,21 @@ use crate::block;
 use crate::gpu::Gpu;
 use crate::world::{Chunk, World, CHUNK_SIZE, CHUNK_SIZE_I};
 
-pub const VOL_SIZE: i32 = 256;
-pub const VOL_CHUNKS: i32 = VOL_SIZE / CHUNK_SIZE_I; // 8
+/// Horizontal extent (covers render distance) and vertical extent (full world height), in blocks.
+pub const VOL_SIZE_XZ: i32 = 768;
+pub const VOL_SIZE_Y: i32 = 256;
+pub const VOL_CHUNKS_XZ: i32 = VOL_SIZE_XZ / CHUNK_SIZE_I; // 24
+pub const VOL_CHUNKS_Y: i32 = VOL_SIZE_Y / CHUNK_SIZE_I; // 8
+/// Per-chunk scratch row stride in texels: 32 padded up to COPY_BYTES_PER_ROW_ALIGNMENT
+/// (256 bytes / 2 bytes-per-texel = 128), so texture writes are independent of the volume size.
+const SCRATCH_ROW: usize = 128;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct VolumeUniform {
     /// World-block coordinates of the volume's minimum corner.
     origin: [i32; 4],
-    /// (size, rtx_mode, gi_rays, _) — rtx_mode: 0 off, 1 shadows, 2 shadows+GI.
+    /// (size_xz, rtx_mode, gi_rays, size_y) — rtx_mode: 0 off, 1 shadows, 2 shadows+GI.
     params: [u32; 4],
     /// (gi_dist, gi_strength, sky_boost, _)
     paramsf: [f32; 4],
@@ -84,9 +92,9 @@ impl VoxelVolume {
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("voxel-volume"),
             size: wgpu::Extent3d {
-                width: VOL_SIZE as u32,
-                height: VOL_SIZE as u32,
-                depth_or_array_layers: VOL_SIZE as u32,
+                width: VOL_SIZE_XZ as u32,
+                height: VOL_SIZE_Y as u32,
+                depth_or_array_layers: VOL_SIZE_XZ as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -128,8 +136,8 @@ impl VoxelVolume {
             gi_dist: 22.0,
             gi_strength: 1.0,
             sky_boost: 0.55,
-            upload_budget: 24,
-            scratch: vec![0u16; (VOL_SIZE as usize) * CHUNK_SIZE * CHUNK_SIZE],
+            upload_budget: 48,
+            scratch: vec![0u16; SCRATCH_ROW * CHUNK_SIZE * CHUNK_SIZE],
         }
     }
 
@@ -159,7 +167,11 @@ impl VoxelVolume {
 
     /// Mark a chunk so it re-uploads (e.g. after an edit), if currently in the volume.
     pub fn invalidate(&mut self, pos: IVec3) {
-        let key = (pos.x.rem_euclid(VOL_CHUNKS), pos.y, pos.z.rem_euclid(VOL_CHUNKS));
+        let key = (
+            pos.x.rem_euclid(VOL_CHUNKS_XZ),
+            pos.y,
+            pos.z.rem_euclid(VOL_CHUNKS_XZ),
+        );
         if self.occupant.get(&key) == Some(&pos) {
             self.occupant.remove(&key);
         }
@@ -167,12 +179,21 @@ impl VoxelVolume {
 
     /// Re-center on the player and upload a budget of in-range chunks per frame.
     pub fn update(&mut self, gpu: &Gpu, world: &World, player_chunk: IVec3) {
-        self.origin_chunk = IVec3::new(player_chunk.x - VOL_CHUNKS / 2, 0, player_chunk.z - VOL_CHUNKS / 2);
+        self.origin_chunk = IVec3::new(
+            player_chunk.x - VOL_CHUNKS_XZ / 2,
+            0,
+            player_chunk.z - VOL_CHUNKS_XZ / 2,
+        );
         let origin_world = self.origin_chunk * CHUNK_SIZE_I;
 
         let uni = VolumeUniform {
             origin: [origin_world.x, 0, origin_world.z, 0],
-            params: [VOL_SIZE as u32, self.rtx_mode, self.gi_rays, 0],
+            params: [
+                VOL_SIZE_XZ as u32,
+                self.rtx_mode,
+                self.gi_rays,
+                VOL_SIZE_Y as u32,
+            ],
             paramsf: [self.gi_dist, self.gi_strength, self.sky_boost, 0.0],
         };
         gpu.queue
@@ -180,11 +201,15 @@ impl VoxelVolume {
 
         let (ox, oz) = (self.origin_chunk.x, self.origin_chunk.z);
         let mut budget = self.upload_budget;
-        'outer: for cz in oz..oz + VOL_CHUNKS {
-            for cx in ox..ox + VOL_CHUNKS {
-                for cy in 0..VOL_CHUNKS {
+        'outer: for cz in oz..oz + VOL_CHUNKS_XZ {
+            for cx in ox..ox + VOL_CHUNKS_XZ {
+                for cy in 0..VOL_CHUNKS_Y {
                     let pos = IVec3::new(cx, cy, cz);
-                    let key = (cx.rem_euclid(VOL_CHUNKS), cy, cz.rem_euclid(VOL_CHUNKS));
+                    let key = (
+                        cx.rem_euclid(VOL_CHUNKS_XZ),
+                        cy,
+                        cz.rem_euclid(VOL_CHUNKS_XZ),
+                    );
                     if self.occupant.get(&key) == Some(&pos) {
                         continue;
                     }
@@ -204,20 +229,20 @@ impl VoxelVolume {
     /// Upload all in-range chunks at once (used for headless screenshots).
     pub fn prime(&mut self, gpu: &Gpu, world: &World, player_chunk: IVec3) {
         let saved = self.upload_budget;
-        self.upload_budget = (VOL_CHUNKS * VOL_CHUNKS * VOL_CHUNKS) as usize;
+        self.upload_budget = (VOL_CHUNKS_XZ * VOL_CHUNKS_XZ * VOL_CHUNKS_Y) as usize;
         self.update(gpu, world, player_chunk);
         self.upload_budget = saved;
     }
 
     fn upload_chunk(&mut self, gpu: &Gpu, pos: IVec3, chunk: &Chunk) {
-        let tx = (pos.x * CHUNK_SIZE_I).rem_euclid(VOL_SIZE) as u32;
-        let ty = (pos.y * CHUNK_SIZE_I).rem_euclid(VOL_SIZE) as u32;
-        let tz = (pos.z * CHUNK_SIZE_I).rem_euclid(VOL_SIZE) as u32;
+        let tx = (pos.x * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_XZ) as u32;
+        let ty = (pos.y * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_Y) as u32;
+        let tz = (pos.z * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_XZ) as u32;
 
-        // Texture data order is x (fastest), then y, then z; row stride 256 texels (= 512 bytes,
-        // already a multiple of COPY_BYTES_PER_ROW_ALIGNMENT). Opaque blocks store their id so the
-        // tracer can read material color; air and water (non-opaque) store 0 and cast no shadow.
-        let row_stride = VOL_SIZE as usize;
+        // Texture data order is x (fastest), then y, then z; row stride 128 texels (= 256 bytes,
+        // a multiple of COPY_BYTES_PER_ROW_ALIGNMENT). Opaque blocks store their id so the tracer
+        // can read material color; air and water (non-opaque) store 0 and cast no shadow.
+        let row_stride = SCRATCH_ROW;
         for z in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
                 let base = z * row_stride * CHUNK_SIZE + y * row_stride;
@@ -238,7 +263,7 @@ impl VoxelVolume {
             bytemuck::cast_slice(&self.scratch),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(VOL_SIZE as u32 * 2),
+                bytes_per_row: Some(SCRATCH_ROW as u32 * 2),
                 rows_per_image: Some(CHUNK_SIZE as u32),
             },
             wgpu::Extent3d {

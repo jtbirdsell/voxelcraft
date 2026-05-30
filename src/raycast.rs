@@ -57,7 +57,8 @@ pub fn cast(
         next_boundary(origin.z, dir.z, voxel.z),
     );
 
-    let mut normal = IVec3::ZERO;
+    // Assigned by every loop branch before it is read; the starting cell below returns ZERO directly.
+    let mut normal: IVec3;
     let mut t = 0.0f32;
     // Check the starting cell too.
     if is_solid(voxel) {

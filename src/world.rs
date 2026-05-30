@@ -152,9 +152,4 @@ impl Neighborhood {
         }
         self.center.get(x as usize, y as usize, z as usize)
     }
-
-    #[inline]
-    pub fn opaque_at(&self, x: i32, y: i32, z: i32) -> bool {
-        block::is_opaque(self.block_at(x, y, z))
-    }
 }

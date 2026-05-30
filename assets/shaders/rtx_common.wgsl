@@ -15,7 +15,7 @@ struct Camera {
 
 struct Volume {
     origin: vec4<i32>,
-    params: vec4<u32>,  // size, rtx_mode, gi_rays, _
+    params: vec4<u32>,  // size_xz, rtx_mode, gi_rays, size_y
     paramsf: vec4<f32>, // gi_dist, gi_strength, sky_boost, _
 };
 @group(1) @binding(0) var voxels: texture_3d<u32>;
@@ -44,19 +44,25 @@ fn vs_main(in: VsIn) -> VsOut {
 }
 
 fn in_volume(p: vec3<i32>) -> bool {
-    let size = i32(volume.params.x);
+    let sxz = i32(volume.params.x);
+    let sy = i32(volume.params.w);
     let l = p - volume.origin.xyz;
-    return l.x >= 0 && l.y >= 0 && l.z >= 0 && l.x < size && l.y < size && l.z < size;
+    return l.x >= 0 && l.y >= 0 && l.z >= 0 && l.x < sxz && l.y < sy && l.z < sxz;
 }
 
 // Opaque block id at a world voxel (0 = air/transparent/out-of-volume). The volume is a toroidal
-// ring buffer keyed by worldPos mod size, matching how chunks are uploaded.
+// ring buffer keyed by worldPos mod size per axis (XZ and Y differ), matching the chunk uploads.
 fn voxel_id(p: vec3<i32>) -> u32 {
     if (!in_volume(p)) {
         return 0u;
     }
-    let size = i32(volume.params.x);
-    let t = ((p % size) + size) % size;
+    let sxz = i32(volume.params.x);
+    let sy = i32(volume.params.w);
+    let t = vec3<i32>(
+        ((p.x % sxz) + sxz) % sxz,
+        ((p.y % sy) + sy) % sy,
+        ((p.z % sxz) + sxz) % sxz,
+    );
     return textureLoad(voxels, t, 0).r;
 }
 

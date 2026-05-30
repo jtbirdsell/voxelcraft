@@ -633,10 +633,6 @@ impl Game {
         self.volume.set_gi_rays(rays);
     }
 
-    pub fn edited_chunk_count(&self) -> usize {
-        self.saved.len()
-    }
-
     /// Write the edited chunks and the level header to disk.
     pub fn save(&self, level: &Level) {
         let dir = persistence::save_dir();
