@@ -224,9 +224,9 @@ impl Worldgen {
                         } else {
                             block::STONE
                         };
-                        // Bedrock floor (jagged, never carved by caves).
+                        // Bedrock floor (jagged, never carved): y0 solid, y1 ~1/2, y2 ~1/4.
                         let bedrock =
-                            wy == 0 || (wy <= 3 && (hash3(self.seed ^ 0xB, wx, wy, wz) % 4) as i32 > wy);
+                            wy == 0 || (wy <= 2 && (hash3(self.seed ^ 0xB, wx, wy, wz) % 4) as i32 > wy);
                         if bedrock {
                             id = block::BEDROCK;
                         } else if wy >= 3 && wy < height - 1 && self.is_cave(wx, wy, wz) {

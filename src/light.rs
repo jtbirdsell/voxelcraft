@@ -4,9 +4,19 @@
 //! makes caves dark) and block light (torch/glowstone/lava sources; survives in caves).
 //!
 //! The result is a padded `LDIM^3` grid in chunk-local coords `[-1, 32]` (one-block border), which is
-//! exactly what the greedy mesher needs to read the air voxel just outside each face. Computing the
-//! border from the neighborhood blocks (rather than a neighbor's stored light) keeps adjacent chunks
-//! seam-free: both solve the shared border identically.
+//! exactly what the greedy mesher needs to read the air voxel just outside each face. The border is
+//! solved from the neighborhood blocks (not a neighbor's stored light), which makes the common case
+//! consistent across chunks.
+//!
+//! Known cross-chunk approximations (the `Neighborhood` only exposes the 6 face neighbors, so diagonal
+//! chunks and full vertical columns aren't visible). To revisit in a light-engine v2 (column heightmap
+//! + diagonal access, or a world-level pass):
+//!   - Skylight border columns can't see a roof in a diagonally-above chunk, so an overhang sitting
+//!     over a chunk seam can show a faint skylight seam.
+//!   - Skylight only scans one chunk up (~64 blocks), so a vertical shaft taller than 32 blocks reads
+//!     as fully sky-lit below that.
+//!   - Block light treats diagonal/corner-chunk blocks as air, so a torch can leak slightly through a
+//!     corner wall near a chunk boundary.
 
 use std::collections::VecDeque;
 

@@ -31,15 +31,23 @@ pub struct Chunk {
     #[allow(dead_code)]
     pub light: Vec<u8>,
     pub solid_count: u32,
+    /// Count of light-emitting blocks, kept current in `set` so the mesher's emitter gate is O(1).
+    pub emitter_count: u32,
 }
 
 impl Chunk {
     pub fn filled(id: BlockId) -> Self {
         let solid_count = if id == block::AIR { 0 } else { CHUNK_VOLUME as u32 };
+        let emitter_count = if block::light_emission(id) > 0 {
+            CHUNK_VOLUME as u32
+        } else {
+            0
+        };
         Self {
             blocks: vec![id; CHUNK_VOLUME],
             light: vec![0; CHUNK_VOLUME],
             solid_count,
+            emitter_count,
         }
     }
 
@@ -75,6 +83,13 @@ impl Chunk {
         match (was_solid, now_solid) {
             (false, true) => self.solid_count += 1,
             (true, false) => self.solid_count -= 1,
+            _ => {}
+        }
+        let was_emit = block::light_emission(self.blocks[i]) > 0;
+        let now_emit = block::light_emission(id) > 0;
+        match (was_emit, now_emit) {
+            (false, true) => self.emitter_count += 1,
+            (true, false) => self.emitter_count -= 1,
             _ => {}
         }
         self.blocks[i] = id;
@@ -167,11 +182,8 @@ impl Neighborhood {
     /// True if the center or any of the 6 face neighbors contains a light-emitting block — the
     /// cheap gate that lets the block-light flood skip the vast majority of (sourceless) chunks.
     pub fn any_emitter(&self) -> bool {
-        let has = |c: &Option<Arc<Chunk>>| {
-            c.as_ref()
-                .is_some_and(|c| c.blocks.iter().any(|&b| block::light_emission(b) > 0))
-        };
-        self.center.blocks.iter().any(|&b| block::light_emission(b) > 0)
+        let has = |c: &Option<Arc<Chunk>>| c.as_ref().is_some_and(|c| c.emitter_count > 0);
+        self.center.emitter_count > 0
             || has(&self.neg_x)
             || has(&self.pos_x)
             || has(&self.neg_y)

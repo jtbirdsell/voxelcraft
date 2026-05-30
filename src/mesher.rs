@@ -177,18 +177,15 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
         }
     }
 
-    // Cross-billboard plants: an X of two quads per plant cell, lit and non-occluding.
-    if neigh.center.blocks.iter().any(|&b| block::is_plant(b)) {
-        for y in 0..S {
-            for z in 0..S {
-                for x in 0..S {
-                    let id = neigh.center.get(x as usize, y as usize, z as usize);
-                    if block::is_plant(id) {
-                        let l = crate::light::at(&lightgrid, x, y, z);
-                        emit_cross(&mut mesh.opaque, origin, x, y, z, id, l);
-                    }
-                }
-            }
+    // Cross-billboard plants: an X of two quads per plant cell, lit and non-occluding. One pass over
+    // the block array (index = x + S*(z + S*y), see world::local_index).
+    for (i, &id) in neigh.center.blocks.iter().enumerate() {
+        if block::is_plant(id) {
+            let x = (i as i32) % S;
+            let z = (i as i32 / S) % S;
+            let y = i as i32 / (S * S);
+            let l = crate::light::at(&lightgrid, x, y, z);
+            emit_cross(&mut mesh.opaque, origin, x, y, z, id, l);
         }
     }
 

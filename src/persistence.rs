@@ -98,8 +98,8 @@ pub fn load_inventory(dir: &Path, creative_default: bool) -> Inventory {
     let Ok(d) = fs::read(dir.join("save_state.bin")) else {
         return inv;
     };
-    if d.len() < 8 || rd_u32(&d, 0) != INV_MAGIC {
-        return inv;
+    if d.len() < 8 || rd_u32(&d, 0) != INV_MAGIC || d[4] != 1 {
+        return inv; // unknown magic or version -> fresh inventory
     }
     inv.selected = (d[5] as usize).min(HOTBAR - 1);
     inv.creative = d[6] != 0;
@@ -150,8 +150,10 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
                     .map(|b| u16::from_le_bytes([b[0], b[1]]))
                     .collect();
                 let solid_count = blocks.iter().filter(|&&b| b != 0).count() as u32;
+                let emitter_count =
+                    blocks.iter().filter(|&&b| crate::block::light_emission(b) > 0).count() as u32;
                 let light = vec![0u8; CHUNK_VOLUME];
-                map.insert(pos, Chunk { blocks, light, solid_count });
+                map.insert(pos, Chunk { blocks, light, solid_count, emitter_count });
             }
         }
         o += clen;
@@ -200,6 +202,7 @@ mod tests {
             blocks: blocks.clone(),
             light: vec![0u8; CHUNK_VOLUME],
             solid_count: 3,
+            emitter_count: 0,
         };
         let pos = IVec3::new(-3, 2, 7);
         save_chunks(&dir, &[(pos, &chunk)]).unwrap();

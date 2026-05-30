@@ -140,7 +140,7 @@ impl App {
         let open = {
             let Some(state) = &mut self.state else { return };
             if state.screen == Screen::Inventory {
-                state.inventory.return_held();
+                drop_leftover(&mut state.inventory, &mut state.game, state.player.position);
                 state.screen = Screen::None;
                 false
             } else {
@@ -159,7 +159,7 @@ impl App {
     fn close_screen(&mut self) {
         if let Some(state) = &mut self.state {
             if state.screen != Screen::None {
-                state.inventory.return_held();
+                drop_leftover(&mut state.inventory, &mut state.game, state.player.position);
                 state.screen = Screen::None;
             }
         }
@@ -200,8 +200,9 @@ impl App {
             self.toggle_inventory();
             return;
         }
-        // Suppress gameplay keys while a GUI screen is open.
-        if self.state.as_ref().is_some_and(|s| s.screen != Screen::None) {
+        // While a GUI screen is open, swallow gameplay key PRESSES but let RELEASES through, so a
+        // movement key held across the open/close edge can't get stuck on.
+        if pressed && self.state.as_ref().is_some_and(|s| s.screen != Screen::None) {
             return;
         }
         let Some(state) = &mut self.state else { return };
@@ -404,6 +405,19 @@ impl App {
 fn maybe_select(state: &mut State, pressed: bool, index: usize) {
     if pressed {
         state.inventory.select(index);
+    }
+}
+
+/// On screen close, drop any held cursor stack that no longer fits back into the world as items,
+/// rather than leaving it stranded on the (now hidden) cursor.
+fn drop_leftover(inventory: &mut Inventory, game: &mut Game, player_pos: Vec3) {
+    if let Some(left) = inventory.return_held() {
+        if let Some(b) = left.block() {
+            let pos = player_pos + Vec3::new(0.0, 1.0, 0.0);
+            for _ in 0..left.count {
+                game.spawn_item(pos, b);
+            }
+        }
     }
 }
 
@@ -707,7 +721,7 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
                         MouseScrollDelta::PixelDelta(p) => -(p.y.signum() as i32),
                     };
-                    if dir != 0 {
+                    if dir != 0 && state.screen == Screen::None {
                         state.inventory.scroll(dir);
                     }
                 }

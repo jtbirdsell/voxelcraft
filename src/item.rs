@@ -208,10 +208,9 @@ impl Inventory {
         }
     }
 
-    /// Drop the held stack back into the inventory (called when a screen closes).
-    pub fn return_held(&mut self) {
-        if let Some(h) = self.held.take() {
-            self.held = self.insert(h);
-        }
+    /// Return the held stack to the inventory when a screen closes; yields any leftover that didn't
+    /// fit (the caller drops it as a world item rather than stranding it on the hidden cursor).
+    pub fn return_held(&mut self) -> Option<ItemStack> {
+        self.held.take().and_then(|h| self.insert(h))
     }
 }

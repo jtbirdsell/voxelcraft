@@ -74,9 +74,9 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let emission = in.shade.x;
-    // Emissive (lava) crust flows: scroll + gently wobble its tile UV over time.
+    // Lava crust flows: scroll + gently wobble its tile UV over time (torch/glowstone stay static).
     var tuv = in.uv;
-    if (emission > 0.5) {
+    if (in.tile == 12u) {
         tuv.y = tuv.y - camera.time.x * 0.10;
         tuv.x = tuv.x + sin(camera.time.x * 0.7 + in.world_pos.x) * 0.03;
     }
