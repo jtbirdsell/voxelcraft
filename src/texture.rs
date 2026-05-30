@@ -19,12 +19,12 @@ pub fn build_atlas() -> Vec<u8> {
         let oy = (tile / ATLAS_COLS) * TILE_PX;
         for ty in 0..TILE_PX {
             for tx in 0..TILE_PX {
-                let [r, g, b] = paint(tile, tx, ty);
+                let [r, g, b, a] = paint(tile, tx, ty);
                 let o = (((oy + ty) * ATLAS_W + (ox + tx)) * 4) as usize;
                 img[o] = r;
                 img[o + 1] = g;
                 img[o + 2] = b;
-                img[o + 3] = 255;
+                img[o + 3] = a;
             }
         }
     }
@@ -65,7 +65,51 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::CRAFTING => [0.50, 0.36, 0.22],
         T::FURNACE => [0.38, 0.38, 0.40],
         T::CHEST => [0.55, 0.42, 0.24],
+        T::POPPY => [0.80, 0.15, 0.12],
+        T::DANDELION => [0.90, 0.82, 0.20],
+        T::TALL_GRASS => [0.34, 0.55, 0.24],
+        T::CACTUS => [0.30, 0.52, 0.24],
         _ => [1.0, 0.0, 1.0],
+    }
+}
+
+/// Cross-billboard plant tiles: an RGBA cutout (alpha 0 outside the plant shape) so the X quads
+/// read as flowers/grass, not solid squares.
+fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
+    let dx = x as i32 - 8;
+    let stem = (7..=8).contains(&x) && y >= 6;
+    let leaves = (9..=11).contains(&y) && (1..=2).contains(&dx.abs());
+    match tile {
+        T::TALL_GRASS => {
+            let here = hashf(x, 0, 5) > 0.35;
+            let top = 3 + (hashf(x, 1, 9) * 6.0) as u32;
+            if here && y >= top {
+                let g = hashf(x, y, 2);
+                return [to_u8(0.20), to_u8(0.42 + g * 0.20), to_u8(0.15), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::POPPY => {
+            let head = y < 7 && (dx.abs() + (y as i32 - 3).abs()) <= 3;
+            if head {
+                return [to_u8(0.82), to_u8(0.12), to_u8(0.10), 255];
+            }
+            if stem || leaves {
+                return [to_u8(0.18), to_u8(0.42), to_u8(0.16), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::DANDELION => {
+            let head = y < 6 && (dx.abs() + (y as i32 - 3).abs()) <= 3;
+            if head {
+                return [to_u8(0.92), to_u8(0.82), to_u8(0.18), 255];
+            }
+            if stem || leaves {
+                return [to_u8(0.18), to_u8(0.42), to_u8(0.16), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        _ => [255, 0, 255, 255],
     }
 }
 
@@ -82,7 +126,10 @@ fn ore(fleck: [f32; 3], x: u32, y: u32) -> [f32; 3] {
 
 /// Paint one texel of a tile. Detail is brightness variation around the base color (mean-preserving),
 /// plus a few per-tile motifs (ore specks, bark columns, wood rings, a grassy top strip).
-fn paint(tile: u32, x: u32, y: u32) -> [u8; 3] {
+fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
+    if matches!(tile, T::POPPY | T::DANDELION | T::TALL_GRASS) {
+        return paint_plant(tile, x, y);
+    }
     let base = base_color(tile);
     let n = hashf(x, y, tile.wrapping_mul(131) + 7); // 0..1 fine grain
     let m = hashf(x / 2, y / 2, tile.wrapping_mul(977) + 3); // 0..1 coarse grain
@@ -252,9 +299,15 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 3] {
                 c = shade(stick, (m - 0.5) * 0.18);
             }
         }
+        T::CACTUS => {
+            c = shade(base, (m - 0.5) * 0.16);
+            if x % 7 == 0 {
+                c = shade(base, -0.24); // vertical ribs
+            }
+        }
         _ => {}
     }
-    [to_u8(c[0]), to_u8(c[1]), to_u8(c[2])]
+    [to_u8(c[0]), to_u8(c[1]), to_u8(c[2]), 255]
 }
 
 /// A small clustered "ore blob" mask: true on a few deterministic 2x2-ish clumps.

@@ -112,6 +112,9 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     xb[d] = i + 1;
                     let a = neigh.block_at(x[0], x[1], x[2]);
                     let b = neigh.block_at(xb[0], xb[1], xb[2]);
+                    // Cross-billboard plants are emitted separately, not as greedy cube faces.
+                    let a = if block::is_cube(a) { a } else { block::AIR };
+                    let b = if block::is_cube(b) { b } else { block::AIR };
                     mask[n] = if block::renders(a) && !block::occludes(a, b) {
                         // a's +face: lit by the air voxel on b's side.
                         Some((a, true, crate::light::at(&lightgrid, xb[0], xb[1], xb[2])))
@@ -173,7 +176,59 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
             i += 1;
         }
     }
+
+    // Cross-billboard plants: an X of two quads per plant cell, lit and non-occluding.
+    if neigh.center.blocks.iter().any(|&b| block::is_plant(b)) {
+        for y in 0..S {
+            for z in 0..S {
+                for x in 0..S {
+                    let id = neigh.center.get(x as usize, y as usize, z as usize);
+                    if block::is_plant(id) {
+                        let l = crate::light::at(&lightgrid, x, y, z);
+                        emit_cross(&mut mesh.opaque, origin, x, y, z, id, l);
+                    }
+                }
+            }
+        }
+    }
+
     mesh
+}
+
+/// Emit a cross-billboard plant (two diagonal quads) for the cell at chunk-local (lx,ly,lz).
+fn emit_cross(geom: &mut Geometry, origin: [i32; 3], lx: i32, ly: i32, lz: i32, id: u16, face_light: u8) {
+    let ox = (origin[0] + lx) as f32;
+    let oy = (origin[1] + ly) as f32;
+    let oz = (origin[2] + lz) as f32;
+    let tile = block::face_tile(id, [0, 1, 0]);
+    let shade = [block::emission(id), block::tint_class(id, [0, 1, 0])];
+    let light = [(face_light >> 4) as f32 / 15.0, (face_light & 0x0F) as f32 / 15.0];
+    let normal = [0.0, 1.0, 0.0]; // up-ish so plants catch sky/ambient light
+    let m = 0.06;
+    let (x0, x1) = (ox + m, ox + 1.0 - m);
+    let (z0, z1) = (oz + m, oz + 1.0 - m);
+    let (y0, y1) = (oy, oy + 1.0);
+    let quads = [
+        [[x0, y0, z0], [x1, y0, z1], [x1, y1, z1], [x0, y1, z0]],
+        [[x1, y0, z0], [x0, y0, z1], [x0, y1, z1], [x1, y1, z0]],
+    ];
+    // v flipped (bottom of quad = bottom of tile = stem); slight inset to avoid the fract() wrap.
+    let uvs = [[0.01, 0.99], [0.99, 0.99], [0.99, 0.01], [0.01, 0.01]];
+    for q in quads {
+        let base = geom.vertices.len() as u32;
+        for (k, p) in q.iter().enumerate() {
+            geom.vertices.push(Vertex {
+                position: *p,
+                normal,
+                uv: uvs[k],
+                tile,
+                light,
+                shade,
+            });
+        }
+        geom.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

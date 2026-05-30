@@ -168,7 +168,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // The water's own color: its tinted albedo over shallow water, trending to WATER_TINT as the
     // floor is absorbed. Both lit the same way so the surface shades consistently.
     let wuv = in.uv + vec2<f32>(camera.time.x * 0.04, camera.time.x * 0.025);
-    let shallow_col = sample_tile(in.tile, wuv) * lit;
+    let shallow_col = sample_tile(in.tile, wuv).rgb * lit;
     let deep_col = WATER_TINT * lit;
     var rgb = mix(deep_col, shallow_col, clarity);
     var alpha = clamp(1.0 - clarity, 0.12, 0.95);           // shallow -> floor shows, deep -> opaque

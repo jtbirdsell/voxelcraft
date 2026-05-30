@@ -244,12 +244,66 @@ impl Worldgen {
             }
         }
 
-        // Trees only for chunks overlapping the surface band.
+        // Trees + surface decoration only for chunks overlapping the surface band.
         if cy1 > hmin && oy <= hmax + MAX_TREE_HEIGHT {
             self.place_trees(&mut chunk, origin);
+            self.place_decoration(&mut chunk, origin);
         }
 
         chunk
+    }
+
+    /// Scatter cross-billboard plants (flowers, tall grass) on grass and cactus on sand. Deterministic
+    /// and confined to each chunk's own columns (no cross-chunk writes), like `place_trees`.
+    fn place_decoration(&self, chunk: &mut Chunk, origin: IVec3) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let wx = ox + lx as i32;
+                let wz = oz + lz as i32;
+                let ground = self.height(wx, wz);
+                if ground <= SEA_LEVEL {
+                    continue;
+                }
+                let ly = ground - oy; // air cell directly above the surface block
+                if ly < 1 || ly >= CHUNK_SIZE_I {
+                    continue;
+                }
+                if chunk.get(lx, ly as usize, lz) != block::AIR {
+                    continue; // occupied (e.g. by a tree)
+                }
+                let below = chunk.get(lx, (ly - 1) as usize, lz);
+                let biome = self.biome(wx, wz, ground);
+                let r = (hash2(self.seed ^ 0x00DE_C0DE, wx, wz) % 1000) as f32 / 1000.0;
+                let plant = match biome {
+                    Biome::Plains if below == block::GRASS => {
+                        if r < 0.05 {
+                            Some(block::TALL_GRASS)
+                        } else if r < 0.066 {
+                            Some(block::POPPY)
+                        } else if r < 0.082 {
+                            Some(block::DANDELION)
+                        } else {
+                            None
+                        }
+                    }
+                    Biome::Forest if below == block::GRASS => {
+                        if r < 0.11 {
+                            Some(block::TALL_GRASS)
+                        } else if r < 0.125 {
+                            Some(block::DANDELION)
+                        } else {
+                            None
+                        }
+                    }
+                    Biome::Desert if below == block::SAND && r < 0.012 => Some(block::CACTUS),
+                    _ => None,
+                };
+                if let Some(p) = plant {
+                    chunk.set(lx, ly as usize, lz, p);
+                }
+            }
+        }
     }
 
     fn place_trees(&self, chunk: &mut Chunk, origin: IVec3) {

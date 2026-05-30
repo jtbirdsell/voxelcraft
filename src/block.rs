@@ -31,11 +31,42 @@ pub const DEEPSLATE: BlockId = 24;
 pub const CRAFTING_TABLE: BlockId = 25;
 pub const FURNACE: BlockId = 26;
 pub const CHEST: BlockId = 27;
+pub const POPPY: BlockId = 28;
+pub const DANDELION: BlockId = 29;
+pub const TALL_GRASS: BlockId = 30;
+pub const CACTUS: BlockId = 31;
 
-/// A block participates in collision (fluids are passable).
+/// How a block is meshed: a full greedy cube, or an X-shaped cross billboard (plants).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RenderKind {
+    Cube,
+    Cross,
+}
+
+#[inline]
+pub fn render_kind(id: BlockId) -> RenderKind {
+    match id {
+        POPPY | DANDELION | TALL_GRASS => RenderKind::Cross,
+        _ => RenderKind::Cube,
+    }
+}
+
+/// A non-solid cross-billboard plant (walk-through, casts no shadow, doesn't cull neighbors).
+#[inline]
+pub fn is_plant(id: BlockId) -> bool {
+    matches!(render_kind(id), RenderKind::Cross)
+}
+
+/// A full greedy-meshed cube (everything except cross-billboard plants).
+#[inline]
+pub fn is_cube(id: BlockId) -> bool {
+    matches!(render_kind(id), RenderKind::Cube)
+}
+
+/// A block participates in collision (fluids and cross-billboard plants are passable).
 #[inline]
 pub fn is_solid(id: BlockId) -> bool {
-    id != AIR && id != WATER && id != LAVA
+    id != AIR && id != WATER && id != LAVA && !is_plant(id)
 }
 
 /// Water or lava — simulated by the flowing-fluid tick and passable to the player.
@@ -45,10 +76,10 @@ pub fn is_fluid(id: BlockId) -> bool {
 }
 
 /// A block fully hides the touching face of an adjacent opaque block.
-/// Water is non-opaque (translucent); leaves stay opaque (rendered as solid foliage).
+/// Water and cross-billboard plants are non-opaque; leaves stay opaque (rendered as solid foliage).
 #[inline]
 pub fn is_opaque(id: BlockId) -> bool {
-    id != AIR && id != WATER
+    id != AIR && id != WATER && !is_plant(id)
 }
 
 /// Whether a block produces any geometry at all.
@@ -107,6 +138,10 @@ pub fn display_name(id: BlockId) -> &'static str {
         CRAFTING_TABLE => "Crafting Table",
         FURNACE => "Furnace",
         CHEST => "Chest",
+        POPPY => "Poppy",
+        DANDELION => "Dandelion",
+        TALL_GRASS => "Tall Grass",
+        CACTUS => "Cactus",
         _ => "Unknown",
     }
 }
@@ -158,6 +193,10 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         CRAFTING_TABLE => [0.50, 0.36, 0.22],
         FURNACE => [0.38, 0.38, 0.40],
         CHEST => [0.55, 0.42, 0.24],
+        POPPY => [0.80, 0.15, 0.12],
+        DANDELION => [0.90, 0.82, 0.20],
+        TALL_GRASS => [0.34, 0.55, 0.24],
+        CACTUS => [0.30, 0.52, 0.24],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -245,6 +284,10 @@ pub mod tile {
     pub const CRAFTING: u32 = 28;
     pub const FURNACE: u32 = 29;
     pub const CHEST: u32 = 30;
+    pub const POPPY: u32 = 31;
+    pub const DANDELION: u32 = 32;
+    pub const TALL_GRASS: u32 = 33;
+    pub const CACTUS: u32 = 34;
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 
@@ -305,6 +348,10 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         CRAFTING_TABLE => tile::CRAFTING,
         FURNACE => tile::FURNACE,
         CHEST => tile::CHEST,
+        POPPY => tile::POPPY,
+        DANDELION => tile::DANDELION,
+        TALL_GRASS => tile::TALL_GRASS,
+        CACTUS => tile::CACTUS,
         _ => tile::MAGENTA,
     }
 }

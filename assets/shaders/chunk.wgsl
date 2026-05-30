@@ -80,7 +80,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         tuv.y = tuv.y - camera.time.x * 0.10;
         tuv.x = tuv.x + sin(camera.time.x * 0.7 + in.world_pos.x) * 0.03;
     }
-    let albedo = sample_tile(in.tile, tuv);
+    let texel = sample_tile(in.tile, tuv);
+    // Alpha cutout for cross-billboard plants (atlas alpha 0 outside the plant shape).
+    if (texel.a < 0.5) {
+        discard;
+    }
+    let albedo = texel.rgb;
     let sun = normalize(camera.sun_dir.xyz);
     let ambient = camera.params.z;
     let sun_intensity = camera.params.w;
