@@ -165,6 +165,34 @@ impl Inventory {
         self.insert(ItemStack::new(item_of_block(b), 1)).is_none()
     }
 
+    /// Drop one of the selected stack (Q). Returns the block to spawn in the world, or None if the
+    /// slot is empty. Decrements the stack unless in creative.
+    pub fn drop_one_selected(&mut self) -> Option<BlockId> {
+        let stack = self.slots[self.selected]?;
+        if !self.creative {
+            let s = self.slots[self.selected].as_mut().unwrap();
+            s.count -= 1;
+            if s.count == 0 {
+                self.slots[self.selected] = None;
+            }
+        }
+        stack.block()
+    }
+
+    /// Empty every slot (and the cursor), returning the stacks — for the death drop.
+    pub fn drain_all(&mut self) -> Vec<ItemStack> {
+        let mut out = Vec::new();
+        for s in self.slots.iter_mut() {
+            if let Some(stack) = s.take() {
+                out.push(stack);
+            }
+        }
+        if let Some(h) = self.held.take() {
+            out.push(h);
+        }
+        out
+    }
+
     /// Standard inventory-screen click: left = pick up / drop whole stack / merge / swap; right =
     /// pick up half / drop one. Mutates `held` and the clicked `slot`.
     pub fn click_slot(&mut self, slot: usize, right: bool) {
@@ -212,5 +240,47 @@ impl Inventory {
     /// fit (the caller drops it as a world item rather than stranding it on the hidden cursor).
     pub fn return_held(&mut self) -> Option<ItemStack> {
         self.held.take().and_then(|h| self.insert(h))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block;
+
+    #[test]
+    fn drop_one_decrements_in_survival() {
+        let mut inv = Inventory::new(false);
+        inv.slots[0] = Some(ItemStack::new(item_of_block(block::STONE), 3));
+        assert_eq!(inv.drop_one_selected(), Some(block::STONE));
+        assert_eq!(inv.slots[0].unwrap().count, 2);
+        inv.slots[0] = Some(ItemStack::new(item_of_block(block::STONE), 1));
+        inv.drop_one_selected();
+        assert!(inv.slots[0].is_none());
+    }
+
+    #[test]
+    fn creative_drop_does_not_decrement() {
+        let mut inv = Inventory::new(true); // palette pre-loaded, count 1
+        let before = inv.slots[0].unwrap().count;
+        let _ = inv.drop_one_selected();
+        assert_eq!(inv.slots[0].unwrap().count, before);
+    }
+
+    #[test]
+    fn drain_all_empties_inventory() {
+        let mut inv = Inventory::new(false);
+        inv.slots[0] = Some(ItemStack::new(item_of_block(block::DIRT), 10));
+        inv.slots[20] = Some(ItemStack::new(item_of_block(block::WOOD), 5));
+        assert_eq!(inv.drain_all().len(), 2);
+        assert!(inv.slots.iter().all(|s| s.is_none()));
+    }
+
+    #[test]
+    fn block_drops_table() {
+        assert_eq!(block::drops(block::STONE), Some(block::COBBLESTONE));
+        assert_eq!(block::drops(block::GRASS), Some(block::DIRT));
+        assert_eq!(block::drops(block::LEAVES), None);
+        assert_eq!(block::drops(block::DIRT), Some(block::DIRT));
     }
 }

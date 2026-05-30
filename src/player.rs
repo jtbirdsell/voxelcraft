@@ -41,6 +41,7 @@ pub struct Input {
     pub pitch_delta: f32,
     pub break_pressed: bool,
     pub place_pressed: bool,
+    pub drop_pressed: bool,
 }
 
 impl Input {

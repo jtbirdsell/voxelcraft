@@ -249,6 +249,18 @@ pub fn blocks_skylight(id: BlockId) -> bool {
     is_opaque(id) && id != LEAVES
 }
 
+/// What a broken block yields as an item drop (None = nothing). Stone yields cobblestone, grass
+/// yields dirt, leaves drop nothing; most blocks drop themselves. (Tool gating arrives in M18.)
+pub fn drops(id: BlockId) -> Option<BlockId> {
+    match id {
+        AIR => None,
+        STONE => Some(COBBLESTONE),
+        GRASS => Some(DIRT),
+        LEAVES => None,
+        _ => Some(id),
+    }
+}
+
 /// Atlas tile ids (M13). Index = `row*ATLAS_COLS + col` into the procedural texture atlas. Kept
 /// beside `face_color`/`face_tile` so the painters (texture.rs) and the WGSL `tile_average()` stay
 /// in lockstep. The 0..63 space leaves ample room for the block expansion in M16.

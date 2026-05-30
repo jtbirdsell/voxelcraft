@@ -225,6 +225,7 @@ impl App {
             KeyCode::F3 if pressed && !repeat => {
                 state.debug_f3 = !state.debug_f3;
             }
+            KeyCode::KeyQ if pressed && !repeat => state.input.drop_pressed = true,
             KeyCode::Digit1 => maybe_select(state, pressed, 0),
             KeyCode::Digit2 => maybe_select(state, pressed, 1),
             KeyCode::Digit3 => maybe_select(state, pressed, 2),
@@ -262,6 +263,15 @@ impl App {
         // Survival: a hard fall or starvation can kill; respawn at spawn.
         if !state.player.flying && state.player.is_dead() {
             log::info!("You died — respawning at spawn.");
+            // Drop the whole inventory at the death site, then respawn empty.
+            let death_pos = state.player.position + Vec3::new(0.0, 1.0, 0.0);
+            for stack in state.inventory.drain_all() {
+                if let Some(b) = stack.block() {
+                    for _ in 0..stack.count {
+                        state.game.spawn_item(death_pos, b);
+                    }
+                }
+            }
             state.player.respawn();
             state.camera.position = state.player.eye();
         }
@@ -290,14 +300,17 @@ impl App {
             state.input.break_pressed = false;
             if let Some(hit) = &target {
                 let broken = state.game.block_at(hit.block);
-                if state
-                    .game
-                    .set_block(&state.gpu, &state.renderer, hit.block, block::AIR)
-                    && block::is_solid(broken)
+                if broken != block::AIR
+                    && state
+                        .game
+                        .set_block(&state.gpu, &state.renderer, hit.block, block::AIR)
+                    && !state.inventory.creative
                 {
-                    // Drop the broken block as a collectible item.
-                    let center = hit.block.as_vec3() + Vec3::splat(0.5);
-                    state.game.spawn_item(center, broken);
+                    // Drop the block's item (stone→cobblestone, grass→dirt, leaves→nothing, …).
+                    if let Some(drop) = block::drops(broken) {
+                        let center = hit.block.as_vec3() + Vec3::splat(0.5);
+                        state.game.spawn_item(center, drop);
+                    }
                 }
             }
         }
@@ -317,6 +330,15 @@ impl App {
                         state.game.add_fluid_source(place, id);
                     }
                 }
+            }
+        }
+
+        // Q: drop one of the selected item ahead of the camera.
+        if state.input.drop_pressed {
+            state.input.drop_pressed = false;
+            if let Some(b) = state.inventory.drop_one_selected() {
+                let pos = state.camera.position + state.camera.forward() * 1.2;
+                state.game.spawn_item(pos, b);
             }
         }
 
