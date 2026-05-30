@@ -28,12 +28,6 @@ pub fn is_fluid(id: BlockId) -> bool {
     id == WATER || id == LAVA
 }
 
-/// A fluid can flow into this cell (only empty air, so floods are monotonic and terminate).
-#[inline]
-pub fn is_replaceable(id: BlockId) -> bool {
-    id == AIR
-}
-
 /// A block fully hides the touching face of an adjacent opaque block.
 /// Water is non-opaque (translucent); leaves stay opaque (rendered as solid foliage).
 #[inline]

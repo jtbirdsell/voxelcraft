@@ -11,6 +11,7 @@ use glam::{IVec3, Vec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::block::{self, BlockId};
+use crate::entity::Entities;
 use crate::frustum::Frustum;
 use crate::gpu::Gpu;
 use crate::mesher::{self, MeshData};
@@ -59,6 +60,9 @@ pub struct Game {
     fluid: FxHashMap<IVec3, (BlockId, u8)>,
     fluid_frontier: VecDeque<IVec3>,
     fluid_timer: f32,
+
+    /// Mobs and dropped items.
+    entities: Entities,
 }
 
 impl Game {
@@ -116,6 +120,7 @@ impl Game {
             fluid: FxHashMap::default(),
             fluid_frontier: VecDeque::new(),
             fluid_timer: 0.0,
+            entities: Entities::new(),
         }
     }
 
@@ -285,6 +290,24 @@ impl Game {
             }
         }
 
+        // Update mobs and dropped items (AI + physics). The collision closure borrows only the
+        // chunk map, leaving `self.entities` free to mutate.
+        let chunks = &self.world.chunks;
+        self.entities.update(dt, camera_pos, |wp| {
+            let cpos = world::chunk_of(wp);
+            match chunks.get(&cpos) {
+                Some(c) => {
+                    let o = world::chunk_origin(cpos);
+                    block::is_solid(c.get(
+                        (wp.x - o.x) as usize,
+                        (wp.y - o.y) as usize,
+                        (wp.z - o.z) as usize,
+                    ))
+                }
+                None => false,
+            }
+        });
+
         // Feed the GPU voxel volume (ray-traced lighting) around the player.
         self.volume.update(gpu, &self.world, self.center);
     }
@@ -434,15 +457,6 @@ impl Game {
         self.fluid_frontier.push_back(pos);
     }
 
-    /// Run the fluid sim to (near) a resting state — used for headless screenshots.
-    pub fn settle_fluids(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, max_steps: usize) {
-        for _ in 0..max_steps {
-            if !self.step_fluids(gpu, renderer) {
-                break;
-            }
-        }
-    }
-
     /// True if `p` is in a loaded chunk and currently empty air (so a fluid may flow into it).
     fn is_air_loaded(&self, p: IVec3) -> bool {
         let cpos = world::chunk_of(p);
@@ -571,6 +585,48 @@ impl Game {
             }
         }
     }
+
+    pub fn spawn_mob(&mut self, pos: Vec3) {
+        self.entities.spawn_mob(pos);
+    }
+
+    pub fn spawn_item(&mut self, pos: Vec3, block: BlockId) {
+        self.entities.spawn_item(pos, block);
+    }
+
+    pub fn entity_count(&self) -> usize {
+        self.entities.count()
+    }
+
+    /// Build one GPU mesh for all entities this frame (mobs + items), lit by the chunk pass.
+    pub fn build_entity_mesh(&self, gpu: &Gpu, renderer: &ChunkRenderer) -> Option<GpuMesh> {
+        let data = self.entities.build_mesh();
+        if data.is_empty() {
+            None
+        } else {
+            Some(renderer.upload_mesh(gpu, &data))
+        }
+    }
+
+    /// Settle spawned entities onto the ground with pure physics (headless screenshots).
+    pub fn settle_entities(&mut self, steps: usize) {
+        let chunks = &self.world.chunks;
+        self.entities.settle(steps, |wp| {
+            let cpos = world::chunk_of(wp);
+            match chunks.get(&cpos) {
+                Some(c) => {
+                    let o = world::chunk_origin(cpos);
+                    block::is_solid(c.get(
+                        (wp.x - o.x) as usize,
+                        (wp.y - o.y) as usize,
+                        (wp.z - o.z) as usize,
+                    ))
+                }
+                None => false,
+            }
+        });
+    }
+
 
     pub fn seed(&self) -> u64 {
         self.seed

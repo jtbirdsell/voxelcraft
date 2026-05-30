@@ -9,6 +9,7 @@
 mod block;
 mod camera;
 mod capture;
+mod entity;
 mod environment;
 mod frustum;
 mod game;
@@ -195,9 +196,16 @@ impl App {
         if state.input.break_pressed {
             state.input.break_pressed = false;
             if let Some(hit) = &target {
-                state
+                let broken = state.game.block_at(hit.block);
+                if state
                     .game
-                    .set_block(&state.gpu, &state.renderer, hit.block, block::AIR);
+                    .set_block(&state.gpu, &state.renderer, hit.block, block::AIR)
+                    && block::is_solid(broken)
+                {
+                    // Drop the broken block as a collectible item.
+                    let center = hit.block.as_vec3() + Vec3::splat(0.5);
+                    state.game.spawn_item(center, broken);
+                }
             }
         }
         if state.input.place_pressed {
@@ -226,7 +234,11 @@ impl App {
         state.renderer.set_sky(state.environment.wgpu_clear());
 
         let frustum = Frustum::from_view_proj(state.camera.view_proj(aspect));
-        let visible = state.game.visible_meshes(&frustum);
+        let entity_mesh = state.game.build_entity_mesh(&state.gpu, &state.renderer);
+        let mut visible = state.game.visible_meshes(&frustum);
+        if let Some(em) = &entity_mesh {
+            visible.push(em);
+        }
         let highlight = target.as_ref().map(|h| h.block);
         let ui = overlay::build_ui(
             state.gpu.config.width,
@@ -246,11 +258,12 @@ impl App {
         state.fps_frames += 1;
         if state.fps_accum >= 2.0 {
             log::info!(
-                "{:.0} fps | {} chunks | {} meshes | {} drawn | {}",
+                "{:.0} fps | {} chunks | {} meshes | {} drawn | {} entities | {}",
                 state.fps_frames as f32 / state.fps_accum,
                 state.game.loaded_chunk_count(),
                 state.game.mesh_count(),
                 visible.len(),
+                state.game.entity_count(),
                 if state.player.flying { "fly" } else { "walk" }
             );
             state.fps_accum = 0.0;
@@ -290,18 +303,34 @@ impl ApplicationHandler for App {
             );
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
             game.set_rtx_quality(64);
-            // Afternoon light over a natural, RTX-lit vista; this milestone's subject is the
-            // survival HUD (health/hunger bars) overlaid on a normal gameplay view, so there are no
-            // built structures — just the generated world seen from a scenic overlook.
+            // A daytime grass field of mobs and dropped items, floating clear above the terrain so
+            // the entities frame cleanly. Stacks M7/M8/M10 (GI-lit, shadowed entities + survival
+            // HUD) with M11 (the entities themselves).
             let environment = Environment::new(0.30);
-            let player = Player::new(Vec3::new(8.0, 96.0, 24.0), false);
-            let camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
+            let player = Player::new(Vec3::new(40.0, 100.98, 22.0), false);
+            let camera = Camera::new(player.eye(), std::f32::consts::PI, -0.12);
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);
+
+            // Floating grass platform for the entities to stand on.
+            for z in 6..=38 {
+                for x in 4..=40 {
+                    game.set_block(&gpu, &renderer, IVec3::new(x, 100, z), block::GRASS);
+                }
+            }
+            // A herd of mobs and a few dropped-item cubes near the camera; spawned above the
+            // platform and settled onto it.
+            for &(mx, mz) in &[(25, 16), (30, 24), (34, 14), (27, 29), (36, 20), (32, 30), (23, 23)] {
+                game.spawn_mob(Vec3::new(mx as f32 + 0.5, 103.0, mz as f32 + 0.5));
+            }
+            for &(ix, iz, b) in &[(33, 23, block::WOOD), (29, 19, block::STONE), (35, 27, block::COAL_ORE)] {
+                game.spawn_item(Vec3::new(ix as f32 + 0.5, 103.0, iz as f32 + 0.5), b);
+            }
+            game.settle_entities(150);
             let highlight: Option<IVec3> = None;
 
-            // Populate the voxel volume so shadows / AO / GI trace against the terrain.
+            // Populate the voxel volume so shadows / AO / GI trace against the platform.
             game.prime_volume(&gpu, player.position);
 
             camera_uniform.update(&camera, gpu.aspect());
@@ -310,7 +339,11 @@ impl ApplicationHandler for App {
             renderer.update_camera(&gpu, &camera_uniform);
 
             let frustum = Frustum::from_view_proj(camera.view_proj(gpu.aspect()));
-            let visible = game.visible_meshes(&frustum);
+            let entity_mesh = game.build_entity_mesh(&gpu, &renderer);
+            let mut visible = game.visible_meshes(&frustum);
+            if let Some(em) = &entity_mesh {
+                visible.push(em);
+            }
             let volume_bg = game.volume_bind_group();
             // Partially-depleted bars so the survival HUD is clearly exercised.
             let ui = overlay::build_ui(
@@ -357,7 +390,11 @@ impl ApplicationHandler for App {
             ),
         };
         let saved = persistence::load_chunks(&dir);
-        let game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
+        let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
+        // A few mobs near spawn; they fall onto terrain as it streams in.
+        for (dx, dz) in [(-3, -5), (3, -6), (6, 2), (-5, 3), (1, 7), (7, -2)] {
+            game.spawn_mob(Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32));
+        }
         let environment = Environment::new(time);
         let player = Player::new(spawn, flying);
         let camera = Camera::new(player.eye(), yaw, pitch);
