@@ -92,6 +92,9 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.
 - **Experience**: mining ores (coal/redstone/lapis/diamond) drops glowing **XP orbs** that home in and
   grant points; an XP bar + level counter on the HUD.
+- **Armor**: 4 equip slots (helmet/chestplate/leggings/boots) × leather/iron/gold/diamond, drag-to-equip
+  in the inventory (each slot only accepts its piece). Equipped defense points reduce incoming damage
+  (~4%/point, capped at 80%) for fall/lava/mob hits; a steel armor bar shows on the HUD.
 - **Mobs + item drops**: AABB entities that wander and drop collectible items, lit by the same
   ray-traced pipeline as the world.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
@@ -145,9 +148,9 @@ verify each change without a human in the loop. Companion debug knobs: `VOXELCRA
 ## Roadmap
 
 Done: the full engine, world generation, lighting, rendering, the block/item library, inventory,
-**progressive mining, tools + durability, crafting, furnace smelting, and survival depth** (swimming/
-air, lava damage, sneak, XP & levels). Next up: armor, then persistence consolidation; then typed mobs
-+ combat, structures (dungeons/villages), an RTX temporal denoiser, particles + audio, redstone, and
+**progressive mining, tools + durability, crafting, furnace smelting, survival depth** (swimming/air,
+lava damage, sneak, XP & levels), **and armor**. Next up: persistence consolidation; then typed mobs +
+combat, structures (dungeons/villages), an RTX temporal denoiser, particles + audio, redstone, and
 additional dimensions.
 
 ## License

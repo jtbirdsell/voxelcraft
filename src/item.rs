@@ -62,6 +62,65 @@ fn material_name(item: ItemId) -> &'static str {
     }
 }
 
+/// Armor (non-stacking wearables) occupy `[ARMOR_BASE, ARMOR_BASE+16)`, laid out as
+/// `ARMOR_BASE + tier*4 + piece` — piece 0 Helmet, 1 Chestplate, 2 Leggings, 3 Boots; tiers
+/// 0 Leather, 1 Iron, 2 Gold, 3 Diamond.
+pub const ARMOR_BASE: ItemId = 768;
+
+/// Armor id from a tier (0 Leather, 1 Iron, 2 Gold, 3 Diamond) and piece (0 Helmet … 3 Boots).
+/// Named per-piece consts are added when armor crafting recipes land (a later milestone).
+#[inline]
+pub const fn armor_id(tier: u16, piece: u16) -> ItemId {
+    ARMOR_BASE + tier * 4 + piece
+}
+
+#[inline]
+pub fn is_armor(item: ItemId) -> bool {
+    (ARMOR_BASE..ARMOR_BASE + 16).contains(&item)
+}
+
+/// Inventory armor slot (36..40) a piece equips into: helmet→36, chest→37, legs→38, boots→39.
+#[inline]
+pub fn armor_slot(item: ItemId) -> usize {
+    HOTBAR + MAIN + ((item - ARMOR_BASE) % 4) as usize
+}
+
+/// Defense points for one piece (Minecraft values), indexed [tier][piece].
+pub fn armor_points(item: ItemId) -> u32 {
+    const PTS: [[u32; 4]; 4] = [
+        [1, 3, 2, 1], // leather
+        [2, 6, 5, 2], // iron
+        [2, 5, 3, 1], // gold
+        [3, 8, 6, 3], // diamond
+    ];
+    if !is_armor(item) {
+        return 0;
+    }
+    let tier = ((item - ARMOR_BASE) / 4) as usize;
+    let piece = ((item - ARMOR_BASE) % 4) as usize;
+    PTS[tier][piece]
+}
+
+static ARMOR_NAMES: [&str; 16] = [
+    "Leather Helmet", "Leather Chestplate", "Leather Leggings", "Leather Boots",
+    "Iron Helmet", "Iron Chestplate", "Iron Leggings", "Iron Boots",
+    "Golden Helmet", "Golden Chestplate", "Golden Leggings", "Golden Boots",
+    "Diamond Helmet", "Diamond Chestplate", "Diamond Leggings", "Diamond Boots",
+];
+
+fn armor_name(item: ItemId) -> &'static str {
+    ARMOR_NAMES[(item - ARMOR_BASE) as usize]
+}
+
+fn armor_color(item: ItemId) -> [f32; 3] {
+    match (item - ARMOR_BASE) / 4 {
+        0 => [0.55, 0.36, 0.22], // leather
+        1 => [0.80, 0.78, 0.74], // iron
+        2 => [0.95, 0.80, 0.22], // gold
+        _ => [0.40, 0.85, 0.85], // diamond
+    }
+}
+
 #[inline]
 pub fn is_tool(item: ItemId) -> bool {
     (TOOL_BASE..TOOL_BASE + 25).contains(&item)
@@ -153,10 +212,10 @@ pub fn item_of_block(b: BlockId) -> ItemId {
     b
 }
 
-/// Max stack size: tools don't stack.
+/// Max stack size: tools and armor don't stack.
 #[inline]
 pub fn max_stack(item: ItemId) -> u8 {
-    if is_tool(item) {
+    if is_tool(item) || is_armor(item) {
         1
     } else {
         64
@@ -170,6 +229,9 @@ pub fn item_name(item: ItemId) -> &'static str {
     }
     if is_material(item) {
         return material_name(item);
+    }
+    if is_armor(item) {
+        return armor_name(item);
     }
     if !is_tool(item) {
         return "Unknown";
@@ -211,6 +273,7 @@ pub fn item_emission(item: ItemId) -> f32 {
 /// the block bound tracks `block::MAX_BLOCK` so it stays in sync as new blocks are added.
 pub fn is_known(item: ItemId) -> bool {
     is_tool(item)
+        || is_armor(item)
         || matches!(item, STICK | IRON_INGOT | GOLD_INGOT)
         || (item != block::AIR && item <= block::MAX_BLOCK)
 }
@@ -226,6 +289,9 @@ pub fn item_color(item: ItemId) -> [f32; 3] {
             GOLD_INGOT => [0.95, 0.80, 0.22],
             _ => [0.55, 0.40, 0.22], // stick / generic wooden
         };
+    }
+    if is_armor(item) {
+        return armor_color(item);
     }
     if is_tool(item) {
         return match tool_tier(item) {
@@ -368,6 +434,10 @@ impl Inventory {
             {
                 slots[HOTBAR + 5 + i] = Some(ItemStack::new(item_of_block(b), 64));
             }
+            // A diamond armor set equipped in the 4 armor slots.
+            for piece in 0..4u16 {
+                slots[HOTBAR + MAIN + piece as usize] = Some(ItemStack::new(armor_id(3, piece), 1));
+            }
         }
         Self {
             slots,
@@ -387,6 +457,15 @@ impl Inventory {
     /// The item id in the selected hotbar slot (AIR if empty).
     pub fn selected_item(&self) -> ItemId {
         self.slots[self.selected].map(|s| s.item).unwrap_or(block::AIR)
+    }
+
+    /// Total defense points from the 4 equipped armor pieces (slots `[36,40)`).
+    pub fn equipped_armor(&self) -> u32 {
+        self.slots[HOTBAR + MAIN..]
+            .iter()
+            .flatten()
+            .map(|s| armor_points(s.item))
+            .sum()
     }
 
     /// Damage the selected tool by `amount` on use; remove it if it breaks. No-op for non-tools.
@@ -556,6 +635,23 @@ mod tests {
     fn unknown_material_ids_rejected() {
         assert!(is_known(STICK) && is_known(IRON_INGOT) && is_known(GOLD_INGOT));
         assert!(!is_known(MATERIAL_BASE + 5), "undefined material id should be rejected");
+    }
+
+    #[test]
+    fn armor_defense_and_slots() {
+        // Slot mapping: helmet→36, boots→39.
+        assert_eq!(armor_slot(armor_id(0, 0)), HOTBAR + MAIN);
+        assert_eq!(armor_slot(armor_id(3, 3)), HOTBAR + MAIN + 3);
+        // Minecraft defense values.
+        assert_eq!(armor_points(armor_id(3, 1)), 8); // diamond chestplate
+        assert_eq!(armor_points(armor_id(0, 3)), 1); // leather boots
+        assert_eq!(armor_points(STICK), 0); // non-armor has no defense
+        // Armor doesn't stack, and is a known/valid item.
+        assert_eq!(max_stack(armor_id(1, 0)), 1);
+        assert!(is_armor(armor_id(2, 2)) && is_known(armor_id(2, 2)));
+        // A full diamond set sums to 20 points (the reduction cap).
+        let total: u32 = (0..4).map(|p| armor_points(armor_id(3, p))).sum();
+        assert_eq!(total, 20);
     }
 
     #[test]

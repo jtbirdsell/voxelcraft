@@ -230,6 +230,23 @@ impl App {
             }
             return;
         }
+        // Equipped-armor slots: only the matching piece may be placed; taking a piece out is allowed.
+        for (slot_i, x, y) in overlay::armor_slot_rects(w, h) {
+            if hit(x, y) {
+                let allowed = match state.inventory.held {
+                    None => true,
+                    Some(h) => item::is_armor(h.item) && item::armor_slot(h.item) == slot_i,
+                };
+                if allowed {
+                    let mut held = state.inventory.held;
+                    let mut s = state.inventory.slots[slot_i];
+                    item::slot_click(&mut held, &mut s, right);
+                    state.inventory.held = held;
+                    state.inventory.slots[slot_i] = s;
+                }
+                return;
+            }
+        }
         let size = state.screen.craft_size();
         for (cell, x, y) in overlay::craft_cell_rects(w, h, size) {
             if hit(x, y) {
@@ -321,6 +338,7 @@ impl App {
 
         // Player physics (disjoint field borrows: player mut, game/input shared).
         let yaw = state.camera.yaw;
+        let armor = state.inventory.equipped_armor();
         let game_ref = &state.game;
         state.player.update(
             dt,
@@ -328,6 +346,7 @@ impl App {
             &state.input,
             |p| game_ref.is_solid_at(p),
             |p| game_ref.block_at(p),
+            armor,
         );
         state.camera.position = state.player.eye();
 
@@ -532,6 +551,7 @@ impl App {
             state.player.health,
             state.player.hunger,
             !state.player.flying,
+            state.inventory.equipped_armor(),
             state.player.air_fraction(),
             state.player.submerged,
             state.player.level,
@@ -857,6 +877,7 @@ impl ApplicationHandler for App {
                 20.0,
                 if survival_demo { 14.0 } else { 20.0 },
                 survival_demo,
+                if survival_demo { shot_inv.equipped_armor() } else { 0 },
                 if survival_demo { 0.45 } else { 1.0 },
                 survival_demo,
                 if survival_demo { 7 } else { 0 },

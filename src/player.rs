@@ -92,6 +92,8 @@ pub struct Player {
     /// Experience: total points toward the next level, plus the current level.
     pub xp: f32,
     pub level: u32,
+    /// Total equipped-armor defense points, refreshed from the inventory each frame.
+    armor_points: u32,
     drown_timer: f32,
     /// Highest y reached since last touching ground, for fall-damage distance.
     air_max_y: f32,
@@ -131,10 +133,18 @@ impl Player {
             saturation: MAX_SATURATION,
             xp: 0.0,
             level: 0,
+            armor_points: 0,
             drown_timer: 0.0,
             air_max_y: position.y,
             respawn_point: position,
         }
+    }
+
+    /// Apply incoming damage, reduced by `armor` defense points (Minecraft-style: each point blocks
+    /// 4%, capped at 80%). Environmental sources that ignore armor pass `armor = 0`.
+    fn apply_damage(&mut self, raw: f32, armor: u32) {
+        let reduction = (armor as f32 * 0.04).min(0.8);
+        self.health = (self.health - raw * (1.0 - reduction)).max(0.0);
     }
 
     /// Award experience points, rolling over into levels.
@@ -198,7 +208,7 @@ impl Player {
                 self.hunger = (self.hunger - REGEN_COST * dt).max(0.0);
             }
         } else if self.hunger <= 0.0 {
-            self.health = (self.health - STARVE_RATE * dt).max(0.0);
+            self.apply_damage(STARVE_RATE * dt, 0); // starvation ignores armor
         }
     }
 
@@ -212,7 +222,7 @@ impl Player {
                 self.air = 0.0;
                 self.drown_timer += dt;
                 if self.drown_timer >= 1.0 {
-                    self.health = (self.health - DROWN_DPS).max(0.0);
+                    self.apply_damage(DROWN_DPS, 0); // drowning ignores armor
                     self.drown_timer -= 1.0; // keep the cadence exact; don't discard the overshoot
                 }
             }
@@ -221,7 +231,7 @@ impl Player {
             self.drown_timer = 0.0;
         }
         if in_lava {
-            self.health = (self.health - LAVA_DPS * dt).max(0.0);
+            self.apply_damage(LAVA_DPS * dt, self.armor_points);
         }
         in_lava || (submerged && self.air <= 0.0)
     }
@@ -309,7 +319,9 @@ impl Player {
         input: &Input,
         is_solid: impl Fn(IVec3) -> bool,
         block_at: impl Fn(IVec3) -> BlockId,
+        armor_points: u32,
     ) {
+        self.armor_points = armor_points;
         let (sy, cy) = yaw.sin_cos();
         let fwd = Vec3::new(cy, 0.0, sy);
         let right = Vec3::new(-sy, 0.0, cy);
@@ -405,7 +417,7 @@ impl Player {
             if landed && !self.on_ground && !in_water {
                 let fall = (self.air_max_y - self.position.y).max(0.0);
                 let dmg = (fall - SAFE_FALL).max(0.0);
-                self.health = (self.health - dmg).max(0.0);
+                self.apply_damage(dmg, self.armor_points);
             }
             self.on_ground = landed;
             if self.on_ground || in_water {
@@ -481,7 +493,7 @@ mod tests {
         let mut player = Player::new(Vec3::new(0.5, 20.0, 0.5), false);
         let input = Input::default();
         for _ in 0..600 {
-            player.update(1.0 / 60.0, 0.0, &input, is_solid, ALL_AIR);
+            player.update(1.0 / 60.0, 0.0, &input, is_solid, ALL_AIR, 0);
         }
         assert!(player.on_ground, "player should be grounded");
         // Feet rest on the top face of the floor (y = 10).
@@ -500,7 +512,7 @@ mod tests {
         let mut input = Input::default();
         input.forward = true; // yaw 0 -> forward is +x
         for _ in 0..600 {
-            player.update(1.0 / 60.0, 0.0, &input, is_solid, ALL_AIR);
+            player.update(1.0 / 60.0, 0.0, &input, is_solid, ALL_AIR, 0);
         }
         // AABB half-width is 0.3, wall face at x = 5, so max feet x = 4.7.
         assert!(player.position.x <= 4.71, "x = {}", player.position.x);
@@ -514,14 +526,14 @@ mod tests {
         let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
         // Fully submerged: air should fall below full.
         for _ in 0..120 {
-            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, water);
+            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, water, 0);
         }
         assert!(p.submerged, "eye should read as underwater");
         assert!(p.air < MAX_AIR, "air should drain underwater (air = {})", p.air);
         let low = p.air;
         // Back in open air: it refills.
         for _ in 0..120 {
-            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, ALL_AIR);
+            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, ALL_AIR, 0);
         }
         assert!(!p.submerged);
         assert!(p.air > low, "air should refill out of water");
@@ -533,7 +545,7 @@ mod tests {
         let water = |_: IVec3| block::WATER;
         let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
         for _ in 0..1200 {
-            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, water);
+            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, water, 0);
         }
         assert_eq!(p.air, 0.0);
         assert!(p.health < MAX_HEALTH, "drowning should hurt (hp = {})", p.health);
@@ -559,9 +571,19 @@ mod tests {
         let mut input = Input::default();
         input.forward = true;
         for _ in 0..120 {
-            p.update(1.0 / 60.0, 0.0, &input, solid, ALL_AIR);
+            p.update(1.0 / 60.0, 0.0, &input, solid, ALL_AIR, 0);
         }
         // While saturation lasts, hunger is untouched.
         assert_eq!(p.hunger, full_hunger, "hunger should hold while saturation remains");
+    }
+
+    #[test]
+    fn armor_reduces_damage() {
+        let mut bare = Player::new(Vec3::ZERO, true);
+        let mut armored = Player::new(Vec3::ZERO, true);
+        bare.apply_damage(10.0, 0);
+        armored.apply_damage(10.0, 20); // a full diamond set = 20 points = 80% reduction (the cap)
+        assert!((bare.health - 10.0).abs() < 1e-3, "bare took full 10 (hp = {})", bare.health);
+        assert!((armored.health - 18.0).abs() < 1e-3, "armor cut 10 -> 2 (hp = {})", armored.health);
     }
 }

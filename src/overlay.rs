@@ -289,6 +289,22 @@ pub fn build_inventory_screen(
     let result = crafting::match_grid(&grid_ids).map(|(it, n)| item::ItemStack::new(it, n));
     slot_item(&mut v, sw, sh, out_x, out_y, result);
 
+    // Equipped-armor column (helmet→boots) on its own backing panel, left of the main grid.
+    let armor = armor_slot_rects(width, height);
+    let (ax, ay) = (armor[0].1, armor[0].2);
+    push_px_rect(&mut v, sw, sh, ax - 6.0, ay - 6.0, INV_SLOT + 12.0, 4.0 * step - 4.0 + 12.0, [0.12, 0.12, 0.14, 0.97]);
+    for &(slot_i, x, y) in &armor {
+        let hover = cursor.0 >= x && cursor.0 < x + INV_SLOT && cursor.1 >= y && cursor.1 < y + INV_SLOT;
+        if hover {
+            hovered = Some(slot_i);
+        }
+        let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.22, 0.22, 0.27, 1.0] };
+        push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
+        if let Some(stack) = inv.slots[slot_i] {
+            draw_stack(&mut v, sw, sh, x, y, stack);
+        }
+    }
+
     // Held stack follows the cursor.
     if let Some(held) = inv.held {
         let c = item::item_color(held.item);
@@ -337,6 +353,15 @@ pub fn furnace_slot_rects(width: u32, height: u32) -> [(FurnaceSlot, f32, f32); 
         (FurnaceSlot::Fuel, left_x, top_y + INV_SLOT + gap),
         (FurnaceSlot::Output, out_x, out_y),
     ]
+}
+
+/// The 4 equipped-armor slots (helmet→boots), a vertical column just left of the main grid.
+pub fn armor_slot_rects(width: u32, height: u32) -> [(usize, f32, f32); 4] {
+    let step = INV_SLOT + 4.0;
+    let inv = inventory_slot_rects(width, height);
+    let (minx, miny) = (inv[0].1, inv[0].2);
+    let x = minx - step - 10.0;
+    std::array::from_fn(|i| (item::HOTBAR + item::MAIN + i, x, miny + i as f32 * step))
 }
 
 /// Draw a stack's swatch + count + durability inside a slot (the slot background is drawn already).
@@ -516,6 +541,7 @@ pub fn build_ui(
     health: f32,
     hunger: f32,
     survival: bool,
+    armor: u32,
     air: f32,
     submerged: bool,
     level: u32,
@@ -598,6 +624,11 @@ pub fn build_ui(
         if submerged || air < 0.999 {
             let air_y = bars_y - 20.0;
             stat_bar(&mut v, sw, sh, hunger_x, air_y, pip, gap, pips, air * 20.0, [0.35, 0.75, 0.95, 1.0]);
+        }
+        // Armor pips (steel) sit over the health bar when any armor is equipped.
+        if armor > 0 {
+            let armor_y = bars_y - 20.0;
+            stat_bar(&mut v, sw, sh, health_x, armor_y, pip, gap, pips, armor as f32, [0.72, 0.74, 0.80, 1.0]);
         }
     }
 
