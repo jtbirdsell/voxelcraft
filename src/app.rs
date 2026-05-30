@@ -949,6 +949,28 @@ impl ApplicationHandler for App {
                 game.flash_mobs(0.45);
             }
 
+            // Debug: VOXELCRAFT_EXPLODE=1 builds a stone platform, detonates a creeper-sized blast in
+            // its top, and spawns a couple of arrows (M30 verification; pair with VOXELCRAFT_CAM).
+            if std::env::var("VOXELCRAFT_EXPLODE").is_ok() {
+                for x in 6..=14 {
+                    for y in 78..=82 {
+                        for z in 20..=28 {
+                            game.set_block(&gpu, &renderer, IVec3::new(x, y, z), block::STONE);
+                        }
+                    }
+                }
+                game.spawn_arrow(Vec3::new(7.0, 83.5, 24.0), Vec3::new(7.0, 0.5, 0.0));
+                game.spawn_arrow(Vec3::new(7.0, 84.0, 25.0), Vec3::new(7.0, 0.2, 0.0));
+                let dmg = game.debug_explode(
+                    &gpu,
+                    &renderer,
+                    Vec3::new(10.0, 82.5, 24.0),
+                    3.0,
+                    player.position,
+                );
+                log::info!("M30 explosion: radial player damage {dmg:.1}");
+            }
+
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.
             game.prime_volume(&gpu, player.position);
 

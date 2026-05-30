@@ -31,6 +31,18 @@ const FLUID_BUDGET: usize = 96;
 const WATER_SPREAD: u8 = 7;
 const LAVA_SPREAD: u8 = 3;
 
+/// Creeper blast damage at distance `d` from the center: max at the center, linear falloff to 0 at
+/// `radius * 1.6`.
+fn explosion_damage(d: f32, radius: f32) -> f32 {
+    const MAX: f32 = 12.0;
+    let reach = radius * 1.6;
+    if d >= reach {
+        0.0
+    } else {
+        MAX * (1.0 - d / reach)
+    }
+}
+
 /// One furnace's contents + burn state (M21). Lives in `Game::furnaces`, keyed by block position;
 /// the `step_furnaces` tick consumes fuel to smelt `input` into `output`. Persistence: deferred to
 /// M24 (save consolidation) — furnace contents are in-memory only for now.
@@ -427,10 +439,60 @@ impl Game {
             }
         });
 
+        // Apply any creeper explosions: carve the crater, then add radial blast damage to the player.
+        let mut collected = collected;
+        for (center, radius) in std::mem::take(&mut collected.explosions) {
+            collected.player_damage += self.apply_explosion(gpu, renderer, center, radius, camera_pos);
+        }
+
         // Feed the GPU voxel volume (ray-traced lighting) around the player.
         self.volume.update(gpu, &self.world, self.center);
 
         collected
+    }
+
+    /// Carve a spherical crater of AIR (skipping bedrock) and return the radial blast damage the
+    /// player at `player_pos` should take (falls off to 0 at ~1.6x the radius).
+    fn apply_explosion(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        center: Vec3,
+        radius: f32,
+        player_pos: Vec3,
+    ) -> f32 {
+        let r = radius.ceil() as i32;
+        let c = IVec3::new(
+            center.x.floor() as i32,
+            center.y.floor() as i32,
+            center.z.floor() as i32,
+        );
+        for dx in -r..=r {
+            for dy in -r..=r {
+                for dz in -r..=r {
+                    let p = c + IVec3::new(dx, dy, dz);
+                    if (p.as_vec3() + Vec3::splat(0.5) - center).length() <= radius {
+                        let id = self.block_at(p);
+                        if id != block::AIR && id != block::BEDROCK {
+                            self.set_block(gpu, renderer, p, block::AIR);
+                        }
+                    }
+                }
+            }
+        }
+        explosion_damage((player_pos - center).length(), radius)
+    }
+
+    /// Debug: detonate at `center` (headless explosion verification).
+    pub fn debug_explode(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        center: Vec3,
+        radius: f32,
+        player_pos: Vec3,
+    ) -> f32 {
+        self.apply_explosion(gpu, renderer, center, radius, player_pos)
     }
 
     /// Fully generate and mesh the current radius synchronously (used for headless screenshots).
@@ -731,6 +793,10 @@ impl Game {
         self.entities.spawn_xp(pos, amount);
     }
 
+    pub fn spawn_arrow(&mut self, pos: Vec3, vel: Vec3) {
+        self.entities.spawn_arrow(pos, vel);
+    }
+
     /// Furnace state at `pos`, creating an empty one (the player just opened it).
     pub fn furnace_mut(&mut self, pos: IVec3) -> &mut FurnaceState {
         self.furnaces.entry(pos).or_default()
@@ -929,6 +995,13 @@ mod furnace_tests {
         step_furnace(&mut f, 0.1);
         assert!(f.output.is_none(), "swapped input must not smelt instantly");
         assert!(f.cook_progress < 0.5, "progress should reset on input swap");
+    }
+
+    #[test]
+    fn explosion_damage_falls_off() {
+        assert!(explosion_damage(0.0, 3.0) > 0.0);
+        assert!(explosion_damage(0.0, 3.0) > explosion_damage(3.0, 3.0));
+        assert_eq!(explosion_damage(10.0, 3.0), 0.0); // beyond reach (1.6 * 3 = 4.8)
     }
 
     /// No fuel → nothing smelts, and the input is untouched.

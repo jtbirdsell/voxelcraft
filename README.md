@@ -111,6 +111,10 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
 - **Combat**: left-click melees the nearest mob in your reach (ray-vs-AABB beats mining when a mob is
   closer than the block) — damage scaled by your weapon, **knockback**, a red **hurt-flash**, and an
   XP drop on kill; hostile mobs in range hit **back** for contact damage, reduced by your armor.
+- **Ranged + explosions**: **skeletons** loose arrows at you when they have a clear shot (gravity-arced
+  projectiles that stick in blocks or deal damage on a hit); **creepers** prime a fuse in your face and
+  **detonate** — a spherical crater blown out of the world plus radial blast damage that falls off with
+  distance (and is reduced by armor).
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
 
 Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;

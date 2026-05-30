@@ -31,6 +31,14 @@ const CHASE_SPEED: f32 = 3.2;
 const FLEE_SPEED: f32 = 3.6;
 const KNOCKBACK: f32 = 6.0; // horizontal impulse imparted by a melee hit
 const MOB_ATTACK_COOLDOWN: f32 = 1.0; // seconds between a hostile mob's contact hits
+// Projectiles + explosions (M30).
+const ARROW_DAMAGE: f32 = 3.0;
+const ARROW_SPEED: f32 = 22.0;
+const ARROW_GRAVITY: f32 = 7.0;
+const ARROW_LIFETIME: f32 = 4.0;
+const SKELETON_SHOOT_CD: f32 = 1.6;
+const CREEPER_FUSE: f32 = 1.5;
+const CREEPER_RADIUS: f32 = 3.0;
 
 #[inline]
 fn comp(v: Vec3, axis: usize) -> f32 {
@@ -247,8 +255,10 @@ struct MobData {
     health: f32,
     hurt: f32,
     ai: Ai,
-    /// Cooldown between contact attacks on the player (seconds).
+    /// Cooldown between contact attacks / arrow shots (seconds).
     atk_cd: f32,
+    /// Creeper detonation fuse: <0 = unprimed, else seconds left before it explodes.
+    fuse: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -257,15 +267,19 @@ enum Kind {
     Item(ItemStack),
     /// An experience orb worth `n` points; homes toward a nearby player and grants XP on pickup.
     Xp(u32),
+    /// A skeleton arrow carrying `damage`; flies until it hits a block, the player, or expires.
+    Arrow(f32),
 }
 
-/// What the entity tick produced this frame: item stacks + XP the player swept up, and contact
-/// damage hostile mobs dealt to the player (applied through armor by the caller).
+/// What the entity tick produced this frame: item stacks + XP the player swept up, contact/projectile
+/// damage dealt to the player (applied through armor by the caller), and any creeper explosions
+/// `(center, radius)` for `game` to carve into the world + apply radial damage.
 #[derive(Default)]
 pub struct Collected {
     pub items: Vec<ItemStack>,
     pub xp: u32,
     pub player_damage: f32,
+    pub explosions: Vec<(Vec3, f32)>,
 }
 
 struct Entity {
@@ -393,6 +407,7 @@ impl Entities {
                 hurt: 0.0,
                 ai: Ai::Wander,
                 atk_cd: 0.0,
+                fuse: -1.0,
             }),
             pos,
             vel: Vec3::ZERO,
@@ -444,11 +459,28 @@ impl Entities {
         });
     }
 
+    /// Spawn an arrow at `pos` with velocity `vel` (oriented along its flight).
+    pub fn spawn_arrow(&mut self, pos: Vec3, vel: Vec3) {
+        let rng = self.next_seed();
+        self.list.push(Entity {
+            kind: Kind::Arrow(ARROW_DAMAGE),
+            pos,
+            vel,
+            on_ground: false,
+            age: 0.0,
+            heading: vel.z.atan2(vel.x),
+            wander: 0.0,
+            rng,
+            dead: false,
+        });
+    }
+
     /// Advance AI + physics for all entities and drop the dead/collected ones. Returns the blocks
     /// of any item drops the player walked over this frame (to add to their inventory).
     pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Collected {
         let mut collected = Collected::default();
         let mut deaths: Vec<(Vec3, Species)> = Vec::new();
+        let mut shots: Vec<(Vec3, Vec3)> = Vec::new(); // skeleton arrows (pos, vel), spawned post-loop
         for e in &mut self.list {
             e.age += dt;
             match e.kind {
@@ -463,11 +495,13 @@ impl Entities {
                     let eye = Vec3::new(0.0, mh * 0.5, 0.0);
                     let target = player_pos + Vec3::new(0.0, 0.9, 0.0);
 
+                    // LOS only matters within the give-up range; skip the DDA for far/passive mobs.
+                    let los = m.species.hostile()
+                        && dist < CALM_RADIUS
+                        && line_of_sight(e.pos + eye, target, &is_solid);
+
                     // State transition.
                     if m.species.hostile() {
-                        // LOS only matters within the give-up range; skip the DDA for far mobs.
-                        let los = dist < CALM_RADIUS
-                            && line_of_sight(e.pos + eye, target, &is_solid);
                         let sees = dist < DETECT_RADIUS && los;
                         // Hysteresis: stay in Attack a bit past ATTACK_RADIUS so it doesn't jitter.
                         let attack_keep = m.ai == Ai::Attack && dist <= ATTACK_RADIUS * 1.5;
@@ -533,17 +567,52 @@ impl Entities {
                     e.vel.y -= GRAVITY * dt;
                     e.on_ground = collide_move(&mut e.pos, &mut e.vel, mw, mh, dt, &is_solid);
 
-                    // Hostile in Attack range lands a contact hit on cooldown (caller applies it
-                    // through the player's armor).
-                    if m.ai == Ai::Attack && m.atk_cd <= 0.0 {
-                        let dmg = m.species.contact_damage();
-                        if dmg > 0.0 {
-                            collected.player_damage += dmg;
-                            m.atk_cd = MOB_ATTACK_COOLDOWN;
+                    // Ranged / contact attacks, per species.
+                    match m.species {
+                        // Skeleton: looses an arrow at the player while it has a clear shot.
+                        Species::Skeleton => {
+                            if matches!(m.ai, Ai::Chase | Ai::Attack) && los && m.atk_cd <= 0.0 {
+                                let from = e.pos + Vec3::new(0.0, mh * 0.7, 0.0);
+                                let aim = (target - from).normalize_or_zero();
+                                // Aim a touch high so gravity arcs the shot into the target.
+                                let vel = aim * ARROW_SPEED + Vec3::new(0.0, dist * 0.05, 0.0);
+                                shots.push((from, vel));
+                                m.atk_cd = SKELETON_SHOOT_CD;
+                            }
+                        }
+                        // Creeper: primes a fuse in attack range, then detonates (no melee, no XP).
+                        Species::Creeper => {
+                            if m.ai == Ai::Attack {
+                                if m.fuse < 0.0 {
+                                    m.fuse = CREEPER_FUSE;
+                                }
+                                m.fuse -= dt;
+                                m.hurt = (1.0 - m.fuse / CREEPER_FUSE).clamp(0.0, 0.45); // blink
+                                if m.fuse <= 0.0 {
+                                    collected
+                                        .explosions
+                                        .push((e.pos + Vec3::new(0.0, mh * 0.5, 0.0), CREEPER_RADIUS));
+                                    e.dead = true;
+                                }
+                            } else {
+                                m.fuse = -1.0; // walked out of range — defuse
+                            }
+                        }
+                        // Zombie / spider: melee contact damage on cooldown.
+                        _ => {
+                            if m.ai == Ai::Attack && m.atk_cd <= 0.0 {
+                                let dmg = m.species.contact_damage();
+                                if dmg > 0.0 {
+                                    collected.player_damage += dmg;
+                                    m.atk_cd = MOB_ATTACK_COOLDOWN;
+                                }
+                            }
                         }
                     }
 
-                    if m.health <= 0.0 {
+                    if e.dead {
+                        // already consumed (creeper detonated) — no loot
+                    } else if m.health <= 0.0 {
                         e.dead = true;
                         deaths.push((e.pos, m.species)); // killed → drops loot
                     } else if e.pos.y < FALL_OUT_Y {
@@ -592,12 +661,39 @@ impl Entities {
                         e.dead = true;
                     }
                 }
+                Kind::Arrow(dmg) => {
+                    e.vel.y -= ARROW_GRAVITY * dt;
+                    e.heading = e.vel.z.atan2(e.vel.x);
+                    // Point-like flight: move freely until the next cell is solid (then it sticks).
+                    let next = e.pos + e.vel * dt;
+                    let cell = IVec3::new(
+                        next.x.floor() as i32,
+                        next.y.floor() as i32,
+                        next.z.floor() as i32,
+                    );
+                    if is_solid(cell) {
+                        e.dead = true; // stuck in a block
+                    } else {
+                        e.pos = next;
+                    }
+                    let to_player = player_pos + Vec3::new(0.0, 1.0, 0.0) - e.pos;
+                    if to_player.length() < 0.7 {
+                        collected.player_damage += dmg;
+                        e.dead = true;
+                    } else if e.age > ARROW_LIFETIME || e.pos.y < FALL_OUT_Y {
+                        e.dead = true;
+                    }
+                }
             }
         }
         self.list.retain(|e| !e.dead);
         // Killed mobs drop experience (item loot waits on a food/material milestone).
         for (pos, species) in deaths {
             self.spawn_xp(pos + Vec3::new(0.0, 0.3, 0.0), species.xp_drop());
+        }
+        // Arrows skeletons loosed this frame (spawned after the iteration to avoid aliasing the list).
+        for (pos, vel) in shots {
+            self.spawn_arrow(pos, vel);
         }
         collected
     }
@@ -640,6 +736,18 @@ impl Entities {
                         e.age * 2.4,
                         block::tile::GLOWSTONE,
                         0.9,
+                    );
+                }
+                Kind::Arrow(_) => {
+                    // A thin dark dart, elongated along its (horizontal) heading.
+                    let (l, w) = (0.5, 0.05);
+                    push_box(
+                        &mut mesh.opaque,
+                        e.pos - Vec3::new(l, w, w),
+                        e.pos + Vec3::new(l, w, w),
+                        e.heading,
+                        block::tile::DEEPSLATE,
+                        0.0,
                     );
                 }
             }
@@ -947,5 +1055,35 @@ mod tests {
         // The dead mob is culled on the next tick (and drops an XP orb in its place).
         let _ = es.update(0.016, o, |_| false);
         assert_eq!(es.ai_summary(), "mobs idle:0 wander:0 flee:0 chase:0 attack:0");
+    }
+
+    #[test]
+    fn arrow_hits_player_and_despawns() {
+        let mut es = Entities::new();
+        es.spawn_arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 12.0)); // flying +z
+        let player = Vec3::new(0.0, 0.0, 3.0); // feet; chest (+1) sits at z=3
+        let mut dmg = 0.0;
+        for _ in 0..120 {
+            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage;
+            if es.count() == 0 {
+                break;
+            }
+        }
+        assert!(dmg > 0.0, "the arrow should damage the player");
+        assert_eq!(es.count(), 0, "and despawn on impact");
+    }
+
+    #[test]
+    fn arrow_sticks_in_a_wall() {
+        let mut es = Entities::new();
+        es.spawn_arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 12.0));
+        let wall = |p: IVec3| p.z >= 2;
+        for _ in 0..120 {
+            es.update(1.0 / 60.0, Vec3::new(0.0, 200.0, 200.0), wall); // player far away
+            if es.count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(es.count(), 0, "the arrow stops at the wall and despawns");
     }
 }
