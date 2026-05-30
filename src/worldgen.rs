@@ -147,15 +147,39 @@ impl Worldgen {
         self.cheese.get_noise_3d(fx, fy * 1.4, fz) > 0.80
     }
 
+    /// Host rock by depth: deepslate in the deep band, stone above.
+    #[inline]
+    fn host_stone(wy: i32) -> BlockId {
+        if wy < 14 {
+            block::DEEPSLATE
+        } else {
+            block::STONE
+        }
+    }
+
+    /// Depth-banded ore distribution (diamond/redstone deep, gold lower, iron/coal common), else the
+    /// host rock (deepslate/stone).
     fn ore_at(&self, wx: i32, wy: i32, wz: i32) -> BlockId {
         let h = hash3(self.seed, wx, wy, wz);
-        if wy < 56 && (h % 900) < 7 {
-            return block::COAL_ORE;
+        if wy < 16 && (h % 1100) < 3 {
+            return block::DIAMOND_ORE;
         }
-        if wy < 40 && ((h >> 8) % 1400) < 5 {
+        if (14..40).contains(&wy) && ((h >> 4) % 1400) < 5 {
+            return block::LAPIS_ORE;
+        }
+        if wy < 16 && ((h >> 8) % 1200) < 6 {
+            return block::REDSTONE_ORE;
+        }
+        if wy < 32 && ((h >> 12) % 1500) < 4 {
+            return block::GOLD_ORE;
+        }
+        if wy < 64 && ((h >> 16) % 900) < 7 {
             return block::IRON_ORE;
         }
-        block::STONE
+        if wy < 128 && ((h >> 22) % 700) < 8 {
+            return block::COAL_ORE;
+        }
+        Self::host_stone(wy)
     }
 
     pub fn generate_chunk(&self, pos: IVec3) -> Chunk {
@@ -200,7 +224,12 @@ impl Worldgen {
                         } else {
                             block::STONE
                         };
-                        if wy >= 3 && wy < height - 1 && self.is_cave(wx, wy, wz) {
+                        // Bedrock floor (jagged, never carved by caves).
+                        let bedrock =
+                            wy == 0 || (wy <= 3 && (hash3(self.seed ^ 0xB, wx, wy, wz) % 4) as i32 > wy);
+                        if bedrock {
+                            id = block::BEDROCK;
+                        } else if wy >= 3 && wy < height - 1 && self.is_cave(wx, wy, wz) {
                             id = block::AIR;
                         } else if id == block::STONE {
                             id = self.ore_at(wx, wy, wz);

@@ -87,6 +87,20 @@ fn tile_average(tile: u32) -> vec3<f32> {
         case 14u: { return vec3<f32>(0.80, 0.50, 0.52); } // mob head
         case 15u: { return vec3<f32>(0.85, 0.62, 0.28); } // torch
         case 16u: { return vec3<f32>(0.95, 0.82, 0.45); } // glowstone
+        case 17u: { return vec3<f32>(0.42, 0.42, 0.44); } // cobblestone
+        case 18u: { return vec3<f32>(0.62, 0.48, 0.30); } // planks
+        case 19u: { return vec3<f32>(0.55, 0.28, 0.22); } // bricks
+        case 20u: { return vec3<f32>(0.20, 0.20, 0.22); } // bedrock
+        case 21u: { return vec3<f32>(0.50, 0.47, 0.45); } // gravel
+        case 22u: { return vec3<f32>(0.12, 0.09, 0.18); } // obsidian
+        case 23u: { return vec3<f32>(0.55, 0.50, 0.35); } // gold ore
+        case 24u: { return vec3<f32>(0.45, 0.62, 0.62); } // diamond ore
+        case 25u: { return vec3<f32>(0.45, 0.30, 0.30); } // redstone ore
+        case 26u: { return vec3<f32>(0.30, 0.35, 0.55); } // lapis ore
+        case 27u: { return vec3<f32>(0.22, 0.22, 0.25); } // deepslate
+        case 28u: { return vec3<f32>(0.50, 0.36, 0.22); } // crafting table
+        case 29u: { return vec3<f32>(0.38, 0.38, 0.40); } // furnace
+        case 30u: { return vec3<f32>(0.55, 0.42, 0.24); } // chest
         default:  { return vec3<f32>(1.0, 0.0, 1.0); }
     }
 }
@@ -131,6 +145,22 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 9u:  { return vec3<f32>(0.28, 0.28, 0.30); } // coal ore
         case 10u: { return vec3<f32>(0.60, 0.52, 0.45); } // iron ore
         case 11u: { return vec3<f32>(1.0, 0.42, 0.06); }  // lava
+        case 12u: { return vec3<f32>(0.85, 0.62, 0.28); } // torch
+        case 13u: { return vec3<f32>(0.95, 0.82, 0.45); } // glowstone
+        case 14u: { return vec3<f32>(0.42, 0.42, 0.44); } // cobblestone
+        case 15u: { return vec3<f32>(0.62, 0.48, 0.30); } // planks
+        case 16u: { return vec3<f32>(0.55, 0.28, 0.22); } // bricks
+        case 17u: { return vec3<f32>(0.20, 0.20, 0.22); } // bedrock
+        case 18u: { return vec3<f32>(0.50, 0.47, 0.45); } // gravel
+        case 19u: { return vec3<f32>(0.12, 0.09, 0.18); } // obsidian
+        case 20u: { return vec3<f32>(0.55, 0.50, 0.35); } // gold ore
+        case 21u: { return vec3<f32>(0.45, 0.62, 0.62); } // diamond ore
+        case 22u: { return vec3<f32>(0.45, 0.30, 0.30); } // redstone ore
+        case 23u: { return vec3<f32>(0.30, 0.35, 0.55); } // lapis ore
+        case 24u: { return vec3<f32>(0.22, 0.22, 0.25); } // deepslate
+        case 25u: { return vec3<f32>(0.50, 0.36, 0.22); } // crafting table
+        case 26u: { return vec3<f32>(0.38, 0.38, 0.40); } // furnace
+        case 27u: { return vec3<f32>(0.55, 0.42, 0.24); } // chest
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }

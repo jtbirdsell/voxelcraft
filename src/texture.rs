@@ -51,7 +51,32 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::MOB_HEAD => [0.80, 0.50, 0.52],
         T::TORCH => [0.85, 0.62, 0.28],
         T::GLOWSTONE => [0.95, 0.82, 0.45],
+        T::COBBLE => [0.42, 0.42, 0.44],
+        T::PLANKS => [0.62, 0.48, 0.30],
+        T::BRICKS => [0.55, 0.28, 0.22],
+        T::BEDROCK => [0.20, 0.20, 0.22],
+        T::GRAVEL => [0.50, 0.47, 0.45],
+        T::OBSIDIAN => [0.12, 0.09, 0.18],
+        T::GOLD => [0.55, 0.50, 0.35],
+        T::DIAMOND => [0.45, 0.62, 0.62],
+        T::REDSTONE => [0.45, 0.30, 0.30],
+        T::LAPIS => [0.30, 0.35, 0.55],
+        T::DEEPSLATE => [0.22, 0.22, 0.25],
+        T::CRAFTING => [0.50, 0.36, 0.22],
+        T::FURNACE => [0.38, 0.38, 0.40],
+        T::CHEST => [0.55, 0.42, 0.24],
         _ => [1.0, 0.0, 1.0],
+    }
+}
+
+/// Stone-host ore tile: speckled stone with colored ore flecks.
+fn ore(fleck: [f32; 3], x: u32, y: u32) -> [f32; 3] {
+    let host = base_color(T::STONE);
+    let n = hashf(x, y, 77);
+    if blob(x, y, 3) {
+        fleck
+    } else {
+        shade(host, (n - 0.5) * 0.14)
     }
 }
 
@@ -148,6 +173,67 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 3] {
         }
         T::MOB | T::MOB_HEAD => {
             c = shade(base, (n - 0.5) * 0.10);
+        }
+        T::COBBLE => {
+            c = shade(base, (n - 0.5) * 0.30);
+            if blob(x, y, 7) {
+                c = shade(base, -0.35);
+            }
+        }
+        T::DEEPSLATE => {
+            c = shade(base, (n - 0.5) * 0.22);
+            if hashf(x, y, 31) > 0.9 {
+                c = shade(base, -0.30);
+            }
+        }
+        T::GRAVEL => {
+            c = shade(base, (n - 0.5) * 0.28);
+        }
+        T::BEDROCK => {
+            c = shade(base, (n - 0.5) * 0.55);
+        }
+        T::OBSIDIAN => {
+            c = shade(base, (m - 0.5) * 0.16);
+            if hashf(x, y, 13) > 0.85 {
+                c = [0.22, 0.14, 0.30];
+            }
+        }
+        T::PLANKS => {
+            let groove = y % 8 == 0;
+            let d = if groove { -0.28 } else { 0.0 };
+            c = shade(base, d + (m - 0.5) * 0.14);
+        }
+        T::BRICKS => {
+            let row = y / 4;
+            let offset = (row % 2) * 4;
+            let bx = (x + offset) % 8;
+            if y % 4 == 0 || bx == 0 {
+                c = [0.80, 0.76, 0.72]; // mortar
+            } else {
+                c = shade(base, (n - 0.5) * 0.12);
+            }
+        }
+        T::GOLD => c = ore([0.95, 0.78, 0.25], x, y),
+        T::DIAMOND => c = ore([0.45, 0.92, 0.90], x, y),
+        T::REDSTONE => c = ore([0.85, 0.12, 0.12], x, y),
+        T::LAPIS => c = ore([0.15, 0.28, 0.85], x, y),
+        T::CRAFTING => {
+            c = shade(base, (m - 0.5) * 0.16);
+            if x < 2 || y < 2 || x > 13 {
+                c = shade(base, -0.22);
+            }
+        }
+        T::FURNACE => {
+            c = shade(base, (m - 0.5) * 0.14);
+            if y > 9 && x > 3 && x < 12 {
+                c = [0.10, 0.08, 0.08]; // dark front opening
+            }
+        }
+        T::CHEST => {
+            c = shade(base, (m - 0.5) * 0.14);
+            if (7..=8).contains(&y) {
+                c = [0.30, 0.22, 0.10]; // latch band
+            }
         }
         T::GLOWSTONE => {
             // Lumpy yellow rock with bright nodules.

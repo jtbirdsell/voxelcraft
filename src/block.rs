@@ -17,6 +17,20 @@ pub const IRON_ORE: BlockId = 10;
 pub const LAVA: BlockId = 11;
 pub const TORCH: BlockId = 12;
 pub const GLOWSTONE: BlockId = 13;
+pub const COBBLESTONE: BlockId = 14;
+pub const PLANKS: BlockId = 15;
+pub const BRICKS: BlockId = 16;
+pub const BEDROCK: BlockId = 17;
+pub const GRAVEL: BlockId = 18;
+pub const OBSIDIAN: BlockId = 19;
+pub const GOLD_ORE: BlockId = 20;
+pub const DIAMOND_ORE: BlockId = 21;
+pub const REDSTONE_ORE: BlockId = 22;
+pub const LAPIS_ORE: BlockId = 23;
+pub const DEEPSLATE: BlockId = 24;
+pub const CRAFTING_TABLE: BlockId = 25;
+pub const FURNACE: BlockId = 26;
+pub const CHEST: BlockId = 27;
 
 /// A block participates in collision (fluids are passable).
 #[inline]
@@ -79,6 +93,20 @@ pub fn display_name(id: BlockId) -> &'static str {
         LAVA => "Lava",
         TORCH => "Torch",
         GLOWSTONE => "Glowstone",
+        COBBLESTONE => "Cobblestone",
+        PLANKS => "Wood Planks",
+        BRICKS => "Bricks",
+        BEDROCK => "Bedrock",
+        GRAVEL => "Gravel",
+        OBSIDIAN => "Obsidian",
+        GOLD_ORE => "Gold Ore",
+        DIAMOND_ORE => "Diamond Ore",
+        REDSTONE_ORE => "Redstone Ore",
+        LAPIS_ORE => "Lapis Ore",
+        DEEPSLATE => "Deepslate",
+        CRAFTING_TABLE => "Crafting Table",
+        FURNACE => "Furnace",
+        CHEST => "Chest",
         _ => "Unknown",
     }
 }
@@ -116,6 +144,20 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         LAVA => [1.0, 0.42, 0.06],
         TORCH => [0.85, 0.62, 0.28],
         GLOWSTONE => [0.95, 0.82, 0.45],
+        COBBLESTONE => [0.42, 0.42, 0.44],
+        PLANKS => [0.62, 0.48, 0.30],
+        BRICKS => [0.55, 0.28, 0.22],
+        BEDROCK => [0.20, 0.20, 0.22],
+        GRAVEL => [0.50, 0.47, 0.45],
+        OBSIDIAN => [0.12, 0.09, 0.18],
+        GOLD_ORE => [0.55, 0.50, 0.35],
+        DIAMOND_ORE => [0.45, 0.62, 0.62],
+        REDSTONE_ORE => [0.45, 0.30, 0.30],
+        LAPIS_ORE => [0.30, 0.35, 0.55],
+        DEEPSLATE => [0.22, 0.22, 0.25],
+        CRAFTING_TABLE => [0.50, 0.36, 0.22],
+        FURNACE => [0.38, 0.38, 0.40],
+        CHEST => [0.55, 0.42, 0.24],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -189,6 +231,20 @@ pub mod tile {
     pub const MOB_HEAD: u32 = 14;
     pub const TORCH: u32 = 15;
     pub const GLOWSTONE: u32 = 16;
+    pub const COBBLE: u32 = 17;
+    pub const PLANKS: u32 = 18;
+    pub const BRICKS: u32 = 19;
+    pub const BEDROCK: u32 = 20;
+    pub const GRAVEL: u32 = 21;
+    pub const OBSIDIAN: u32 = 22;
+    pub const GOLD: u32 = 23;
+    pub const DIAMOND: u32 = 24;
+    pub const REDSTONE: u32 = 25;
+    pub const LAPIS: u32 = 26;
+    pub const DEEPSLATE: u32 = 27;
+    pub const CRAFTING: u32 = 28;
+    pub const FURNACE: u32 = 29;
+    pub const CHEST: u32 = 30;
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 
@@ -235,6 +291,20 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         LAVA => tile::LAVA,
         TORCH => tile::TORCH,
         GLOWSTONE => tile::GLOWSTONE,
+        COBBLESTONE => tile::COBBLE,
+        PLANKS => tile::PLANKS,
+        BRICKS => tile::BRICKS,
+        BEDROCK => tile::BEDROCK,
+        GRAVEL => tile::GRAVEL,
+        OBSIDIAN => tile::OBSIDIAN,
+        GOLD_ORE => tile::GOLD,
+        DIAMOND_ORE => tile::DIAMOND,
+        REDSTONE_ORE => tile::REDSTONE,
+        LAPIS_ORE => tile::LAPIS,
+        DEEPSLATE => tile::DEEPSLATE,
+        CRAFTING_TABLE => tile::CRAFTING,
+        FURNACE => tile::FURNACE,
+        CHEST => tile::CHEST,
         _ => tile::MAGENTA,
     }
 }
