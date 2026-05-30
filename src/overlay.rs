@@ -143,6 +143,90 @@ pub fn push_text(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, scal
     }
 }
 
+pub const INV_SLOT: f32 = 46.0;
+
+/// Inventory-screen slot layout: (slot_index, x_px, y_px). 3 main rows (9..36) above the hotbar
+/// row (0..9). Used for both rendering and click hit-testing so they can't drift.
+pub fn inventory_slot_rects(width: u32, height: u32) -> Vec<(usize, f32, f32)> {
+    let step = INV_SLOT + 4.0;
+    let grid_w = 9.0 * step - 4.0;
+    let ox = (width as f32 - grid_w) * 0.5;
+    let oy = height as f32 * 0.5 - 130.0;
+    let mut rects = Vec::with_capacity(36);
+    for r in 0..3 {
+        for c in 0..9 {
+            rects.push((9 + r * 9 + c, ox + c as f32 * step, oy + r as f32 * step));
+        }
+    }
+    let hy = oy + 3.0 * step + 14.0;
+    for c in 0..9 {
+        rects.push((c, ox + c as f32 * step, hy));
+    }
+    rects
+}
+
+/// Build the inventory screen overlay: dim backdrop, panel, slots, the held (cursor) stack, tooltip.
+pub fn build_inventory_screen(
+    width: u32,
+    height: u32,
+    inv: &item::Inventory,
+    cursor: (f32, f32),
+) -> Vec<UiVertex> {
+    let sw = width as f32;
+    let sh = height as f32;
+    let mut v = Vec::new();
+    push_px_rect(&mut v, sw, sh, 0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.55]);
+    let rects = inventory_slot_rects(width, height);
+    let step = INV_SLOT + 4.0;
+    let (minx, miny) = (rects[0].1, rects[0].2);
+    let panel_w = 9.0 * step - 4.0;
+    let pad = 14.0;
+    let panel_h = rects[35].2 + INV_SLOT - miny;
+    push_px_rect(&mut v, sw, sh, minx - pad, miny - pad - 24.0, panel_w + 2.0 * pad, panel_h + 2.0 * pad + 24.0, [0.12, 0.12, 0.14, 0.97]);
+    push_text(&mut v, sw, sh, minx, miny - pad - 18.0, 2.0, "Inventory", [0.95, 0.95, 0.95, 1.0]);
+
+    let mut hovered: Option<usize> = None;
+    for &(slot_i, x, y) in &rects {
+        let hover = cursor.0 >= x && cursor.0 < x + INV_SLOT && cursor.1 >= y && cursor.1 < y + INV_SLOT;
+        if hover {
+            hovered = Some(slot_i);
+        }
+        let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.28, 0.28, 0.32, 1.0] };
+        push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
+        if let Some(stack) = inv.slots[slot_i] {
+            if let Some(b) = stack.block() {
+                let c = block::face_color(b, [0, 1, 0]);
+                push_px_rect(&mut v, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
+            }
+            if stack.count > 1 {
+                let label = format!("{}", stack.count);
+                let tw = text_width(&label, 2.0);
+                push_text(&mut v, sw, sh, x + INV_SLOT - tw - 3.0, y + INV_SLOT - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+    }
+    // Held stack follows the cursor.
+    if let Some(held) = inv.held {
+        if let Some(b) = held.block() {
+            let c = block::face_color(b, [0, 1, 0]);
+            push_px_rect(&mut v, sw, sh, cursor.0 - INV_SLOT * 0.5, cursor.1 - INV_SLOT * 0.5, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
+        }
+        if held.count > 1 {
+            let label = format!("{}", held.count);
+            push_text(&mut v, sw, sh, cursor.0 + 6.0, cursor.1 + 4.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+        }
+    } else if let Some(slot_i) = hovered {
+        // Tooltip when not dragging.
+        if let Some(stack) = inv.slots[slot_i] {
+            let name = item::item_name(stack.item);
+            let tw = text_width(name, 2.0);
+            push_px_rect(&mut v, sw, sh, cursor.0 + 12.0, cursor.1 - 4.0, tw + 8.0, 22.0, [0.05, 0.05, 0.07, 0.92]);
+            push_text(&mut v, sw, sh, cursor.0 + 16.0, cursor.1, 2.0, name, [0.95, 0.95, 0.8, 1.0]);
+        }
+    }
+    v
+}
+
 /// One row of `pips` square cells, each worth 2 units, filled left-to-right to show `value`.
 #[allow(clippy::too_many_arguments)]
 fn stat_bar(

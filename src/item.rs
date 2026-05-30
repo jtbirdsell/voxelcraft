@@ -164,4 +164,54 @@ impl Inventory {
     pub fn add_block(&mut self, b: BlockId) -> bool {
         self.insert(ItemStack::new(item_of_block(b), 1)).is_none()
     }
+
+    /// Standard inventory-screen click: left = pick up / drop whole stack / merge / swap; right =
+    /// pick up half / drop one. Mutates `held` and the clicked `slot`.
+    pub fn click_slot(&mut self, slot: usize, right: bool) {
+        if slot >= SLOTS {
+            return;
+        }
+        match (self.held, self.slots[slot]) {
+            (None, Some(s)) => {
+                if right {
+                    let half = s.count.div_ceil(2);
+                    let rem = s.count - half;
+                    self.held = Some(ItemStack::new(s.item, half));
+                    self.slots[slot] = (rem > 0).then(|| ItemStack::new(s.item, rem));
+                } else {
+                    self.held = self.slots[slot].take();
+                }
+            }
+            (Some(h), None) => {
+                if right {
+                    self.slots[slot] = Some(ItemStack::new(h.item, 1));
+                    let rem = h.count - 1;
+                    self.held = (rem > 0).then(|| ItemStack::new(h.item, rem));
+                } else {
+                    self.slots[slot] = self.held.take();
+                }
+            }
+            (Some(h), Some(s)) => {
+                if h.item == s.item {
+                    let cap = max_stack(s.item);
+                    let room = cap.saturating_sub(s.count);
+                    let moved = if right { 1.min(h.count) } else { h.count }.min(room);
+                    self.slots[slot] = Some(ItemStack::new(s.item, s.count + moved));
+                    let rem = h.count - moved;
+                    self.held = (rem > 0).then(|| ItemStack::new(h.item, rem));
+                } else if !right {
+                    self.slots[slot] = Some(h);
+                    self.held = Some(s);
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Drop the held stack back into the inventory (called when a screen closes).
+    pub fn return_held(&mut self) {
+        if let Some(h) = self.held.take() {
+            self.held = self.insert(h);
+        }
+    }
 }

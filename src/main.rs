@@ -60,6 +60,13 @@ const SENSITIVITY: f32 = 0.0022;
 const FOG_END: f32 = (RENDER_DISTANCE as f32 - 1.0) * 32.0;
 const FOG_START: f32 = FOG_END * 0.68;
 
+/// Active GUI screen. Gameplay input is suppressed while any screen is open (M15b; grows later).
+#[derive(PartialEq, Clone, Copy)]
+enum Screen {
+    None,
+    Inventory,
+}
+
 struct State {
     gpu: Gpu,
     renderer: ChunkRenderer,
@@ -76,6 +83,8 @@ struct State {
     fps_smooth: f32,
     debug_f3: bool,
     elapsed: f32,
+    screen: Screen,
+    cursor: (f32, f32),
 }
 
 struct App {
@@ -123,13 +132,72 @@ impl App {
         }
     }
 
+    fn toggle_inventory(&mut self) {
+        let open = {
+            let Some(state) = &mut self.state else { return };
+            if state.screen == Screen::Inventory {
+                state.inventory.return_held();
+                state.screen = Screen::None;
+                false
+            } else {
+                state.screen = Screen::Inventory;
+                state.input = Input::default();
+                state.cursor = (
+                    state.gpu.config.width as f32 * 0.5,
+                    state.gpu.config.height as f32 * 0.5,
+                );
+                true
+            }
+        };
+        self.set_grab(!open);
+    }
+
+    fn close_screen(&mut self) {
+        if let Some(state) = &mut self.state {
+            if state.screen != Screen::None {
+                state.inventory.return_held();
+                state.screen = Screen::None;
+            }
+        }
+        self.set_grab(true);
+    }
+
+    fn inventory_click(&mut self, button: MouseButton) {
+        let Some(state) = &mut self.state else { return };
+        let right = match button {
+            MouseButton::Left => false,
+            MouseButton::Right => true,
+            _ => return,
+        };
+        let (w, h) = (state.gpu.config.width, state.gpu.config.height);
+        let (cx, cy) = state.cursor;
+        for (slot_i, x, y) in overlay::inventory_slot_rects(w, h) {
+            if cx >= x && cx < x + overlay::INV_SLOT && cy >= y && cy < y + overlay::INV_SLOT {
+                state.inventory.click_slot(slot_i, right);
+                break;
+            }
+        }
+    }
+
     fn handle_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, event_loop: &ActiveEventLoop) {
         if code == KeyCode::Escape && pressed {
+            if self.state.as_ref().is_some_and(|s| s.screen != Screen::None) {
+                self.close_screen();
+                return;
+            }
             event_loop.exit();
             return;
         }
         if code == KeyCode::KeyP && pressed && !repeat {
             self.save_world();
+            return;
+        }
+        if code == KeyCode::KeyE && pressed && !repeat {
+            self.toggle_inventory();
+            return;
+        }
+        // Suppress gameplay keys while a GUI screen is open.
+        if self.state.as_ref().is_some_and(|s| s.screen != Screen::None) {
             return;
         }
         let Some(state) = &mut self.state else { return };
@@ -288,7 +356,7 @@ impl App {
         } else {
             None
         };
-        let ui = overlay::build_ui(
+        let mut ui = overlay::build_ui(
             state.gpu.config.width,
             state.gpu.config.height,
             &state.inventory,
@@ -297,6 +365,14 @@ impl App {
             !state.player.flying,
             debug_lines.as_deref(),
         );
+        if state.screen == Screen::Inventory {
+            ui.extend(overlay::build_inventory_screen(
+                state.gpu.config.width,
+                state.gpu.config.height,
+                &state.inventory,
+                state.cursor,
+            ));
+        }
         let volume_bg = state.game.volume_bind_group();
         state
             .renderer
@@ -487,11 +563,14 @@ impl ApplicationHandler for App {
                 false,
                 game.rtx_mode_name(),
             );
-            // A couple of stacks so the headless shot exercises the count rendering.
+            // A few stacks so the headless shot exercises count + inventory-screen rendering.
             let mut shot_inv = Inventory::new(true);
             shot_inv.slots[2] = Some(item::ItemStack::new(item::item_of_block(block::STONE), 32));
             shot_inv.slots[4] = Some(item::ItemStack::new(item::item_of_block(block::WOOD), 7));
-            let ui = overlay::build_ui(
+            shot_inv.slots[9] = Some(item::ItemStack::new(item::item_of_block(block::COAL_ORE), 12));
+            shot_inv.slots[11] = Some(item::ItemStack::new(item::item_of_block(block::DIRT), 64));
+            shot_inv.slots[19] = Some(item::ItemStack::new(item::item_of_block(block::IRON_ORE), 5));
+            let mut ui = overlay::build_ui(
                 gpu.config.width,
                 gpu.config.height,
                 &shot_inv,
@@ -500,6 +579,16 @@ impl ApplicationHandler for App {
                 false,
                 Some(&dbg),
             );
+            if std::env::var("VOXELCRAFT_SCREEN").map(|s| s == "inv").unwrap_or(false) {
+                // Cursor hovering the first main slot (coal ore) to show its tooltip.
+                let cursor = (600.0, 343.0);
+                ui.extend(overlay::build_inventory_screen(
+                    gpu.config.width,
+                    gpu.config.height,
+                    &shot_inv,
+                    cursor,
+                ));
+            }
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",
                 game.loaded_chunk_count(),
@@ -566,6 +655,8 @@ impl ApplicationHandler for App {
             fps_smooth: 0.0,
             debug_f3: false,
             elapsed: 0.0,
+            screen: Screen::None,
+            cursor: (0.0, 0.0),
         });
         self.set_grab(true);
     }
@@ -584,7 +675,10 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => self.set_grab(false),
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
                 if btn_state == ElementState::Pressed {
-                    if !self.grabbed {
+                    let screen_open = self.state.as_ref().is_some_and(|s| s.screen != Screen::None);
+                    if screen_open {
+                        self.inventory_click(button);
+                    } else if !self.grabbed {
                         self.set_grab(true);
                     } else if let Some(state) = &mut self.state {
                         match button {
@@ -592,6 +686,13 @@ impl ApplicationHandler for App {
                             MouseButton::Right => state.input.place_pressed = true,
                             _ => {}
                         }
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(state) = &mut self.state {
+                    if state.screen != Screen::None {
+                        state.cursor = (position.x as f32, position.y as f32);
                     }
                 }
             }
