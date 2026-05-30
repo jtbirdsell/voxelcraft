@@ -130,8 +130,40 @@ fn push_px_rect(
     }
 }
 
-/// Build the HUD (crosshair + hotbar) for the given framebuffer size.
-pub fn build_ui(width: u32, height: u32, hotbar: &Hotbar) -> Vec<UiVertex> {
+/// One row of `pips` square cells, each worth 2 units, filled left-to-right to show `value`.
+#[allow(clippy::too_many_arguments)]
+fn stat_bar(
+    out: &mut Vec<UiVertex>,
+    sw: f32,
+    sh: f32,
+    x: f32,
+    y: f32,
+    pip: f32,
+    gap: f32,
+    pips: i32,
+    value: f32,
+    on: [f32; 4],
+) {
+    let off = [0.06, 0.06, 0.07, 0.6];
+    for i in 0..pips {
+        let px = x + i as f32 * (pip + gap);
+        push_px_rect(out, sw, sh, px, y, pip, pip, off);
+        let fill = (value * 0.5 - i as f32).clamp(0.0, 1.0);
+        if fill > 0.0 {
+            push_px_rect(out, sw, sh, px, y, pip * fill, pip, on);
+        }
+    }
+}
+
+/// Build the HUD (crosshair + hotbar, plus health/hunger bars in survival) for the framebuffer.
+pub fn build_ui(
+    width: u32,
+    height: u32,
+    hotbar: &Hotbar,
+    health: f32,
+    hunger: f32,
+    survival: bool,
+) -> Vec<UiVertex> {
     let sw = width as f32;
     let sh = height as f32;
     let mut v = Vec::new();
@@ -168,5 +200,19 @@ pub fn build_ui(width: u32, height: u32, hotbar: &Hotbar) -> Vec<UiVertex> {
         let c = block::face_color(id, [0, 1, 0]);
         push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [c[0], c[1], c[2], 1.0]);
     }
+
+    // Health (red) and hunger (orange) pip bars sit just above the hotbar in survival mode.
+    if survival {
+        let pip = 16.0;
+        let gap = 3.0;
+        let pips = 10;
+        let bar_w = pips as f32 * pip + (pips as f32 - 1.0) * gap;
+        let bars_y = y - 28.0;
+        let health_x = sw * 0.5 - bar_w - 12.0;
+        let hunger_x = sw * 0.5 + 12.0;
+        stat_bar(&mut v, sw, sh, health_x, bars_y, pip, gap, pips, health, [0.85, 0.13, 0.15, 1.0]);
+        stat_bar(&mut v, sw, sh, hunger_x, bars_y, pip, gap, pips, hunger, [0.86, 0.55, 0.18, 1.0]);
+    }
+
     v
 }

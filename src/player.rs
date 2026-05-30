@@ -16,6 +16,17 @@ const JUMP_SPEED: f32 = 9.2;
 const FLY_SPEED: f32 = 26.0;
 const FLY_SPRINT_SPEED: f32 = 80.0;
 
+// Survival tuning (walk mode only; flying is treated as creative and takes no damage/hunger).
+const MAX_HEALTH: f32 = 20.0;
+const MAX_HUNGER: f32 = 20.0;
+const SAFE_FALL: f32 = 3.0; // blocks of fall absorbed before damage; then 1 hp per extra block
+const HUNGER_DRAIN: f32 = 0.08; // hunger/sec while walking
+const HUNGER_SPRINT_MULT: f32 = 2.5;
+const REGEN_HUNGER: f32 = 17.0; // health regenerates while hunger is at least this
+const REGEN_RATE: f32 = 1.2; // hp/sec regenerated
+const REGEN_COST: f32 = 0.6; // hunger/sec spent regenerating
+const STARVE_RATE: f32 = 0.8; // hp/sec lost at zero hunger
+
 /// Per-frame movement intent. Look deltas are accumulated from raw mouse motion.
 #[derive(Default)]
 pub struct Input {
@@ -47,6 +58,12 @@ pub struct Player {
     pub velocity: Vec3,
     pub on_ground: bool,
     pub flying: bool,
+    pub health: f32,
+    pub hunger: f32,
+    /// Highest y reached since last touching ground, for fall-damage distance.
+    air_max_y: f32,
+    /// Where `respawn` returns the player on death.
+    respawn_point: Vec3,
 }
 
 #[inline]
@@ -74,6 +91,38 @@ impl Player {
             velocity: Vec3::ZERO,
             on_ground: false,
             flying,
+            health: MAX_HEALTH,
+            hunger: MAX_HUNGER,
+            air_max_y: position.y,
+            respawn_point: position,
+        }
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.health <= 0.0
+    }
+
+    /// Reset to the spawn point with full health and hunger (called on death).
+    pub fn respawn(&mut self) {
+        self.position = self.respawn_point;
+        self.velocity = Vec3::ZERO;
+        self.health = MAX_HEALTH;
+        self.hunger = MAX_HUNGER;
+        self.air_max_y = self.respawn_point.y;
+        self.on_ground = false;
+    }
+
+    /// Hunger drain, slow regen when well-fed, starvation at empty hunger (walk mode only).
+    fn update_survival(&mut self, dt: f32, input: &Input) {
+        let moving = input.forward || input.back || input.left || input.right;
+        let mult = if input.sprint && moving { HUNGER_SPRINT_MULT } else { 1.0 };
+        self.hunger = (self.hunger - HUNGER_DRAIN * mult * dt).max(0.0);
+
+        if self.hunger >= REGEN_HUNGER && self.health < MAX_HEALTH {
+            self.health = (self.health + REGEN_RATE * dt).min(MAX_HEALTH);
+            self.hunger = (self.hunger - REGEN_COST * dt).max(0.0);
+        } else if self.hunger <= 0.0 {
+            self.health = (self.health - STARVE_RATE * dt).max(0.0);
         }
     }
 
@@ -160,8 +209,25 @@ impl Player {
         self.move_axis(0, delta.x, &is_solid);
         self.move_axis(2, delta.z, &is_solid);
         let hit_y = self.move_axis(1, delta.y, &is_solid);
-        if !self.flying {
-            self.on_ground = hit_y && delta.y < 0.0;
+
+        if self.flying {
+            self.on_ground = false;
+            self.air_max_y = self.position.y;
+        } else {
+            let landed = hit_y && delta.y < 0.0;
+            if landed && !self.on_ground {
+                // Damage on a hard landing: 1 hp per block fallen past the safe distance.
+                let fall = (self.air_max_y - self.position.y).max(0.0);
+                let dmg = (fall - SAFE_FALL).max(0.0);
+                self.health = (self.health - dmg).max(0.0);
+            }
+            self.on_ground = landed;
+            if self.on_ground {
+                self.air_max_y = self.position.y;
+            } else {
+                self.air_max_y = self.air_max_y.max(self.position.y);
+            }
+            self.update_survival(dt, input);
         }
     }
 

@@ -2,10 +2,10 @@
 
 A Minecraft-equivalent voxel sandbox written from scratch in **Rust + wgpu**, tuned for an
 RTX 4090 / i9-14900K. Infinite procedurally-generated world, multithreaded chunk streaming,
-break/place building, day/night, transparent water, **flowing fluids**, world save/load, and
-**ray-traced lighting** — sun shadows, ambient occlusion, one-bounce colored global illumination,
-water reflections, and **emissive lava** that lights the scene — computed against the actual voxel
-geometry on the GPU.
+break/place building, day/night, transparent water, **flowing fluids**, **survival**
+(health/hunger/fall damage), world save/load, and **ray-traced lighting** — sun shadows, ambient
+occlusion, one-bounce colored global illumination, water reflections, and **emissive lava** that
+lights the scene — computed against the actual voxel geometry on the GPU.
 
 ## Run
 
@@ -66,6 +66,10 @@ The world saves automatically on quit to `saves/world/`.
   ledges). Lava is **emissive** — the per-vertex color carries an emission channel, and GI /
   reflection rays treat a lava hit as a light source, so a lava lake glows and washes nearby blocks
   in orange indirect light (and reflects in water).
+- **M10** — **survival basics**: in walk mode the player has health + hunger; a hard fall deals
+  damage past a safe distance, hunger drains (faster sprinting), regenerates health when full and
+  starves when empty, and death respawns at spawn. Red/orange pip bars render above the hotbar
+  (flying is treated as creative — invulnerable, bars hidden).
 
 Performance: **~144 fps (vsync-capped)** at render distance 12 with shadows on — the GPU has
 large headroom, which GI and reflections spend on per-pixel ray tracing.
@@ -84,7 +88,7 @@ src/
   game.rs           streaming manager: gen/mesh budgets, frustum cull, edits, fluid tick, saves
   voxel_volume.rs   GPU voxel material volume (block ids) for ray-traced shadows + AO/GI
   raycast.rs        Amanatides–Woo voxel DDA (block targeting)
-  player.rs         AABB collision, gravity/jump/fly, input
+  player.rs         AABB collision, gravity/jump/fly, input, survival (health/hunger/fall damage)
   frustum.rs        Gribb–Hartmann frustum culling
   renderer.rs       pipelines (opaque/water/highlight/HUD), frame recording
   overlay.rs        block highlight + crosshair/hotbar geometry
@@ -99,6 +103,6 @@ GPU is spent on ray-traced shadows, ambient occlusion and global illumination ra
 
 ## Possible next steps
 
-Survival (health/hunger/fall damage), mobs, crafting; a texture atlas; GPU-driven indirect
-rendering for much larger render distances; and a temporal/spatial denoiser so interactive GI can
-use fewer rays per pixel without noise.
+Mobs and item drops; an inventory + crafting grid; a texture atlas; GPU-driven indirect rendering
+for much larger render distances; and a temporal/spatial denoiser so interactive GI can use fewer
+rays per pixel without noise.

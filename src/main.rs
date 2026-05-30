@@ -174,6 +174,13 @@ impl App {
             .update(dt, yaw, &state.input, |p| game_ref.is_solid_at(p));
         state.camera.position = state.player.eye();
 
+        // Survival: a hard fall or starvation can kill; respawn at spawn.
+        if !state.player.flying && state.player.is_dead() {
+            log::info!("You died — respawning at spawn.");
+            state.player.respawn();
+            state.camera.position = state.player.eye();
+        }
+
         // Stream chunks around the player and advance flowing fluids.
         state
             .game
@@ -221,7 +228,14 @@ impl App {
         let frustum = Frustum::from_view_proj(state.camera.view_proj(aspect));
         let visible = state.game.visible_meshes(&frustum);
         let highlight = target.as_ref().map(|h| h.block);
-        let ui = overlay::build_ui(state.gpu.config.width, state.gpu.config.height, &state.hotbar);
+        let ui = overlay::build_ui(
+            state.gpu.config.width,
+            state.gpu.config.height,
+            &state.hotbar,
+            state.player.health,
+            state.player.hunger,
+            !state.player.flying,
+        );
         let volume_bg = state.game.volume_bind_group();
         state
             .renderer
@@ -276,52 +290,18 @@ impl ApplicationHandler for App {
             );
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
             game.set_rtx_quality(64);
-            // Night, so the emissive lava is the dominant light source.
-            let environment = Environment::new(0.85);
-            // The demo floats at y~150, clear above natural terrain (tops out near ~120).
-            let player = Player::new(Vec3::new(44.0, 152.38, 20.0), true);
-            let camera = Camera::new(player.eye(), std::f32::consts::PI, -0.10);
+            // Afternoon light over a natural, RTX-lit vista; this milestone's subject is the
+            // survival HUD (health/hunger bars) overlaid on a normal gameplay view, so there are no
+            // built structures — just the generated world seen from a scenic overlook.
+            let environment = Environment::new(0.30);
+            let player = Player::new(Vec3::new(8.0, 96.0, 24.0), false);
+            let camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);
+            let highlight: Option<IVec3> = None;
 
-            // A flowing-lava scene that stacks M9 (fluids) on M7 (GI): a two-tier stone basin with
-            // a 2-block step at x=31. A handful of lava sources flow out, merge into a glowing lake,
-            // and spill over the step into the lower basin. At night the lava is the only light, so
-            // the white snow back wall and the white pillars standing in the lake are washed orange
-            // by the lava's emissive global illumination.
-            for z in 10..=30 {
-                for x in 8..=31 {
-                    game.set_block(&gpu, &renderer, IVec3::new(x, 150, z), block::STONE); // upper floor
-                }
-                for x in 32..=42 {
-                    game.set_block(&gpu, &renderer, IVec3::new(x, 148, z), block::STONE); // lower floor
-                }
-                for y in 151..=160 {
-                    game.set_block(&gpu, &renderer, IVec3::new(8, y, z), block::SNOW); // white back wall
-                }
-            }
-            // White pillars standing in the lava lake to catch the orange glow on every side.
-            for &(px, pz) in &[(18, 15), (18, 25), (26, 20)] {
-                for y in 151..=154 {
-                    game.set_block(&gpu, &renderer, IVec3::new(px, y, pz), block::SNOW);
-                }
-            }
-            // A sparse grid of lava sources; the fluid sim floods them into a lake. The x=30 row sits
-            // within LAVA_SPREAD of the step edge (x=31) so the lake spills and cascades into the
-            // lower basin, filling the foreground with a glowing lavafall.
-            for &sx in &[12, 16, 20, 24, 28, 30] {
-                for &sz in &[14, 18, 22, 26] {
-                    let p = IVec3::new(sx, 151, sz);
-                    if game.set_block(&gpu, &renderer, p, block::LAVA) {
-                        game.add_fluid_source(p, block::LAVA);
-                    }
-                }
-            }
-            game.settle_fluids(&gpu, &renderer, 4000);
-            let highlight = Some(IVec3::new(26, 154, 20));
-
-            // Populate the voxel volume so lava lighting/reflections trace against the final layout.
+            // Populate the voxel volume so shadows / AO / GI trace against the terrain.
             game.prime_volume(&gpu, player.position);
 
             camera_uniform.update(&camera, gpu.aspect());
@@ -332,7 +312,15 @@ impl ApplicationHandler for App {
             let frustum = Frustum::from_view_proj(camera.view_proj(gpu.aspect()));
             let visible = game.visible_meshes(&frustum);
             let volume_bg = game.volume_bind_group();
-            let ui = overlay::build_ui(gpu.config.width, gpu.config.height, &Hotbar::new());
+            // Partially-depleted bars so the survival HUD is clearly exercised.
+            let ui = overlay::build_ui(
+                gpu.config.width,
+                gpu.config.height,
+                &Hotbar::new(),
+                13.0,
+                9.0,
+                true,
+            );
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",
                 game.loaded_chunk_count(),
