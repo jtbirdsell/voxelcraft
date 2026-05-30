@@ -57,9 +57,13 @@ impl ChunkRenderer {
     pub fn new(gpu: &Gpu) -> Self {
         let device = &gpu.device;
 
+        // Both the chunk and water shaders are prefixed with the shared RTX scaffolding
+        // (camera/volume bindings, vertex stage, the DDA voxel tracer) so there is one copy.
+        let rtx_common = include_str!("../assets/shaders/rtx_common.wgsl");
+        let chunk_src = format!("{rtx_common}{}", include_str!("../assets/shaders/chunk.wgsl"));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/chunk.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(chunk_src.into()),
         });
 
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -151,9 +155,10 @@ impl ChunkRenderer {
         });
 
         // Translucent water pipeline: same vertex format, alpha blend, depth test but no write.
+        let water_src = format!("{rtx_common}{}", include_str!("../assets/shaders/water.wgsl"));
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("water-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/water.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(water_src.into()),
         });
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water-pipeline"),

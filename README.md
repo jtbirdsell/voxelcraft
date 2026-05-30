@@ -3,8 +3,8 @@
 A Minecraft-equivalent voxel sandbox written from scratch in **Rust + wgpu**, tuned for an
 RTX 4090 / i9-14900K. Infinite procedurally-generated world, multithreaded chunk streaming,
 break/place building, day/night, transparent water, world save/load, and **ray-traced lighting**
-— sun shadows, ambient occlusion, and one-bounce colored global illumination — computed against
-the actual voxel geometry on the GPU.
+— sun shadows, ambient occlusion, one-bounce colored global illumination, and water reflections —
+computed against the actual voxel geometry on the GPU.
 
 ## Run
 
@@ -56,9 +56,13 @@ The world saves automatically on quit to `saves/world/`.
   and sun-lit *material color* on a hit — soft contact AO and colored light bleeding between blocks.
   `R` cycles off → shadows → shadows + GI; interactive traces a few rays per pixel, the headless
   screenshot path traces 64 for a clean image.
+- **M8** — **ray-traced water reflections**: the water surface marches a mirror ray through the
+  same voxel volume (lit material on a hit, sky + a sun glint on a miss) and blends it in by a
+  Schlick-Fresnel term, so water mirrors the shoreline and sky at grazing angles and shows its own
+  tint head-on. The DDA tracer now lives in one shared `rtx_common.wgsl` used by both shaders.
 
 Performance: **~144 fps (vsync-capped)** at render distance 12 with shadows on — the GPU has
-large headroom, which GI spends on per-pixel hemisphere ray tracing.
+large headroom, which GI and reflections spend on per-pixel ray tracing.
 
 ## Architecture
 
@@ -80,7 +84,7 @@ src/
   overlay.rs        block highlight + crosshair/hotbar geometry
   persistence.rs    LZ4 chunk save/load + level header
   capture.rs        offscreen screenshot (headless verification)
-assets/shaders/     chunk / water / line / ui WGSL
+assets/shaders/     rtx_common (shared bindings + voxel DDA tracer) + chunk / water / line / ui WGSL
 ```
 
 **Hardware-driven choices:** worker threads keep all cores busy on generation/meshing while the
@@ -89,6 +93,7 @@ GPU is spent on ray-traced shadows, ambient occlusion and global illumination ra
 
 ## Possible next steps
 
-Ray-traced water reflections, flowing fluids, survival (health/hunger, mobs, crafting), texture
-atlas, GPU-driven indirect rendering for much larger render distances, and a temporal/spatial
-denoiser so interactive GI can use fewer rays per pixel without noise.
+Flowing fluids (with emissive lava lighting the scene through the GI volume), survival
+(health/hunger, mobs, crafting), texture atlas, GPU-driven indirect rendering for much larger
+render distances, and a temporal/spatial denoiser so interactive GI can use fewer rays per pixel
+without noise.

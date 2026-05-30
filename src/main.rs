@@ -273,38 +273,40 @@ impl ApplicationHandler for App {
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
             game.set_rtx_quality(64);
             let environment = Environment::new(0.34);
-            let player = Player::new(Vec3::new(21.0, 98.5, 19.5), true);
-            let camera = Camera::new(player.eye(), std::f32::consts::PI, -0.12);
+            // The demo floats at y~155, clear above natural terrain (which tops out near ~120),
+            // so nothing occludes it — same trick the M7 Cornell box used.
+            let player = Player::new(Vec3::new(10.0, 155.88, 20.0), true);
+            let camera = Camera::new(player.eye(), 0.0, -0.05);
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);
 
-            // A Cornell-box-style room to showcase ray-traced AO + colored global illumination.
-            // White (snow) floor and one white wall catch color bleeding from a sun-lit green
-            // (leaves) back wall and a warm (sand) side wall; the open top lets the sun pour in
-            // and the open front (+X) faces the camera. A white pillar shows contact AO and
-            // picks up tint from both coloured walls. Leaves are used for the green wall because
-            // their rendered face color and the GI bounce color both read green (grass sides are
-            // tan), keeping the rendered wall and the light it bleeds consistent.
-            for x in 9..=14 {
-                for z in 16..=22 {
-                    game.set_block(&gpu, &renderer, IVec3::new(x, 96, z), block::SNOW); // floor
+            // A reflective pool to showcase ray-traced water: a stone basin holds a flat sheet of
+            // water; across it a colorful far wall (leaves/sand/snow/stone/wood) and the sky are
+            // mirrored in the surface — strongest at the grazing angle the low camera looks along.
+            // Ray-traced AO/GI still shade the basin and the wall, so this shot stacks M7 + M8.
+            for z in 10..=30 {
+                for x in 8..=40 {
+                    game.set_block(&gpu, &renderer, IVec3::new(x, 155, z), block::STONE); // basin floor
+                }
+                for x in 14..=37 {
+                    game.set_block(&gpu, &renderer, IVec3::new(x, 156, z), block::WATER); // water sheet
+                }
+                // Colorful far shoreline, reflected in the pool.
+                let id = match z % 5 {
+                    0 => block::LEAVES,
+                    1 => block::SAND,
+                    2 => block::SNOW,
+                    3 => block::STONE,
+                    _ => block::WOOD,
+                };
+                for y in 156..=171 {
+                    game.set_block(&gpu, &renderer, IVec3::new(38, y, z), id);
                 }
             }
-            for y in 97..=101 {
-                for z in 16..=22 {
-                    game.set_block(&gpu, &renderer, IVec3::new(9, y, z), block::LEAVES); // back wall (green)
-                }
-                for x in 9..=14 {
-                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 16), block::SAND); // side wall (warm)
-                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 22), block::SNOW); // side wall (white)
-                }
-            }
-            game.set_block(&gpu, &renderer, IVec3::new(12, 97, 19), block::SNOW); // pillar
-            game.set_block(&gpu, &renderer, IVec3::new(12, 98, 19), block::SNOW);
-            let highlight = Some(IVec3::new(12, 98, 19));
+            let highlight = Some(IVec3::new(38, 163, 20));
 
-            // Populate the voxel volume so ray-traced lighting appears in the screenshot.
+            // Populate the voxel volume so reflections/shadows have geometry to trace against.
             game.prime_volume(&gpu, player.position);
 
             camera_uniform.update(&camera, gpu.aspect());
