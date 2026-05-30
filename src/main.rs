@@ -11,6 +11,7 @@ mod camera;
 mod capture;
 mod entity;
 mod environment;
+mod font;
 mod frustum;
 mod game;
 mod gpu;
@@ -69,6 +70,8 @@ struct State {
     last_frame: Instant,
     fps_accum: f32,
     fps_frames: u32,
+    fps_smooth: f32,
+    debug_f3: bool,
 }
 
 struct App {
@@ -141,6 +144,9 @@ impl App {
             KeyCode::KeyR if pressed && !repeat => {
                 let mode = state.game.cycle_rtx();
                 log::info!("RTX lighting: {mode}");
+            }
+            KeyCode::F3 if pressed && !repeat => {
+                state.debug_f3 = !state.debug_f3;
             }
             KeyCode::Digit1 => maybe_select(state, pressed, 0),
             KeyCode::Digit2 => maybe_select(state, pressed, 1),
@@ -240,6 +246,30 @@ impl App {
             visible.push(em);
         }
         let highlight = target.as_ref().map(|h| h.block);
+        let inst_fps = 1.0 / dt.max(1e-4);
+        state.fps_smooth = if state.fps_smooth <= 0.0 {
+            inst_fps
+        } else {
+            state.fps_smooth * 0.92 + inst_fps * 0.08
+        };
+        let debug_lines = if state.debug_f3 {
+            let p = state.player.position;
+            Some(build_debug_lines(
+                state.fps_smooth,
+                p,
+                state.camera.forward(),
+                state.camera.yaw,
+                state.camera.pitch,
+                state.game.biome_name_at(p.x.floor() as i32, p.z.floor() as i32),
+                state.game.loaded_chunk_count(),
+                state.game.mesh_count(),
+                state.game.entity_count(),
+                state.player.flying,
+                state.game.rtx_mode_name(),
+            ))
+        } else {
+            None
+        };
         let ui = overlay::build_ui(
             state.gpu.config.width,
             state.gpu.config.height,
@@ -247,6 +277,7 @@ impl App {
             state.player.health,
             state.player.hunger,
             !state.player.flying,
+            debug_lines.as_deref(),
         );
         let volume_bg = state.game.volume_bind_group();
         state
@@ -276,6 +307,44 @@ fn maybe_select(state: &mut State, pressed: bool, index: usize) {
     if pressed {
         state.hotbar.select(index);
     }
+}
+
+/// Assemble the F3 debug overlay text lines.
+#[allow(clippy::too_many_arguments)]
+fn build_debug_lines(
+    fps: f32,
+    pos: Vec3,
+    forward: Vec3,
+    yaw: f32,
+    pitch: f32,
+    biome: &str,
+    chunks: usize,
+    meshes: usize,
+    entities: usize,
+    flying: bool,
+    rtx: &str,
+) -> Vec<String> {
+    let (cx, cy, cz) = (
+        (pos.x.floor() as i32).div_euclid(32),
+        (pos.y.floor() as i32).div_euclid(32),
+        (pos.z.floor() as i32).div_euclid(32),
+    );
+    let dir = if forward.x.abs() > forward.z.abs() {
+        if forward.x > 0.0 { "East +X" } else { "West -X" }
+    } else if forward.z > 0.0 {
+        "South +Z"
+    } else {
+        "North -Z"
+    };
+    vec![
+        format!("Voxelcraft  {fps:.0} fps"),
+        format!("XYZ {:.1} {:.1} {:.1}", pos.x, pos.y, pos.z),
+        format!("Chunk {cx} {cy} {cz}"),
+        format!("Facing {dir}  yaw {:.0} pitch {:.0}", yaw.to_degrees(), pitch.to_degrees()),
+        format!("Biome {biome}"),
+        format!("Chunks {chunks}  Meshes {meshes}  Entities {entities}"),
+        format!("Mode {}  RTX {rtx}", if flying { "fly" } else { "walk" }),
+    ]
 }
 
 impl ApplicationHandler for App {
@@ -354,6 +423,19 @@ impl ApplicationHandler for App {
                 visible.push(em);
             }
             let volume_bg = game.volume_bind_group();
+            let dbg = build_debug_lines(
+                60.0,
+                player.position,
+                camera.forward(),
+                cam_yaw,
+                cam_pitch,
+                game.biome_name_at(player.position.x.floor() as i32, player.position.z.floor() as i32),
+                game.loaded_chunk_count(),
+                game.mesh_count(),
+                game.entity_count(),
+                false,
+                game.rtx_mode_name(),
+            );
             let ui = overlay::build_ui(
                 gpu.config.width,
                 gpu.config.height,
@@ -361,6 +443,7 @@ impl ApplicationHandler for App {
                 20.0,
                 20.0,
                 false,
+                Some(&dbg),
             );
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",
@@ -425,6 +508,8 @@ impl ApplicationHandler for App {
             last_frame: Instant::now(),
             fps_accum: 0.0,
             fps_frames: 0,
+            fps_smooth: 0.0,
+            debug_f3: false,
         });
         self.set_grab(true);
     }

@@ -98,6 +98,20 @@ impl Worldgen {
         }
     }
 
+    /// Human-readable biome name at a world column (for the F3 debug overlay).
+    pub fn biome_name(&self, wx: i32, wz: i32) -> &'static str {
+        let h = self.height(wx, wz);
+        match self.biome(wx, wz, h) {
+            Biome::Ocean => "Ocean",
+            Biome::Beach => "Beach",
+            Biome::Desert => "Desert",
+            Biome::Plains => "Plains",
+            Biome::Forest => "Forest",
+            Biome::Snowy => "Snowy",
+            Biome::Mountains => "Mountains",
+        }
+    }
+
     fn surface_top(&self, biome: Biome, height: i32) -> BlockId {
         match biome {
             Biome::Desert | Biome::Beach => block::SAND,

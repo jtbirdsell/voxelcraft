@@ -1,23 +1,42 @@
-// Screen-space UI: NDC position + RGBA color, alpha-blended, no depth.
+// Screen-space UI: NDC position + atlas UV + RGBA color + mode, alpha-blended, no depth.
+//   mode 0 = flat color (rects)
+//   mode 1 = atlas sample * color (block/item icons)
+//   mode 2 = font coverage: rgb = color.rgb, alpha = color.a * atlas.r (crisp bitmap glyphs)
+
+@group(0) @binding(0) var ui_tex: texture_2d<f32>;
+@group(0) @binding(1) var ui_samp: sampler;
 
 struct VsIn {
     @location(0) pos: vec2<f32>,
-    @location(1) color: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) mode: f32,
 };
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) mode: u32,
 };
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     out.clip = vec4<f32>(in.pos, 0.0, 1.0);
+    out.uv = in.uv;
     out.color = in.color;
+    out.mode = u32(in.mode + 0.5);
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    if (in.mode == 0u) {
+        return in.color;
+    }
+    let tex = textureSample(ui_tex, ui_samp, in.uv);
+    if (in.mode == 2u) {
+        return vec4<f32>(in.color.rgb, in.color.a * tex.r);
+    }
+    return tex * in.color;
 }

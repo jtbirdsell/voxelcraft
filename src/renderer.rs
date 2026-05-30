@@ -47,6 +47,7 @@ pub struct ChunkRenderer {
     water_pipeline: wgpu::RenderPipeline,
     highlight_pipeline: wgpu::RenderPipeline,
     ui_pipeline: wgpu::RenderPipeline,
+    ui_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     volume_bgl: wgpu::BindGroupLayout,
@@ -258,9 +259,87 @@ impl ChunkRenderer {
             label: Some("ui-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/ui.wgsl").into()),
         });
+        // Bitmap-font atlas (R8 coverage) + nearest sampler for the textured UI pipeline.
+        let font_img = crate::font::bake_r8();
+        let font_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ui-font-atlas"),
+            size: wgpu::Extent3d {
+                width: crate::font::ATLAS_W,
+                height: crate::font::ATLAS_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &font_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &font_img,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(crate::font::ATLAS_W),
+                rows_per_image: Some(crate::font::ATLAS_H),
+            },
+            wgpu::Extent3d {
+                width: crate::font::ATLAS_W,
+                height: crate::font::ATLAS_H,
+                depth_or_array_layers: 1,
+            },
+        );
+        let font_view = font_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let ui_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let ui_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ui-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ui_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui-bg"),
+            layout: &ui_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&font_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&ui_sampler),
+                },
+            ],
+        });
         let ui_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui-pipeline-layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[Some(&ui_bgl)],
             immediate_size: 0,
         });
         let ui_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -306,6 +385,7 @@ impl ChunkRenderer {
             water_pipeline,
             highlight_pipeline,
             ui_pipeline,
+            ui_bind_group,
             camera_buffer,
             camera_bind_group,
             volume_bgl,
@@ -511,6 +591,7 @@ impl ChunkRenderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.ui_pipeline);
+            pass.set_bind_group(0, &self.ui_bind_group, &[]);
             pass.set_vertex_buffer(0, buf.slice(..));
             pass.draw(0..*count, 0..1);
         }

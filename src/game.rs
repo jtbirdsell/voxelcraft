@@ -612,6 +612,16 @@ impl Game {
         self.seed
     }
 
+    /// Biome name at a world column (F3 debug overlay).
+    pub fn biome_name_at(&self, wx: i32, wz: i32) -> &'static str {
+        self.worldgen.biome_name(wx, wz)
+    }
+
+    /// Current ray-traced lighting mode name (F3 debug overlay).
+    pub fn rtx_mode_name(&self) -> &'static str {
+        self.volume.rtx_mode_name()
+    }
+
     pub fn volume_bind_group(&self) -> &wgpu::BindGroup {
         self.volume.bind_group()
     }

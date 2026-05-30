@@ -4,6 +4,7 @@
 use glam::{IVec3, Vec3};
 
 use crate::block::{self, BlockId};
+use crate::font;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -26,12 +27,15 @@ impl LineVertex {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct UiVertex {
     pub pos: [f32; 2],
+    pub uv: [f32; 2],
     pub color: [f32; 4],
+    /// 0 = flat color (rects), 1 = atlas sample * color (icons), 2 = font coverage (alpha = tex.r).
+    pub mode: f32,
 }
 
 impl UiVertex {
-    pub const ATTRS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+    pub const ATTRS: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32];
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<UiVertex>() as wgpu::BufferAddress,
@@ -126,7 +130,55 @@ fn push_px_rect(
     let p2 = to_ndc(x + w, y + h);
     let p3 = to_ndc(x, y + h);
     for p in [p0, p1, p2, p0, p2, p3] {
-        out.push(UiVertex { pos: p, color });
+        out.push(UiVertex { pos: p, uv: [0.0, 0.0], color, mode: 0.0 });
+    }
+}
+
+/// One textured glyph quad (mode 2 = font coverage) at pixel rect (x,y,size,size), atlas `uv`.
+#[allow(clippy::too_many_arguments)]
+fn push_glyph(
+    out: &mut Vec<UiVertex>,
+    sw: f32,
+    sh: f32,
+    x: f32,
+    y: f32,
+    size: f32,
+    uv: [f32; 4],
+    color: [f32; 4],
+) {
+    let to_ndc = |px: f32, py: f32| [px / sw * 2.0 - 1.0, 1.0 - py / sh * 2.0];
+    let p = [
+        to_ndc(x, y),
+        to_ndc(x + size, y),
+        to_ndc(x + size, y + size),
+        to_ndc(x, y + size),
+    ];
+    let t = [
+        [uv[0], uv[1]],
+        [uv[2], uv[1]],
+        [uv[2], uv[3]],
+        [uv[0], uv[3]],
+    ];
+    for &i in &[0usize, 1, 2, 0, 2, 3] {
+        out.push(UiVertex { pos: p[i], uv: t[i], color, mode: 2.0 });
+    }
+}
+
+/// Width in pixels that `push_text` would advance for `text` at `scale`.
+pub fn text_width(text: &str, scale: f32) -> f32 {
+    text.len() as f32 * 6.0 * scale
+}
+
+/// Draw an ASCII line at pixel (x,y) top-left; each glyph cell is `8*scale` px, tracking `6*scale`.
+pub fn push_text(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, scale: f32, text: &str, color: [f32; 4]) {
+    let cell = font::GLYPH as f32 * scale;
+    let adv = 6.0 * scale;
+    let mut cx = x;
+    for &b in text.as_bytes() {
+        if b >= 0x20 && b < 0x80 && b != b' ' {
+            push_glyph(out, sw, sh, cx, y, cell, font::glyph_uv(b), color);
+        }
+        cx += adv;
     }
 }
 
@@ -156,6 +208,7 @@ fn stat_bar(
 }
 
 /// Build the HUD (crosshair + hotbar, plus health/hunger bars in survival) for the framebuffer.
+#[allow(clippy::too_many_arguments)]
 pub fn build_ui(
     width: u32,
     height: u32,
@@ -163,6 +216,7 @@ pub fn build_ui(
     health: f32,
     hunger: f32,
     survival: bool,
+    debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
     let sh = height as f32;
@@ -212,6 +266,31 @@ pub fn build_ui(
         let hunger_x = sw * 0.5 + 12.0;
         stat_bar(&mut v, sw, sh, health_x, bars_y, pip, gap, pips, health, [0.85, 0.13, 0.15, 1.0]);
         stat_bar(&mut v, sw, sh, hunger_x, bars_y, pip, gap, pips, hunger, [0.86, 0.55, 0.18, 1.0]);
+    }
+
+    // F3-style debug overlay (top-left): a translucent backing panel + one text line per entry.
+    if let Some(lines) = debug {
+        let scale = 2.0;
+        let lh = font::GLYPH as f32 * scale + 2.0;
+        let pad = 4.0;
+        let (bx, by) = (8.0, 8.0);
+        let maxw = lines
+            .iter()
+            .map(|l| text_width(l, scale))
+            .fold(0.0_f32, f32::max);
+        push_px_rect(
+            &mut v,
+            sw,
+            sh,
+            bx - pad,
+            by - pad,
+            maxw + pad * 2.0,
+            lines.len() as f32 * lh + pad,
+            [0.0, 0.0, 0.0, 0.5],
+        );
+        for (i, line) in lines.iter().enumerate() {
+            push_text(&mut v, sw, sh, bx, by + i as f32 * lh, scale, line, [1.0, 1.0, 1.0, 1.0]);
+        }
     }
 
     v
