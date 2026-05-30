@@ -12,6 +12,7 @@ mod game;
 mod gpu;
 mod mesher;
 mod renderer;
+mod worker;
 mod world;
 
 use std::sync::Arc;

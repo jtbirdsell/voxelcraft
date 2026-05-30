@@ -1,14 +1,20 @@
 //! Streaming manager: keeps chunks generated and meshed around the camera within a render
-//! distance, frustum-culls them for drawing, and unloads distant ones. Single-threaded with a
-//! per-frame work budget for now; a worker pool replaces the budget next.
+//! distance using a worker pool, frustum-culls them for drawing, and unloads distant ones.
+//!
+//! Threading model: workers generate chunks and build meshes from immutable snapshots; the main
+//! thread owns the world map (the only mutator) and performs GPU uploads (budgeted per frame).
+
+use std::collections::VecDeque;
+use std::sync::Arc;
 
 use glam::{IVec3, Vec3};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::frustum::Frustum;
 use crate::gpu::Gpu;
-use crate::mesher;
+use crate::mesher::{self, MeshData};
 use crate::renderer::{ChunkRenderer, GpuMesh};
+use crate::worker::{Job, JobResult, WorkerPool};
 use crate::world::{self, World, CHUNK_SIZE_I, WORLD_HEIGHT_CHUNKS};
 
 pub struct Game {
@@ -19,8 +25,15 @@ pub struct Game {
     center: IVec3,
     /// XZ offsets within (render_distance + 1), sorted nearest-first.
     offsets: Vec<(i32, i32, i32)>, // (dx, dz, dist2)
-    gen_budget: usize,
-    mesh_budget: usize,
+
+    pool: WorkerPool,
+    pending_gen: FxHashSet<IVec3>,
+    pending_mesh: FxHashSet<IVec3>,
+    ready_meshes: VecDeque<(IVec3, MeshData)>,
+
+    max_inflight_gen: usize,
+    max_inflight_mesh: usize,
+    upload_budget: usize,
 }
 
 impl Game {
@@ -37,14 +50,26 @@ impl Game {
         }
         offsets.sort_by_key(|&(_, _, d2)| d2);
 
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(2))
+            .unwrap_or(4)
+            .max(1);
+        let pool = WorkerPool::new(seed, workers);
+        log::info!("Worker pool: {} threads", pool.worker_count());
+
         Self {
             world: World::new(seed),
             meshes: FxHashMap::default(),
             render_distance,
             center: IVec3::new(i32::MIN, 0, i32::MIN),
             offsets,
-            gen_budget: 96,
-            mesh_budget: 48,
+            pool,
+            pending_gen: FxHashSet::default(),
+            pending_mesh: FxHashSet::default(),
+            ready_meshes: VecDeque::new(),
+            max_inflight_gen: 1024,
+            max_inflight_mesh: 512,
+            upload_budget: 64,
         }
     }
 
@@ -56,14 +81,17 @@ impl Game {
         ))
     }
 
+    #[inline]
+    fn within(&self, pos: IVec3, radius: i32) -> bool {
+        (pos.x - self.center.x).abs() <= radius && (pos.z - self.center.z).abs() <= radius
+    }
+
     fn neighbors_ready(&self, pos: IVec3) -> bool {
-        // Horizontal face neighbors must exist.
         for off in [IVec3::X, -IVec3::X, IVec3::Z, -IVec3::Z] {
             if !self.world.is_generated(pos + off) {
                 return false;
             }
         }
-        // Vertical neighbors only when within the world's vertical bounds.
         if pos.y - 1 >= 0 && !self.world.is_generated(pos - IVec3::Y) {
             return false;
         }
@@ -73,71 +101,105 @@ impl Game {
         true
     }
 
-    fn build_and_upload(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, pos: IVec3) {
-        if let Some(neigh) = self.world.neighborhood(pos) {
-            let origin = world::chunk_origin(pos).to_array();
-            let data = mesher::build_mesh(&neigh, origin);
+    pub fn update(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, camera_pos: Vec3) {
+        self.center = Self::center_of(camera_pos);
+        let r = self.render_distance;
+
+        // 1. Drain worker results.
+        for result in self.pool.drain() {
+            match result {
+                JobResult::Generated { pos, chunk } => {
+                    self.pending_gen.remove(&pos);
+                    if self.within(pos, r + 2) {
+                        self.world.chunks.insert(pos, Arc::new(chunk));
+                    }
+                }
+                JobResult::Meshed { pos, mesh } => {
+                    // Keep `pos` in `pending_mesh` until it is actually uploaded, so the
+                    // submission loop below doesn't re-submit a chunk that's awaiting upload.
+                    if self.within(pos, r + 1) {
+                        self.ready_meshes.push_back((pos, mesh));
+                    } else {
+                        self.pending_mesh.remove(&pos);
+                    }
+                }
+            }
+        }
+
+        // 2. Upload a budget of finished meshes to the GPU (main thread only).
+        let mut uploads = 0;
+        while uploads < self.upload_budget {
+            let Some((pos, data)) = self.ready_meshes.pop_front() else {
+                break;
+            };
             let gpu_mesh = if data.is_empty() {
                 None
             } else {
                 Some(renderer.upload_mesh(gpu, &data))
             };
             self.meshes.insert(pos, gpu_mesh);
+            self.pending_mesh.remove(&pos);
+            uploads += 1;
         }
-    }
 
-    /// Stream chunks toward being generated + meshed around the camera, within a per-call budget.
-    pub fn update(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, camera_pos: Vec3) {
-        self.center = Self::center_of(camera_pos);
         let (cx, cz) = (self.center.x, self.center.z);
-        let r = self.render_distance;
 
-        // 1. Generation (radius r+1, nearest-first).
-        let mut gen_left = self.gen_budget;
+        // 3. Submit generation jobs (nearest-first), bounded by in-flight cap.
         'generate: for &(dx, dz, _) in &self.offsets {
+            if self.pending_gen.len() >= self.max_inflight_gen {
+                break;
+            }
             for cy in 0..WORLD_HEIGHT_CHUNKS {
                 let pos = IVec3::new(cx + dx, cy, cz + dz);
-                if !self.world.is_generated(pos) {
-                    self.world.ensure_generated(pos);
-                    gen_left -= 1;
-                    if gen_left == 0 {
+                if !self.world.is_generated(pos) && !self.pending_gen.contains(&pos) {
+                    self.pending_gen.insert(pos);
+                    self.pool.submit(Job::Generate { pos });
+                    if self.pending_gen.len() >= self.max_inflight_gen {
                         break 'generate;
                     }
                 }
             }
         }
 
-        // 2. Meshing (radius r, nearest-first, only where neighbors are ready).
-        let mut mesh_left = self.mesh_budget;
-        let mut to_mesh: Vec<IVec3> = Vec::new();
-        'find: for &(dx, dz, dist2) in &self.offsets {
+        // 4. Submit mesh jobs for chunks whose neighbors are ready.
+        'mesh: for &(dx, dz, dist2) in &self.offsets {
             if dist2 > r * r {
+                break;
+            }
+            if self.pending_mesh.len() >= self.max_inflight_mesh {
                 break;
             }
             for cy in 0..WORLD_HEIGHT_CHUNKS {
                 let pos = IVec3::new(cx + dx, cy, cz + dz);
-                if !self.meshes.contains_key(&pos) && self.neighbors_ready(pos) {
-                    to_mesh.push(pos);
-                    mesh_left -= 1;
-                    if mesh_left == 0 {
-                        break 'find;
+                if !self.meshes.contains_key(&pos)
+                    && !self.pending_mesh.contains(&pos)
+                    && self.neighbors_ready(pos)
+                {
+                    if let Some(neigh) = self.world.neighborhood(pos) {
+                        let origin = world::chunk_origin(pos).to_array();
+                        self.pending_mesh.insert(pos);
+                        self.pool.submit(Job::Mesh { pos, neigh, origin });
+                        if self.pending_mesh.len() >= self.max_inflight_mesh {
+                            break 'mesh;
+                        }
                     }
                 }
             }
         }
-        for pos in to_mesh {
-            self.build_and_upload(gpu, renderer, pos);
-        }
 
-        // 3. Unload chunks well beyond the render distance.
+        // 5. Unload distant chunks/meshes.
         let keep = r + 2;
         let center = self.center;
-        self.meshes.retain(|pos, _| {
+        let in_keep = |pos: &IVec3| {
             (pos.x - center.x).abs() <= keep && (pos.z - center.z).abs() <= keep
-        });
-        self.world.chunks.retain(|pos, _| {
-            (pos.x - center.x).abs() <= keep + 1 && (pos.z - center.z).abs() <= keep + 1
-        });
+        };
+        self.meshes.retain(|pos, _| in_keep(pos));
+        self.world
+            .chunks
+            .retain(|pos, _| (pos.x - center.x).abs() <= keep + 1 && (pos.z - center.z).abs() <= keep + 1);
+        self.pending_mesh.retain(in_keep);
+        self.pending_gen
+            .retain(|pos| (pos.x - center.x).abs() <= keep + 1 && (pos.z - center.z).abs() <= keep + 1);
     }
 
     /// Fully generate and mesh the current radius synchronously (used for headless screenshots).
@@ -148,8 +210,7 @@ impl Game {
 
         for &(dx, dz, _) in &self.offsets {
             for cy in 0..WORLD_HEIGHT_CHUNKS {
-                self.world
-                    .ensure_generated(IVec3::new(cx + dx, cy, cz + dz));
+                self.world.ensure_generated(IVec3::new(cx + dx, cy, cz + dz));
             }
         }
         let positions: Vec<IVec3> = self
@@ -162,12 +223,20 @@ impl Game {
             .collect();
         for pos in positions {
             if !self.meshes.contains_key(&pos) {
-                self.build_and_upload(gpu, renderer, pos);
+                if let Some(neigh) = self.world.neighborhood(pos) {
+                    let origin = world::chunk_origin(pos).to_array();
+                    let data = mesher::build_mesh(&neigh, origin);
+                    let gpu_mesh = if data.is_empty() {
+                        None
+                    } else {
+                        Some(renderer.upload_mesh(gpu, &data))
+                    };
+                    self.meshes.insert(pos, gpu_mesh);
+                }
             }
         }
     }
 
-    /// Collect references to all loaded, non-empty meshes whose chunk AABB is in the frustum.
     pub fn visible_meshes(&self, frustum: &Frustum) -> Vec<&GpuMesh> {
         let mut out = Vec::new();
         for (pos, mesh) in &self.meshes {
