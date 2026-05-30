@@ -31,6 +31,12 @@ const FLUID_BUDGET: usize = 96;
 const WATER_SPREAD: u8 = 7;
 const LAVA_SPREAD: u8 = 3;
 
+/// Natural-spawn tuning (M31).
+const SPAWN_INTERVAL: f32 = 2.0; // seconds between spawn attempts
+const MOB_CAP: usize = 16; // stop spawning past this many live mobs
+const SPAWN_MIN: f32 = 8.0; // spawn ring around the player (blocks)
+const SPAWN_MAX: f32 = 24.0;
+
 /// Creeper blast damage at distance `d` from the center: max at the center, linear falloff to 0 at
 /// `radius * 1.6`.
 fn explosion_damage(d: f32, radius: f32) -> f32 {
@@ -178,6 +184,10 @@ pub struct Game {
 
     /// Furnaces the player has opened, keyed by block position; ticked by `step_furnaces`.
     furnaces: FxHashMap<IVec3, FurnaceState>,
+
+    /// Natural-spawn cadence + a small RNG for spawn placement (M31).
+    spawn_timer: f32,
+    spawn_rng: u64,
 }
 
 impl Game {
@@ -237,6 +247,8 @@ impl Game {
             fluid_timer: 0.0,
             entities: Entities::new(),
             furnaces: FxHashMap::default(),
+            spawn_timer: 0.0,
+            spawn_rng: seed ^ 0x5FA1_2E37_9B1D_C0DE,
         }
     }
 
@@ -274,6 +286,7 @@ impl Game {
         renderer: &ChunkRenderer,
         camera_pos: Vec3,
         dt: f32,
+        day: f32,
     ) -> crate::entity::Collected {
         self.center = Self::center_of(camera_pos);
         let r = self.render_distance;
@@ -419,6 +432,13 @@ impl Game {
         // Advance any active furnaces (pure item-state tick; no world/GPU touch).
         for f in self.furnaces.values_mut() {
             step_furnace(f, dt);
+        }
+
+        // Natural spawning: one gated attempt per interval around the player (M31).
+        self.spawn_timer += dt;
+        if self.spawn_timer >= SPAWN_INTERVAL {
+            self.spawn_timer -= SPAWN_INTERVAL;
+            self.try_spawn(day, camera_pos);
         }
 
         // Update mobs and dropped items (AI + physics). The collision closure borrows only the
@@ -797,6 +817,69 @@ impl Game {
         self.entities.spawn_arrow(pos, vel);
     }
 
+    fn spawn_rand(&mut self) -> u64 {
+        let mut x = self.spawn_rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.spawn_rng = x;
+        x
+    }
+
+    /// Topmost solid surface at (wx,wz) with 2 air blocks above it (room for a mob), else None.
+    fn surface_at(&self, wx: i32, wz: i32) -> Option<(i32, BlockId)> {
+        for y in (1..120).rev() {
+            let here = self.block_at(IVec3::new(wx, y, wz));
+            if block::is_solid(here)
+                && self.block_at(IVec3::new(wx, y + 1, wz)) == block::AIR
+                && self.block_at(IVec3::new(wx, y + 2, wz)) == block::AIR
+            {
+                return Some((y, here));
+            }
+        }
+        None
+    }
+
+    /// One natural-spawn attempt around the player: hostiles at night, passives by day on grass.
+    /// `day` is the day factor (0 = night, 1 = full day). Capped + only on solid footing.
+    pub fn try_spawn(&mut self, day: f32, player_pos: Vec3) -> bool {
+        if self.entities.mob_count() >= MOB_CAP {
+            return false;
+        }
+        use crate::entity::Species;
+        const HOSTILE: [Species; 4] = [
+            Species::Zombie,
+            Species::Skeleton,
+            Species::Creeper,
+            Species::Spider,
+        ];
+        const PASSIVE: [Species; 4] = [
+            Species::Cow,
+            Species::Pig,
+            Species::Sheep,
+            Species::Chicken,
+        ];
+        let r = self.spawn_rand();
+        let angle = (r & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+        let dist = SPAWN_MIN + ((r >> 16) & 0xffff) as f32 / 65535.0 * (SPAWN_MAX - SPAWN_MIN);
+        let wx = (player_pos.x + angle.cos() * dist).floor() as i32;
+        let wz = (player_pos.z + angle.sin() * dist).floor() as i32;
+        let Some((sy, surf)) = self.surface_at(wx, wz) else {
+            return false;
+        };
+        let pos = Vec3::new(wx as f32 + 0.5, (sy + 1) as f32, wz as f32 + 0.5);
+        let pick = ((r >> 32) & 3) as usize;
+        if day < 0.35 {
+            self.entities.spawn_mob(pos, HOSTILE[pick]);
+            true
+        } else if day > 0.6 && surf == block::GRASS {
+            self.entities.spawn_mob(pos, PASSIVE[pick]);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Furnace state at `pos`, creating an empty one (the player just opened it).
     pub fn furnace_mut(&mut self, pos: IVec3) -> &mut FurnaceState {
         self.furnaces.entry(pos).or_default()
@@ -850,6 +933,17 @@ impl Game {
     /// One-line mob AI-state tally (headless verification).
     pub fn mob_ai_summary(&self) -> String {
         self.entities.ai_summary()
+    }
+
+    /// Passive/hostile mob tally + live mob count (headless spawn verification).
+    pub fn mob_species_summary(&self) -> String {
+        self.entities.species_summary()
+    }
+    pub fn mob_count(&self) -> usize {
+        self.entities.mob_count()
+    }
+    pub fn despawn_all_mobs(&mut self) {
+        self.entities.clear_mobs();
     }
 
     /// Distance to the nearest mob the ray hits within `reach` (None = no mob in the way).

@@ -25,6 +25,7 @@ const XP_HOMING_SPEED: f32 = 9.0;
 // Mob AI (M28) tuning.
 const DETECT_RADIUS: f32 = 14.0; // hostile mobs notice the player within this (needs line-of-sight)
 const CALM_RADIUS: f32 = 22.0; // ...and give up the chase beyond this
+const DESPAWN_RADIUS: f32 = 48.0; // mobs further than this from the player vanish (M31)
 const FLEE_RADIUS: f32 = 5.0; // passive mobs bolt when the player gets this close (or after a hit)
 const ATTACK_RADIUS: f32 = 1.6; // hostile mobs lunge/attack when this close
 const CHASE_SPEED: f32 = 3.2;
@@ -309,6 +310,29 @@ impl Entities {
         self.list.len()
     }
 
+    /// Number of live mobs (excludes dropped items, XP orbs, arrows) — for the spawn cap.
+    pub fn mob_count(&self) -> usize {
+        self.list
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::Mob(_)))
+            .count()
+    }
+
+    /// Passive/hostile mob tally (headless spawn verification).
+    pub fn species_summary(&self) -> String {
+        let (mut passive, mut hostile) = (0, 0);
+        for e in &self.list {
+            if let Kind::Mob(m) = e.kind {
+                if m.species.hostile() {
+                    hostile += 1;
+                } else {
+                    passive += 1;
+                }
+            }
+        }
+        format!("passive:{passive} hostile:{hostile}")
+    }
+
     /// One-line tally of mob AI states (headless verification of the M28 state machine).
     pub fn ai_summary(&self) -> String {
         let (mut idle, mut wander, mut flee, mut chase, mut attack) = (0, 0, 0, 0, 0);
@@ -378,6 +402,11 @@ impl Entities {
         e.vel.z += kb.z * KNOCKBACK;
         e.vel.y = e.vel.y.max(0.0) + 3.0; // small pop-up
         true
+    }
+
+    /// Debug: remove all mobs (keeps items/XP/arrows) — headless spawn-rule verification.
+    pub fn clear_mobs(&mut self) {
+        self.list.retain(|e| !matches!(e.kind, Kind::Mob(_)));
     }
 
     /// Debug: flash every mob red (headless hurt-flash verification screenshot).
@@ -615,8 +644,8 @@ impl Entities {
                     } else if m.health <= 0.0 {
                         e.dead = true;
                         deaths.push((e.pos, m.species)); // killed → drops loot
-                    } else if e.pos.y < FALL_OUT_Y {
-                        e.dead = true; // fell out of the world → no loot
+                    } else if e.pos.y < FALL_OUT_Y || dist > DESPAWN_RADIUS {
+                        e.dead = true; // fell out of the world / wandered too far → no loot
                     }
                     e.kind = Kind::Mob(m); // persist hurt/atk decay + ai state
                 }
@@ -1071,6 +1100,16 @@ mod tests {
         }
         assert!(dmg > 0.0, "the arrow should damage the player");
         assert_eq!(es.count(), 0, "and despawn on impact");
+    }
+
+    #[test]
+    fn distant_mobs_despawn() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Cow); // near
+        es.spawn_mob(Vec3::new(100.0, 1.0, 0.0), Species::Pig); // beyond DESPAWN_RADIUS
+        assert_eq!(es.mob_count(), 2);
+        let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1); // floor at y<1
+        assert_eq!(es.mob_count(), 1, "the far mob despawns, the near one stays");
     }
 
     #[test]

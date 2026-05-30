@@ -106,8 +106,9 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   each with its own size, health, and a distinct **multi-box model** (quadrupeds, humanoids, a tall
   creeper, a wide-low spider), lit by the same ray-traced pipeline as the world. An **Idle / Wander /
   Flee / Chase / Attack** state machine drives them: passive species flee when you crowd them, hostile
-  species **chase you on sight** (raycast line-of-sight) and close to attack range. Dropped items + XP
-  orbs share the same entity physics.
+  species **chase you on sight** (raycast line-of-sight) and close to attack range. They **spawn
+  naturally** around you — passive species in daylight on grass, hostile species at night — capped in
+  number and despawning once you roam far away. Dropped items + XP orbs share the same entity physics.
 - **Combat**: left-click melees the nearest mob in your reach (ray-vs-AABB beats mining when a mob is
   closer than the block) — damage scaled by your weapon, **knockback**, a red **hurt-flash**, and an
   XP drop on kill; hostile mobs in range hit **back** for contact damage, reduced by your armor.

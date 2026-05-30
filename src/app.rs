@@ -391,10 +391,13 @@ impl App {
         }
 
         // Stream chunks, advance fluids/entities; collect any picked-up item drops into inventory.
-        let collected =
-            state
-                .game
-                .update(&state.gpu, &state.renderer, state.player.position, dt);
+        let collected = state.game.update(
+            &state.gpu,
+            &state.renderer,
+            state.player.position,
+            dt,
+            state.environment.day_factor(),
+        );
         for stack in collected.items {
             if let Some(leftover) = state.inventory.insert(stack) {
                 // Inventory full — drop the remainder back so items aren't vacuum-deleted.
@@ -939,7 +942,7 @@ impl ApplicationHandler for App {
                     game.spawn_mob(Vec3::new(4.5 + i as f32 * 1.7, 88.0, 24.0), sp);
                 }
                 for _ in 0..90 {
-                    let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0);
+                    let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0, 1.0);
                 }
                 log::info!("M28 AI after settle: {}", game.mob_ai_summary());
                 // M29: swing toward the mob stage (logs the hit), then flash them all red for the shot.
@@ -969,6 +972,23 @@ impl ApplicationHandler for App {
                     player.position,
                 );
                 log::info!("M30 explosion: radial player damage {dmg:.1}");
+            }
+
+            // Debug: VOXELCRAFT_SPAWN=1 exercises M31 natural spawning rules + cap + despawn.
+            if std::env::var("VOXELCRAFT_SPAWN").is_ok() {
+                for _ in 0..80 {
+                    game.try_spawn(1.0, player.position); // day → passives on grass only
+                }
+                log::info!("M31 day spawns (passive on grass): {}", game.mob_species_summary());
+                game.despawn_all_mobs();
+                for _ in 0..80 {
+                    game.try_spawn(0.0, player.position); // night → hostiles
+                }
+                log::info!("M31 night spawns (hostile): {}", game.mob_species_summary());
+                log::info!("M31 cap held at {} mobs (cap 16)", game.mob_count());
+                // Despawn-radius: a tick with the player teleported far culls the distant mobs.
+                let _ = game.update(&gpu, &renderer, Vec3::splat(5000.0), 0.1, 0.0);
+                log::info!("M31 after far tick (despawn): {}", game.mob_species_summary());
             }
 
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.
