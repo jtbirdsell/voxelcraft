@@ -598,7 +598,7 @@ impl ChunkRenderer {
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
-        highlight: Option<IVec3>,
+        highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
     ) {
         // Chunk + water passes (clears color + depth).
@@ -606,8 +606,11 @@ impl ChunkRenderer {
 
         // Build overlay buffers (kept alive until this function returns; wgpu retains the
         // underlying resources in the command buffer until execution).
-        let highlight_buf = highlight.map(|block| {
-            let lines = overlay::highlight_lines(block);
+        let highlight_buf = highlight.map(|(block, progress)| {
+            let mut lines = overlay::highlight_lines(block);
+            if progress > 0.0 {
+                lines.extend(overlay::crack_lines(block, progress));
+            }
             let count = lines.len() as u32;
             let buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("highlight-vbuf"),
@@ -687,7 +690,7 @@ impl ChunkRenderer {
         gpu: &Gpu,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
-        highlight: Option<IVec3>,
+        highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
     ) {
         let frame = match gpu.surface.get_current_texture() {

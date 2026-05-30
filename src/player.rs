@@ -39,7 +39,7 @@ pub struct Input {
     pub sprint: bool,
     pub yaw_delta: f32,
     pub pitch_delta: f32,
-    pub break_pressed: bool,
+    pub break_held: bool,
     pub place_pressed: bool,
     pub drop_pressed: bool,
 }

@@ -249,8 +249,53 @@ pub fn blocks_skylight(id: BlockId) -> bool {
     is_opaque(id) && id != LEAVES
 }
 
+/// The tool that mines a block fastest (for mining-speed + drop gating from M19).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ToolClass {
+    None,
+    Pickaxe,
+    Axe,
+    Shovel,
+}
+
+/// Time in seconds to break a block by hand (tools speed this up in M19). INFINITY = unbreakable.
+pub fn hardness(id: BlockId) -> f32 {
+    match id {
+        BEDROCK => f32::INFINITY,
+        AIR | WATER | LAVA => 0.0,
+        LEAVES | TORCH | GLOWSTONE => 0.3,
+        DIRT | GRASS | SAND | GRAVEL | SNOW => 0.6,
+        WOOD | PLANKS | CRAFTING_TABLE | CHEST => 1.2,
+        STONE | COBBLESTONE | BRICKS | COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE
+        | REDSTONE_ORE | LAPIS_ORE => 1.5,
+        DEEPSLATE | FURNACE => 2.0,
+        OBSIDIAN => 8.0,
+        _ if is_plant(id) => 0.0,
+        _ => 1.0,
+    }
+}
+
+/// The tool class that mines a block fastest (scaffolding for M19 tool speed/gating).
+#[allow(dead_code)]
+pub fn tool_class(id: BlockId) -> ToolClass {
+    match id {
+        STONE | COBBLESTONE | BRICKS | DEEPSLATE | OBSIDIAN | FURNACE | COAL_ORE | IRON_ORE
+        | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE => ToolClass::Pickaxe,
+        WOOD | PLANKS | CRAFTING_TABLE | CHEST => ToolClass::Axe,
+        DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
+        _ => ToolClass::None,
+    }
+}
+
+/// Whether a block can be broken at all (bedrock and air can't).
+#[inline]
+pub fn breakable(id: BlockId) -> bool {
+    id != AIR && hardness(id).is_finite()
+}
+
 /// What a broken block yields as an item drop (None = nothing). Stone yields cobblestone, grass
-/// yields dirt, leaves drop nothing; most blocks drop themselves. (Tool gating arrives in M18.)
+/// yields dirt, leaves drop nothing; most blocks drop themselves. (Tool gating arrives in M19.)
 pub fn drops(id: BlockId) -> Option<BlockId> {
     match id {
         AIR => None,

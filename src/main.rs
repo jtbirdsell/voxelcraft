@@ -85,6 +85,9 @@ struct State {
     elapsed: f32,
     screen: Screen,
     cursor: (f32, f32),
+    /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
+    mine_target: Option<IVec3>,
+    mine_progress: f32,
 }
 
 struct App {
@@ -295,24 +298,39 @@ impl App {
         let fwd = state.camera.forward();
         let target = raycast::cast(eye, fwd, REACH, |p| state.game.is_solid_at(p));
 
-        // Break / place (edge-triggered).
-        if state.input.break_pressed {
-            state.input.break_pressed = false;
-            if let Some(hit) = &target {
-                let broken = state.game.block_at(hit.block);
-                if broken != block::AIR
-                    && state
-                        .game
-                        .set_block(&state.gpu, &state.renderer, hit.block, block::AIR)
-                    && !state.inventory.creative
-                {
-                    // Drop the block's item (stone→cobblestone, grass→dirt, leaves→nothing, …).
-                    if let Some(drop) = block::drops(broken) {
-                        let center = hit.block.as_vec3() + Vec3::splat(0.5);
-                        state.game.spawn_item(center, drop);
+        // Mining: hold LMB to break the targeted block, timed by hardness (instant in creative).
+        if state.screen == Screen::None && state.input.break_held {
+            if let Some(hit) = target.as_ref().map(|h| h.block) {
+                let id = state.game.block_at(hit);
+                if block::breakable(id) {
+                    if state.mine_target != Some(hit) {
+                        state.mine_target = Some(hit);
+                        state.mine_progress = 0.0;
                     }
+                    let time = if state.inventory.creative { 0.0 } else { block::hardness(id) };
+                    state.mine_progress += if time <= 0.0 { 1.0 } else { dt / time };
+                    if state.mine_progress >= 1.0 {
+                        if state.game.set_block(&state.gpu, &state.renderer, hit, block::AIR)
+                            && !state.inventory.creative
+                        {
+                            // Drop the block's item (stone→cobblestone, grass→dirt, leaves→nothing…).
+                            if let Some(drop) = block::drops(id) {
+                                let center = hit.as_vec3() + Vec3::splat(0.5);
+                                state.game.spawn_item(center, drop);
+                            }
+                        }
+                        state.mine_target = None;
+                        state.mine_progress = 0.0;
+                    }
+                } else {
+                    state.mine_target = None;
                 }
+            } else {
+                state.mine_target = None;
             }
+        } else {
+            state.mine_target = None;
+            state.mine_progress = 0.0;
         }
         if state.input.place_pressed {
             state.input.place_pressed = false;
@@ -358,7 +376,14 @@ impl App {
         if let Some(em) = &entity_mesh {
             visible.push(em);
         }
-        let highlight = target.as_ref().map(|h| h.block);
+        let highlight = target.as_ref().map(|h| {
+            let prog = if state.mine_target == Some(h.block) {
+                state.mine_progress
+            } else {
+                0.0
+            };
+            (h.block, prog)
+        });
         let inst_fps = 1.0 / dt.max(1e-4);
         state.fps_smooth = if state.fps_smooth <= 0.0 {
             inst_fps
@@ -540,7 +565,11 @@ impl ApplicationHandler for App {
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);
-            let highlight: Option<IVec3> = None;
+            // Debug: VOXELCRAFT_CRACK="x,y,z,progress" shows a mid-break crack overlay (verification).
+            let highlight: Option<(IVec3, f32)> = std::env::var("VOXELCRAFT_CRACK").ok().and_then(|s| {
+                let v: Vec<f32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                (v.len() == 4).then(|| (IVec3::new(v[0] as i32, v[1] as i32, v[2] as i32), v[3]))
+            });
 
             // Debug knob: VOXELCRAFT_PLACE="x,y,z,id;x,y,z,id" places blocks before the shot
             // (milestone verification — e.g. a glowstone to check emissive lighting).
@@ -698,6 +727,8 @@ impl ApplicationHandler for App {
             elapsed: 0.0,
             screen: Screen::None,
             cursor: (0.0, 0.0),
+            mine_target: None,
+            mine_progress: 0.0,
         });
         self.set_grab(true);
     }
@@ -715,18 +746,21 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(false) => self.set_grab(false),
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
-                if btn_state == ElementState::Pressed {
-                    let screen_open = self.state.as_ref().is_some_and(|s| s.screen != Screen::None);
-                    if screen_open {
-                        self.inventory_click(button);
-                    } else if !self.grabbed {
-                        self.set_grab(true);
-                    } else if let Some(state) = &mut self.state {
-                        match button {
-                            MouseButton::Left => state.input.break_pressed = true,
-                            MouseButton::Right => state.input.place_pressed = true,
-                            _ => {}
+                let pressed = btn_state == ElementState::Pressed;
+                let screen_open = self.state.as_ref().is_some_and(|s| s.screen != Screen::None);
+                if pressed && screen_open {
+                    self.inventory_click(button);
+                } else if pressed && !self.grabbed {
+                    self.set_grab(true);
+                } else if let Some(state) = &mut self.state {
+                    match button {
+                        MouseButton::Left => state.input.break_held = pressed, // hold to break
+                        MouseButton::Right => {
+                            if pressed {
+                                state.input.place_pressed = true;
+                            }
                         }
+                        _ => {}
                     }
                 }
             }

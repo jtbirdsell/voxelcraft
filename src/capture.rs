@@ -13,7 +13,7 @@ pub fn screenshot(
     renderer: &ChunkRenderer,
     meshes: &[&GpuMesh],
     volume_bg: &wgpu::BindGroup,
-    highlight: Option<IVec3>,
+    highlight: Option<(IVec3, f32)>,
     ui_verts: &[UiVertex],
     width: u32,
     height: u32,

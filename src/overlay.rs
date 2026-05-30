@@ -74,6 +74,32 @@ pub fn highlight_lines(block: IVec3) -> Vec<LineVertex> {
     v
 }
 
+/// Crack segments across the faces of `block`, revealed proportionally to mining `progress` (0..1).
+/// Drawn with the same line pipeline as the highlight, slightly inflated to sit on the surface.
+pub fn crack_lines(block: IVec3, progress: f32) -> Vec<LineVertex> {
+    let o = block.as_vec3();
+    let p = |x: f32, y: f32, z: f32| LineVertex { pos: [o.x + x, o.y + y, o.z + z] };
+    const E: f32 = 1.004; // sit just outside the +face
+    let segs: [[(f32, f32, f32); 2]; 9] = [
+        [(0.5, E, 0.1), (0.6, E, 0.5)],
+        [(0.6, E, 0.5), (0.3, E, 0.9)],
+        [(0.05, E, 0.45), (0.5, E, 0.5)],
+        [(E, 0.1, 0.5), (E, 0.6, 0.4)],
+        [(E, 0.6, 0.4), (E, 0.95, 0.65)],
+        [(0.4, 0.05, E), (0.5, 0.6, E)],
+        [(0.5, 0.6, E), (0.2, 0.95, E)],
+        [(E, 0.5, 0.5), (E, 0.3, 0.15)],
+        [(0.5, E, 0.5), (0.75, E, 0.2)],
+    ];
+    let n = ((progress * segs.len() as f32).ceil() as usize).min(segs.len());
+    let mut v = Vec::with_capacity(n * 2);
+    for s in segs.iter().take(n) {
+        v.push(p(s[0].0, s[0].1, s[0].2));
+        v.push(p(s[1].0, s[1].1, s[1].2));
+    }
+    v
+}
+
 fn push_px_rect(
     out: &mut Vec<UiVertex>,
     sw: f32,
