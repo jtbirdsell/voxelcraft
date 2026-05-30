@@ -207,8 +207,12 @@ pub fn item_emission(item: ItemId) -> f32 {
 }
 
 /// True if `item` is a registered block, tool, or material (used to reject corrupt save ids).
+/// Only *defined* material ids count — the unpopulated tail of the material range is rejected — and
+/// the block bound tracks `block::MAX_BLOCK` so it stays in sync as new blocks are added.
 pub fn is_known(item: ItemId) -> bool {
-    is_tool(item) || is_material(item) || (item != block::AIR && item <= block::CACTUS)
+    is_tool(item)
+        || matches!(item, STICK | IRON_INGOT | GOLD_INGOT)
+        || (item != block::AIR && item <= block::MAX_BLOCK)
 }
 
 /// Representative UI color for an item: the block face color, or a tier color for tools.
@@ -443,11 +447,15 @@ impl Inventory {
                 }
             }
         }
-        // Fill empty slots.
+        // Fill empty slots, preserving the incoming durability (tools must not be silently repaired).
         for slot in self.slots[0..HOTBAR + MAIN].iter_mut() {
             if slot.is_none() {
                 let moved = cap.min(stack.count);
-                *slot = Some(ItemStack::new(stack.item, moved));
+                *slot = Some(ItemStack {
+                    item: stack.item,
+                    count: moved,
+                    durability: stack.durability,
+                });
                 stack.count -= moved;
                 if stack.count == 0 {
                     return None;
@@ -531,6 +539,23 @@ mod tests {
         let before = inv.slots[0].unwrap().count;
         let _ = inv.drop_one_selected();
         assert_eq!(inv.slots[0].unwrap().count, before);
+    }
+
+    #[test]
+    fn insert_preserves_tool_durability() {
+        // A damaged tool returned to the inventory must keep its wear (no free repair).
+        let mut inv = Inventory::new(false);
+        let mut pick = ItemStack::new(WOOD_PICKAXE, 1);
+        pick.durability = 10;
+        assert!(inv.insert(pick).is_none());
+        let found = inv.slots.iter().flatten().find(|s| s.item == WOOD_PICKAXE).copied();
+        assert_eq!(found.map(|s| s.durability), Some(10), "durability must survive insert");
+    }
+
+    #[test]
+    fn unknown_material_ids_rejected() {
+        assert!(is_known(STICK) && is_known(IRON_INGOT) && is_known(GOLD_INGOT));
+        assert!(!is_known(MATERIAL_BASE + 5), "undefined material id should be rejected");
     }
 
     #[test]

@@ -175,18 +175,21 @@ impl Player {
     }
 
     /// Hunger drain, regen when well-fed (faster while saturation lasts), starvation at empty hunger.
-    fn update_survival(&mut self, dt: f32, input: &Input) {
+    /// `env_damage` suppresses regen so the player can't heal mid-lava / mid-drown.
+    fn update_survival(&mut self, dt: f32, input: &Input, env_damage: bool) {
         let moving = input.forward || input.back || input.left || input.right;
-        let mult = if input.sprint && moving { HUNGER_SPRINT_MULT } else { 1.0 };
-        let drain = HUNGER_DRAIN * mult * dt;
-        // Saturation is spent before hunger.
-        if self.saturation > 0.0 {
-            self.saturation = (self.saturation - drain).max(0.0);
-        } else {
-            self.hunger = (self.hunger - drain).max(0.0);
+        // Hunger only drains through activity (no AFK starvation) — saturation absorbs it first.
+        if moving {
+            let mult = if input.sprint { HUNGER_SPRINT_MULT } else { 1.0 };
+            let drain = HUNGER_DRAIN * mult * dt;
+            if self.saturation > 0.0 {
+                self.saturation = (self.saturation - drain).max(0.0);
+            } else {
+                self.hunger = (self.hunger - drain).max(0.0);
+            }
         }
 
-        if self.hunger >= REGEN_HUNGER && self.health < MAX_HEALTH {
+        if !env_damage && self.hunger >= REGEN_HUNGER && self.health < MAX_HEALTH {
             let rate = if self.saturation > 0.0 { REGEN_RATE * 2.0 } else { REGEN_RATE };
             self.health = (self.health + rate * dt).min(MAX_HEALTH);
             if self.saturation > 0.0 {
@@ -200,7 +203,8 @@ impl Player {
     }
 
     /// Air (drowning) + lava contact damage, evaluated against the sampled environment each frame.
-    fn update_environment_damage(&mut self, dt: f32, submerged: bool, in_lava: bool) {
+    /// Returns true while an environmental damage source is active (used to suppress regen).
+    fn update_environment_damage(&mut self, dt: f32, submerged: bool, in_lava: bool) -> bool {
         self.submerged = submerged;
         if submerged {
             self.air -= dt;
@@ -209,7 +213,7 @@ impl Player {
                 self.drown_timer += dt;
                 if self.drown_timer >= 1.0 {
                     self.health = (self.health - DROWN_DPS).max(0.0);
-                    self.drown_timer = 0.0;
+                    self.drown_timer -= 1.0; // keep the cadence exact; don't discard the overshoot
                 }
             }
         } else {
@@ -219,6 +223,7 @@ impl Player {
         if in_lava {
             self.health = (self.health - LAVA_DPS * dt).max(0.0);
         }
+        in_lava || (submerged && self.air <= 0.0)
     }
 
     /// True if any voxel overlapping the player's AABB satisfies `pred` (water/lava tests).
@@ -326,7 +331,9 @@ impl Player {
         // Sample the surrounding fluid once per frame (skipped in fly mode — treated as creative).
         let in_water = !self.flying && self.aabb_any(|c| block_at(c) == block::WATER);
         let in_lava = !self.flying && self.aabb_any(|c| block_at(c) == block::LAVA);
-        let head_submerged = !self.flying && block_at(self.head_cell()) == block::WATER;
+        // The head being in *any* fluid stops breathing — you can't breathe in lava either.
+        let head_block = if self.flying { block::AIR } else { block_at(self.head_cell()) };
+        let head_submerged = head_block == block::WATER || head_block == block::LAVA;
 
         if self.flying {
             let speed = if input.sprint { FLY_SPRINT_SPEED } else { FLY_SPEED };
@@ -406,8 +413,8 @@ impl Player {
             } else {
                 self.air_max_y = self.air_max_y.max(self.position.y);
             }
-            self.update_environment_damage(dt, head_submerged, in_lava);
-            self.update_survival(dt, input);
+            let env_damage = self.update_environment_damage(dt, head_submerged, in_lava);
+            self.update_survival(dt, input, env_damage);
         }
     }
 

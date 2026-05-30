@@ -44,12 +44,23 @@ pub struct FurnaceState {
     pub burn_max: f32,
     /// Seconds cooked toward `SMELT_TIME` for the current input.
     pub cook_progress: f32,
+    /// The input item id the accumulated `cook_progress` belongs to (so swapping the input can't
+    /// finish a different recipe instantly). 0 = nothing being cooked.
+    cook_item: item::ItemId,
 }
 
 impl FurnaceState {
     /// Whatever the furnace currently holds, for spilling when the block is broken.
     fn contents(&self) -> impl Iterator<Item = ItemStack> {
         [self.input, self.fuel, self.output].into_iter().flatten()
+    }
+
+    /// True if the furnace holds nothing and isn't burning (safe to drop on chunk unload).
+    fn is_empty(&self) -> bool {
+        self.input.is_none()
+            && self.fuel.is_none()
+            && self.output.is_none()
+            && self.burn_remaining <= 0.0
     }
 }
 
@@ -58,6 +69,14 @@ impl FurnaceState {
 fn step_furnace(f: &mut FurnaceState, dt: f32) {
     if f.burn_remaining > 0.0 {
         f.burn_remaining = (f.burn_remaining - dt).max(0.0);
+    }
+
+    // Swapping the input to a different item discards any progress cooked for the old one — you
+    // can't bank ~6s on iron ore, drop in cobblestone, and have stone pop out instantly.
+    let input_item = f.input.map(|s| s.item).unwrap_or(0);
+    if input_item != f.cook_item {
+        f.cook_progress = 0.0;
+        f.cook_item = input_item;
     }
 
     // What (if anything) the current input smelts to, and whether the output slot can take it.
@@ -368,6 +387,10 @@ impl Game {
             .retain(|pos, _| loaded.contains_key(&world::chunk_of(*pos)));
         self.fluid_frontier
             .retain(|pos| loaded.contains_key(&world::chunk_of(*pos)));
+        // Drop *empty* furnaces in unloaded chunks so the map can't grow without bound as the player
+        // roams; non-empty ones stay resident so their contents survive until M24 adds persistence.
+        self.furnaces
+            .retain(|pos, f| loaded.contains_key(&world::chunk_of(*pos)) || !f.is_empty());
 
         // Advance flowing fluids at a fixed cadence (bounded steps per frame).
         self.fluid_timer += dt;
@@ -831,6 +854,25 @@ mod furnace_tests {
         assert_eq!(f.output.map(|s| (s.item, s.count)), Some((item::IRON_INGOT, 1)));
         assert_eq!(f.input.map(|s| s.count), Some(1));
         assert!(f.burn_remaining > 0.0); // a plank (9s) still has burn left after one 6s smelt
+    }
+
+    /// Swapping the input mid-cook must not let banked progress finish a different recipe instantly.
+    #[test]
+    fn swapping_input_resets_cook_progress() {
+        let mut f = FurnaceState {
+            input: Some(ItemStack::new(block::IRON_ORE, 1)),
+            fuel: Some(ItemStack::new(block::PLANKS, 2)),
+            ..Default::default()
+        };
+        while f.cook_progress < smelting::SMELT_TIME - 0.5 {
+            step_furnace(&mut f, 0.1);
+        }
+        assert!(f.output.is_none(), "iron should not be done yet");
+        // Swap to a different smeltable: progress must reset so nothing pops out next tick.
+        f.input = Some(ItemStack::new(block::COBBLESTONE, 1));
+        step_furnace(&mut f, 0.1);
+        assert!(f.output.is_none(), "swapped input must not smelt instantly");
+        assert!(f.cook_progress < 0.5, "progress should reset on input swap");
     }
 
     /// No fuel → nothing smelts, and the input is untouched.

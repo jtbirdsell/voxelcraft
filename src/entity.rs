@@ -223,7 +223,14 @@ impl Entities {
                         e.vel.y = e.vel.y.max(pull.y);
                     }
                     e.on_ground = collide_move(&mut e.pos, &mut e.vel, XP_SIZE, XP_SIZE, dt, &is_solid);
-                    if e.age > 0.2 && dist < COLLECT_RADIUS {
+                    if e.on_ground {
+                        e.vel.x *= 0.7;
+                        e.vel.z *= 0.7;
+                    }
+                    // Collect using the *post-move* distance so an orb a wall has stopped can't be
+                    // vacuumed through it (matches the dropped-item arm; no straight-line shortcut).
+                    let settled = (player_pos + Vec3::new(0.0, 0.5, 0.0) - e.pos).length();
+                    if e.age > 0.2 && settled < COLLECT_RADIUS {
                         e.dead = true;
                         collected.xp += amount;
                     } else if e.age > ITEM_LIFETIME * 3.0 || e.pos.y < FALL_OUT_Y {

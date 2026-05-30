@@ -36,6 +36,9 @@ pub const DANDELION: BlockId = 29;
 pub const TALL_GRASS: BlockId = 30;
 pub const CACTUS: BlockId = 31;
 
+/// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
+pub const MAX_BLOCK: BlockId = CACTUS;
+
 /// How a block is meshed: a full greedy cube, or an X-shaped cross billboard (plants).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderKind {
