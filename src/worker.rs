@@ -3,13 +3,15 @@
 //! map and performs GPU uploads. crossbeam's multi-consumer channel load-balances jobs across
 //! the workers (one shared receiver), which suits the wildly varying per-chunk cost.
 
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{unbounded, Receiver, Sender, TryIter};
 use glam::IVec3;
 
 use crate::mesher::{self, MeshData};
-use crate::world::{generate_chunk, Chunk, Neighborhood};
+use crate::worldgen::Worldgen;
+use crate::world::{Chunk, Neighborhood};
 
 pub enum Job {
     Generate {
@@ -35,7 +37,7 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
-    pub fn new(seed: u64, num_workers: usize) -> Self {
+    pub fn new(worldgen: Arc<Worldgen>, num_workers: usize) -> Self {
         let num_workers = num_workers.max(1);
         let (job_tx, job_rx) = unbounded::<Job>();
         let (result_tx, result_rx) = unbounded::<JobResult>();
@@ -44,9 +46,10 @@ impl WorkerPool {
         for i in 0..num_workers {
             let job_rx = job_rx.clone();
             let result_tx = result_tx.clone();
+            let worldgen = worldgen.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("voxel-worker-{i}"))
-                .spawn(move || worker_loop(seed, job_rx, result_tx))
+                .spawn(move || worker_loop(worldgen, job_rx, result_tx))
                 .expect("failed to spawn worker thread");
             handles.push(handle);
         }
@@ -73,12 +76,12 @@ impl WorkerPool {
     }
 }
 
-fn worker_loop(seed: u64, job_rx: Receiver<Job>, result_tx: Sender<JobResult>) {
+fn worker_loop(worldgen: Arc<Worldgen>, job_rx: Receiver<Job>, result_tx: Sender<JobResult>) {
     while let Ok(job) = job_rx.recv() {
         let result = match job {
             Job::Generate { pos } => JobResult::Generated {
                 pos,
-                chunk: generate_chunk(pos, seed),
+                chunk: worldgen.generate_chunk(pos),
             },
             Job::Mesh { pos, neigh, origin } => JobResult::Meshed {
                 pos,

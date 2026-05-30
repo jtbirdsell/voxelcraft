@@ -15,10 +15,12 @@ use crate::gpu::Gpu;
 use crate::mesher::{self, MeshData};
 use crate::renderer::{ChunkRenderer, GpuMesh};
 use crate::worker::{Job, JobResult, WorkerPool};
+use crate::worldgen::Worldgen;
 use crate::world::{self, World, CHUNK_SIZE_I, WORLD_HEIGHT_CHUNKS};
 
 pub struct Game {
     world: World,
+    worldgen: Arc<Worldgen>,
     /// Built meshes per chunk; `None` means "meshed but empty" (no geometry).
     meshes: FxHashMap<IVec3, Option<GpuMesh>>,
     render_distance: i32,
@@ -54,11 +56,13 @@ impl Game {
             .map(|n| n.get().saturating_sub(2))
             .unwrap_or(4)
             .max(1);
-        let pool = WorkerPool::new(seed, workers);
+        let worldgen = Arc::new(Worldgen::new(seed));
+        let pool = WorkerPool::new(worldgen.clone(), workers);
         log::info!("Worker pool: {} threads", pool.worker_count());
 
         Self {
-            world: World::new(seed),
+            world: World::new(),
+            worldgen,
             meshes: FxHashMap::default(),
             render_distance,
             center: IVec3::new(i32::MIN, 0, i32::MIN),
@@ -210,7 +214,12 @@ impl Game {
 
         for &(dx, dz, _) in &self.offsets {
             for cy in 0..WORLD_HEIGHT_CHUNKS {
-                self.world.ensure_generated(IVec3::new(cx + dx, cy, cz + dz));
+                let pos = IVec3::new(cx + dx, cy, cz + dz);
+                if !self.world.is_generated(pos) {
+                    self.world
+                        .chunks
+                        .insert(pos, Arc::new(self.worldgen.generate_chunk(pos)));
+                }
             }
         }
         let positions: Vec<IVec3> = self

@@ -14,6 +14,7 @@ mod mesher;
 mod renderer;
 mod worker;
 mod world;
+mod worldgen;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -154,7 +155,7 @@ impl ApplicationHandler for App {
         let renderer = ChunkRenderer::new(&gpu);
         let mut game = Game::new(SEED, RENDER_DISTANCE);
 
-        let camera = Camera::new(Vec3::new(8.0, 120.0, 24.0), -std::f32::consts::FRAC_PI_2, -0.35);
+        let camera = Camera::new(Vec3::new(8.0, 98.0, 24.0), -std::f32::consts::FRAC_PI_2, -0.30);
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update(&camera, gpu.aspect());
         renderer.update_camera(&gpu, &camera_uniform);
