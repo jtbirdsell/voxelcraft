@@ -95,6 +95,8 @@ the GPU has large headroom, which the lighting spends on per-pixel ray tracing.
 
 ```
 src/
+  main.rs           module tree + winit event-loop entry point
+  app.rs            App/State, input routing, per-frame update + render, headless screenshot path
   gpu.rs            wgpu device/surface/depth; DX12-preferred adapter selection
   camera.rs         fly camera + globals UBO (view-proj, sun, sky/fog, time)
   environment.rs    day/night: sun direction, sky/fog color, ambient/intensity
