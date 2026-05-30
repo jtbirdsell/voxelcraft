@@ -1,0 +1,3 @@
+# Build and run on the same i9-14900K — safe to target the native CPU for full AVX2/BMI codegen.
+[build]
+rustflags = ["-C", "target-cpu=native"]

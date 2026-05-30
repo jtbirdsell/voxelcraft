@@ -1,0 +1,6 @@
+/target
+
+# Verification / scratch artifacts
+/*.png
+/*.log
+/saves
