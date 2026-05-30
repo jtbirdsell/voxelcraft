@@ -28,14 +28,27 @@ impl Vertex {
 }
 
 #[derive(Default)]
-pub struct MeshData {
+pub struct Geometry {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
 
-impl MeshData {
+impl Geometry {
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
+    }
+}
+
+/// Per-chunk mesh split by render layer: opaque (solids + foliage) and translucent water.
+#[derive(Default)]
+pub struct MeshData {
+    pub opaque: Geometry,
+    pub water: Geometry,
+}
+
+impl MeshData {
+    pub fn is_empty(&self) -> bool {
+        self.opaque.is_empty() && self.water.is_empty()
     }
 }
 
@@ -83,12 +96,12 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     x[u] = uu;
                     let mut xb = x;
                     xb[d] = i + 1;
-                    let a_op = neigh.opaque_at(x[0], x[1], x[2]);
-                    let b_op = neigh.opaque_at(xb[0], xb[1], xb[2]);
-                    mask[n] = if a_op && !b_op {
-                        Some((neigh.block_at(x[0], x[1], x[2]), true))
-                    } else if b_op && !a_op {
-                        Some((neigh.block_at(xb[0], xb[1], xb[2]), false))
+                    let a = neigh.block_at(x[0], x[1], x[2]);
+                    let b = neigh.block_at(xb[0], xb[1], xb[2]);
+                    mask[n] = if block::renders(a) && !block::occludes(a, b) {
+                        Some((a, true))
+                    } else if block::renders(b) && !block::occludes(b, a) {
+                        Some((b, false))
                     } else {
                         None
                     };
@@ -123,7 +136,12 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     }
 
                     let (blk, positive) = cell.unwrap();
-                    emit_quad(&mut mesh, origin, d, u, v, i + 1, k, j, w, h, blk, positive);
+                    let geom = if block::is_water(blk) {
+                        &mut mesh.water
+                    } else {
+                        &mut mesh.opaque
+                    };
+                    emit_quad(geom, origin, d, u, v, i + 1, k, j, w, h, blk, positive);
 
                     // Clear the consumed region.
                     for jj in 0..h {
@@ -144,7 +162,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
 
 #[allow(clippy::too_many_arguments)]
 fn emit_quad(
-    mesh: &mut MeshData,
+    geom: &mut Geometry,
     origin: [i32; 3],
     d: usize,
     u: usize,
@@ -184,15 +202,15 @@ fn emit_quad(
 
     let normal = normal_vec(d, positive);
     let color = block::face_color(block_id, normal_offset(d, positive));
-    let v = mesh.vertices.len() as u32;
+    let v = geom.vertices.len() as u32;
     for p in [p0, p1, p2, p3] {
-        mesh.vertices.push(Vertex {
+        geom.vertices.push(Vertex {
             position: corner(p),
             normal,
             color,
         });
     }
-    // Cull is disabled in M2 so winding is irrelevant; two triangles per quad.
-    mesh.indices
+    // Cull is disabled so winding is irrelevant; two triangles per quad.
+    geom.indices
         .extend_from_slice(&[v, v + 1, v + 2, v, v + 2, v + 3]);
 }

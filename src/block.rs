@@ -21,12 +21,36 @@ pub fn is_solid(id: BlockId) -> bool {
     id != AIR && id != WATER
 }
 
-/// A block fully hides the touching face of an adjacent block.
-/// (M3 treats water and leaves as opaque for meshing; cutout leaves + translucent water
-/// arrive in M5.)
+/// A block fully hides the touching face of an adjacent opaque block.
+/// Water is non-opaque (translucent); leaves stay opaque (rendered as solid foliage).
 #[inline]
 pub fn is_opaque(id: BlockId) -> bool {
+    id != AIR && id != WATER
+}
+
+/// Whether a block produces any geometry at all.
+#[inline]
+pub fn renders(id: BlockId) -> bool {
     id != AIR
+}
+
+#[inline]
+pub fn is_water(id: BlockId) -> bool {
+    id == WATER
+}
+
+/// Does `neighbor` hide the face of `self_id` that touches it?
+/// Opaque neighbors hide everything; a translucent block hides only the same translucent
+/// type (so water surfaces show against air/solids but internal water faces are culled).
+#[inline]
+pub fn occludes(self_id: BlockId, neighbor: BlockId) -> bool {
+    if neighbor == AIR {
+        false
+    } else if is_opaque(neighbor) {
+        true
+    } else {
+        self_id == neighbor
+    }
 }
 
 /// Base albedo for a block face. `face_offset[1] == 1` is the +Y (top) face.

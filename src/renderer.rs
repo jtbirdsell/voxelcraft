@@ -8,17 +8,42 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::CameraUniform;
 use crate::gpu::{Gpu, DEPTH_FORMAT};
-use crate::mesher::{MeshData, Vertex};
+use crate::mesher::{Geometry, MeshData, Vertex};
 use crate::overlay::{self, LineVertex, UiVertex};
 
-pub struct GpuMesh {
+fn upload_geometry(device: &wgpu::Device, geom: &Geometry) -> Option<GpuPart> {
+    if geom.is_empty() {
+        return None;
+    }
+    Some(GpuPart {
+        vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk-vbuf"),
+            contents: bytemuck::cast_slice(&geom.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+        index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk-ibuf"),
+            contents: bytemuck::cast_slice(&geom.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        }),
+        index_count: geom.indices.len() as u32,
+    })
+}
+
+pub struct GpuPart {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
 }
 
+pub struct GpuMesh {
+    pub opaque: Option<GpuPart>,
+    pub water: Option<GpuPart>,
+}
+
 pub struct ChunkRenderer {
     pipeline: wgpu::RenderPipeline,
+    water_pipeline: wgpu::RenderPipeline,
     highlight_pipeline: wgpu::RenderPipeline,
     ui_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
@@ -108,6 +133,55 @@ impl ChunkRenderer {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: gpu.config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Translucent water pipeline: same vertex format, alpha blend, depth test but no write.
+        let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("water-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/water.wgsl").into()),
+        });
+        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &water_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &water_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -215,6 +289,7 @@ impl ChunkRenderer {
 
         Self {
             pipeline,
+            water_pipeline,
             highlight_pipeline,
             ui_pipeline,
             camera_buffer,
@@ -233,20 +308,9 @@ impl ChunkRenderer {
     }
 
     pub fn upload_mesh(&self, gpu: &Gpu, mesh: &MeshData) -> GpuMesh {
-        let vertex_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk-vbuf"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk-ibuf"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
         GpuMesh {
-            vertex_buffer,
-            index_buffer,
-            index_count: mesh.indices.len() as u32,
+            opaque: upload_geometry(&gpu.device, &mesh.opaque),
+            water: upload_geometry(&gpu.device, &mesh.water),
         }
     }
 
@@ -264,37 +328,75 @@ impl ChunkRenderer {
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
     ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("chunk-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(self.sky_color.get()),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
+        // Opaque pass (clears color + depth).
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("opaque-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.sky_color.get()),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            for mesh in meshes {
+                if let Some(part) = &mesh.opaque {
+                    pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
+                    pass.set_index_buffer(part.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..part.index_count, 0, 0..1);
+                }
+            }
+        }
 
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.camera_bind_group, &[]);
-        for mesh in meshes {
-            if mesh.index_count > 0 {
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        // Translucent water pass (loads color + depth; blends, no depth write).
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("water-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.water_pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            for mesh in meshes {
+                if let Some(part) = &mesh.water {
+                    pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
+                    pass.set_index_buffer(part.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..part.index_count, 0, 0..1);
+                }
             }
         }
     }
