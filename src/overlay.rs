@@ -508,6 +508,7 @@ fn stat_bar(
 
 /// Build the HUD (crosshair + hotbar, plus health/hunger bars in survival) for the framebuffer.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_ui(
     width: u32,
     height: u32,
@@ -515,6 +516,10 @@ pub fn build_ui(
     health: f32,
     hunger: f32,
     survival: bool,
+    air: f32,
+    submerged: bool,
+    level: u32,
+    xp_frac: f32,
     debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
@@ -556,24 +561,44 @@ pub fn build_ui(
             }
         }
     }
-    // Selected item name, centered above the hotbar (and above the stat bars).
+    // Selected item name, centered above the hotbar (clears the survival bars when shown).
     if let Some(stack) = inv.slots[inv.selected] {
         let name = item::item_name(stack.item);
         let tw = text_width(name, 2.0);
-        push_text(&mut v, sw, sh, (sw - tw) * 0.5, y - 52.0, 2.0, name, [0.95, 0.95, 0.95, 1.0]);
+        let name_y = if survival { y - 84.0 } else { y - 52.0 };
+        push_text(&mut v, sw, sh, (sw - tw) * 0.5, name_y, 2.0, name, [0.95, 0.95, 0.95, 1.0]);
     }
 
-    // Health (red) and hunger (orange) pip bars sit just above the hotbar in survival mode.
+    // Survival HUD, stacked above the hotbar: XP bar (bottom) → health/hunger → air bubbles.
     if survival {
         let pip = 16.0;
         let gap = 3.0;
         let pips = 10;
         let bar_w = pips as f32 * pip + (pips as f32 - 1.0) * gap;
-        let bars_y = y - 28.0;
+
+        // Experience bar spanning the hotbar, with the level number centered above it.
+        let xp_y = y - 14.0;
+        let xw = total;
+        push_px_rect(&mut v, sw, sh, start_x, xp_y, xw, 5.0, [0.06, 0.06, 0.07, 0.85]);
+        push_px_rect(&mut v, sw, sh, start_x, xp_y, xw * xp_frac.clamp(0.0, 1.0), 5.0, [0.45, 0.85, 0.20, 1.0]);
+        if level > 0 {
+            let label = format!("{level}");
+            let tw = text_width(&label, 2.0);
+            push_text(&mut v, sw, sh, (sw - tw) * 0.5, xp_y - 20.0, 2.0, &label, [0.55, 0.95, 0.30, 1.0]);
+        }
+
+        // Health (red) and hunger (orange) pip bars.
+        let bars_y = y - 46.0;
         let health_x = sw * 0.5 - bar_w - 12.0;
         let hunger_x = sw * 0.5 + 12.0;
         stat_bar(&mut v, sw, sh, health_x, bars_y, pip, gap, pips, health, [0.85, 0.13, 0.15, 1.0]);
         stat_bar(&mut v, sw, sh, hunger_x, bars_y, pip, gap, pips, hunger, [0.86, 0.55, 0.18, 1.0]);
+
+        // Air bubbles (cyan) appear over the hunger bar only while breath is being held underwater.
+        if submerged || air < 0.999 {
+            let air_y = bars_y - 20.0;
+            stat_bar(&mut v, sw, sh, hunger_x, air_y, pip, gap, pips, air * 20.0, [0.35, 0.75, 0.95, 1.0]);
+        }
     }
 
     // F3-style debug overlay (top-left): a translucent backing panel + one text line per entry.

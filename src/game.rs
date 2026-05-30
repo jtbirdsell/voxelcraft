@@ -243,7 +243,7 @@ impl Game {
         renderer: &ChunkRenderer,
         camera_pos: Vec3,
         dt: f32,
-    ) -> Vec<crate::item::ItemStack> {
+    ) -> crate::entity::Collected {
         self.center = Self::center_of(camera_pos);
         let r = self.render_distance;
 
@@ -702,6 +702,10 @@ impl Game {
 
     pub fn spawn_item(&mut self, pos: Vec3, stack: crate::item::ItemStack) {
         self.entities.spawn_item(pos, stack);
+    }
+
+    pub fn spawn_xp(&mut self, pos: Vec3, amount: u32) {
+        self.entities.spawn_xp(pos, amount);
     }
 
     /// Furnace state at `pos`, creating an empty one (the player just opened it).

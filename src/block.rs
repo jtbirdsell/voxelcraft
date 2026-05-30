@@ -322,6 +322,17 @@ pub fn drops(id: BlockId) -> Option<BlockId> {
     }
 }
 
+/// Experience awarded for mining a block (the ores that drop XP in Minecraft). Iron/gold give none
+/// here — their XP comes from smelting the ore in a furnace.
+pub fn mining_xp(id: BlockId) -> u32 {
+    match id {
+        COAL_ORE => 1,
+        REDSTONE_ORE | LAPIS_ORE => 2,
+        DIAMOND_ORE => 4,
+        _ => 0,
+    }
+}
+
 /// Atlas tile ids (M13). Index = `row*ATLAS_COLS + col` into the procedural texture atlas. Kept
 /// beside `face_color`/`face_tile` so the painters (texture.rs) and the WGSL `tile_average()` stay
 /// in lockstep. The 0..63 space leaves ample room for the block expansion in M16.

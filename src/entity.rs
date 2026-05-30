@@ -19,6 +19,9 @@ const ITEM_SIZE: f32 = 0.28;
 const ITEM_LIFETIME: f32 = 90.0;
 const COLLECT_RADIUS: f32 = 1.2;
 const FALL_OUT_Y: f32 = -24.0;
+const XP_SIZE: f32 = 0.18;
+const XP_HOMING_RADIUS: f32 = 4.0; // orbs start drifting toward the player within this range
+const XP_HOMING_SPEED: f32 = 9.0;
 
 #[inline]
 fn comp(v: Vec3, axis: usize) -> f32 {
@@ -57,6 +60,15 @@ fn randf(state: &mut u64) -> f32 {
 enum Kind {
     Mob,
     Item(ItemStack),
+    /// An experience orb worth `n` points; homes toward a nearby player and grants XP on pickup.
+    Xp(u32),
+}
+
+/// What the player swept up this frame: item stacks (added to the inventory) and experience points.
+#[derive(Default)]
+pub struct Collected {
+    pub items: Vec<ItemStack>,
+    pub xp: u32,
 }
 
 struct Entity {
@@ -131,10 +143,32 @@ impl Entities {
         });
     }
 
+    /// Spawn an experience orb worth `amount` points (mining ores, smelting, killing mobs).
+    pub fn spawn_xp(&mut self, pos: Vec3, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        let mut rng = self.next_seed();
+        let a = randf(&mut rng) * TAU;
+        let vel = Vec3::new(a.cos() * 1.2, 2.5 + randf(&mut rng), a.sin() * 1.2);
+        self.list.push(Entity {
+            kind: Kind::Xp(amount),
+            pos,
+            vel,
+            on_ground: false,
+            age: 0.0,
+            heading: 0.0,
+            wander: 0.0,
+            idle: false,
+            rng,
+            dead: false,
+        });
+    }
+
     /// Advance AI + physics for all entities and drop the dead/collected ones. Returns the blocks
     /// of any item drops the player walked over this frame (to add to their inventory).
-    pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Vec<ItemStack> {
-        let mut collected = Vec::new();
+    pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Collected {
+        let mut collected = Collected::default();
         for e in &mut self.list {
             e.age += dt;
             match e.kind {
@@ -172,8 +206,27 @@ impl Entities {
                     // Collect once it has settled a moment and the player is close.
                     if e.age > 0.4 && (player_pos - e.pos).length() < COLLECT_RADIUS {
                         e.dead = true;
-                        collected.push(stack);
+                        collected.items.push(stack);
                     } else if e.age > ITEM_LIFETIME || e.pos.y < FALL_OUT_Y {
+                        e.dead = true;
+                    }
+                }
+                Kind::Xp(amount) => {
+                    e.vel.y -= GRAVITY * dt;
+                    // Drift toward the player once close enough (the classic orb magnetism).
+                    let to_player = player_pos + Vec3::new(0.0, 0.5, 0.0) - e.pos;
+                    let dist = to_player.length();
+                    if dist < XP_HOMING_RADIUS && dist > 1e-3 {
+                        let pull = to_player / dist * XP_HOMING_SPEED;
+                        e.vel.x = pull.x;
+                        e.vel.z = pull.z;
+                        e.vel.y = e.vel.y.max(pull.y);
+                    }
+                    e.on_ground = collide_move(&mut e.pos, &mut e.vel, XP_SIZE, XP_SIZE, dt, &is_solid);
+                    if e.age > 0.2 && dist < COLLECT_RADIUS {
+                        e.dead = true;
+                        collected.xp += amount;
+                    } else if e.age > ITEM_LIFETIME * 3.0 || e.pos.y < FALL_OUT_Y {
                         e.dead = true;
                     }
                 }
@@ -223,6 +276,20 @@ impl Entities {
                         e.age * 1.6,
                         tile,
                         em,
+                    );
+                }
+                Kind::Xp(_) => {
+                    // A small glowing orb (glowstone tile + strong emission), bobbing and spinning.
+                    let s = XP_SIZE * 0.5;
+                    let bob = (e.age * 4.0).sin() * 0.05;
+                    let center = e.pos + Vec3::new(0.0, XP_SIZE * 0.5 + 0.05 + bob, 0.0);
+                    push_box(
+                        &mut mesh.opaque,
+                        center - Vec3::new(s, s, s),
+                        center + Vec3::new(s, s, s),
+                        e.age * 2.4,
+                        block::tile::GLOWSTONE,
+                        0.9,
                     );
                 }
             }

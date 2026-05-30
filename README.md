@@ -34,9 +34,9 @@ The world auto-saves to `saves/world/` on quit.
 |---|---|
 | **WASD** | Move |
 | **Mouse** | Look |
-| **Space** | Jump (walk) / ascend (fly) |
-| **Left-Shift** | Descend (fly) |
-| **Left-Ctrl** | Sprint / fly boost |
+| **Space** | Jump (walk) / swim up / ascend (fly) |
+| **Left-Shift** | Sneak (walk — won't walk off ledges) / descend (fly) |
+| **Left-Ctrl** | Sprint (widens FOV) / fly boost |
 | **F** | Toggle fly / walk |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
 | **Right-click** | Place block, or open a crafting table / furnace |
@@ -86,7 +86,12 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   ores into **iron / gold ingots** (and cobblestone back to stone). Breaking a lit furnace spills it.
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
   screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities, and
-  persistence. Survival basics: health + hunger, fall damage, regen/starvation, death drops + respawn.
+  persistence.
+- **Survival depth**: health + hunger with saturation-fueled regen and starvation; fall damage;
+  **swimming** (buoyancy + paddle up) with an **air/drowning** bubble meter; **lava contact damage**;
+  **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.
+- **Experience**: mining ores (coal/redstone/lapis/diamond) drops glowing **XP orbs** that home in and
+  grant points; an XP bar + level counter on the HUD.
 - **Mobs + item drops**: AABB entities that wander and drop collectible items, lit by the same
   ray-traced pipeline as the world.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
@@ -135,14 +140,15 @@ ray-traced shadows, AO, and global illumination rather than idling.
 Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and exits — used to
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
 `VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft|furnace`,
-`VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`.
+`VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP bars).
 
 ## Roadmap
 
 Done: the full engine, world generation, lighting, rendering, the block/item library, inventory,
-**progressive mining, tools + durability, crafting, and furnace smelting**. Next up: food & deeper
-survival, armor; then typed mobs + combat, structures (dungeons/villages), an RTX temporal denoiser,
-particles + audio, redstone, and additional dimensions.
+**progressive mining, tools + durability, crafting, furnace smelting, and survival depth** (swimming/
+air, lava damage, sneak, XP & levels). Next up: armor, then persistence consolidation; then typed mobs
++ combat, structures (dungeons/villages), an RTX temporal denoiser, particles + audio, redstone, and
+additional dimensions.
 
 ## License
 

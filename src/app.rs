@@ -276,7 +276,10 @@ impl App {
             KeyCode::KeyA => state.input.left = pressed,
             KeyCode::KeyD => state.input.right = pressed,
             KeyCode::Space => state.input.up = pressed,
-            KeyCode::ShiftLeft => state.input.down = pressed,
+            KeyCode::ShiftLeft => {
+                state.input.down = pressed; // fly: descend
+                state.input.sneak = pressed; // walk: sneak (ledge-stop)
+            }
             KeyCode::ControlLeft => state.input.sprint = pressed,
             KeyCode::KeyF if pressed && !repeat => {
                 state.player.flying = !state.player.flying;
@@ -319,10 +322,27 @@ impl App {
         // Player physics (disjoint field borrows: player mut, game/input shared).
         let yaw = state.camera.yaw;
         let game_ref = &state.game;
-        state
-            .player
-            .update(dt, yaw, &state.input, |p| game_ref.is_solid_at(p));
+        state.player.update(
+            dt,
+            yaw,
+            &state.input,
+            |p| game_ref.is_solid_at(p),
+            |p| game_ref.block_at(p),
+        );
         state.camera.position = state.player.eye();
+
+        // Sprinting widens the FOV slightly (and swimming narrows it); ease toward the target.
+        let target_fov = if state.player.flying {
+            70_f32
+        } else if state.player.submerged {
+            66.0
+        } else if state.input.sprint && (state.input.forward || state.input.back) {
+            78.0
+        } else {
+            70.0
+        }
+        .to_radians();
+        state.camera.fovy += (target_fov - state.camera.fovy) * (10.0 * dt).min(1.0);
 
         // Survival: a hard fall or starvation can kill; respawn at spawn.
         if !state.player.flying && state.player.is_dead() {
@@ -342,13 +362,16 @@ impl App {
             state
                 .game
                 .update(&state.gpu, &state.renderer, state.player.position, dt);
-        for stack in collected {
+        for stack in collected.items {
             if let Some(leftover) = state.inventory.insert(stack) {
                 // Inventory full — drop the remainder back so items aren't vacuum-deleted.
                 state
                     .game
                     .spawn_item(state.player.position + Vec3::new(0.0, 1.0, 0.0), leftover);
             }
+        }
+        if collected.xp > 0 {
+            state.player.add_xp(collected.xp);
         }
 
         // Block targeting.
@@ -393,11 +416,13 @@ impl App {
                                 true
                             };
                             if harvest_ok {
+                                let center = hit.as_vec3() + Vec3::splat(0.5);
                                 if let Some(drop) = block::drops(id) {
-                                    let center = hit.as_vec3() + Vec3::splat(0.5);
                                     let stack = item::ItemStack::new(item::item_of_block(drop), 1);
                                     state.game.spawn_item(center, stack);
                                 }
+                                // Some ores release experience orbs when mined.
+                                state.game.spawn_xp(center, block::mining_xp(id));
                             }
                             state.inventory.damage_selected(1);
                         }
@@ -507,6 +532,10 @@ impl App {
             state.player.health,
             state.player.hunger,
             !state.player.flying,
+            state.player.air_fraction(),
+            state.player.submerged,
+            state.player.level,
+            state.player.xp_fraction(),
             debug_lines.as_deref(),
         );
         if let Screen::Furnace(pos) = state.screen {
@@ -819,13 +848,19 @@ impl ApplicationHandler for App {
             shot_inv.slots[9] = Some(item::ItemStack::new(item::item_of_block(block::COAL_ORE), 12));
             shot_inv.slots[11] = Some(item::ItemStack::new(item::item_of_block(block::DIRT), 64));
             shot_inv.slots[19] = Some(item::ItemStack::new(item::item_of_block(block::IRON_ORE), 5));
+            // VOXELCRAFT_SURVIVAL=1 flips the HUD to survival mode with demo air/XP for verification.
+            let survival_demo = std::env::var("VOXELCRAFT_SURVIVAL").is_ok();
             let mut ui = overlay::build_ui(
                 gpu.config.width,
                 gpu.config.height,
                 &shot_inv,
                 20.0,
-                20.0,
-                false,
+                if survival_demo { 14.0 } else { 20.0 },
+                survival_demo,
+                if survival_demo { 0.45 } else { 1.0 },
+                survival_demo,
+                if survival_demo { 7 } else { 0 },
+                if survival_demo { 0.6 } else { 0.0 },
                 Some(&dbg),
             );
             let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();
