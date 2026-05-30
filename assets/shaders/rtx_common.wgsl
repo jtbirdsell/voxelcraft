@@ -124,7 +124,10 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 27u: { return vec3<f32>(0.55, 0.42, 0.24); } // chest
         case 31u: { return vec3<f32>(0.30, 0.52, 0.24); } // cactus (28-30 are non-opaque plants)
         case 36u: { return vec3<f32>(0.79, 0.50, 0.13); } // pumpkin (32-35 are non-opaque plants)
-        case 37u: { return vec3<f32>(0.66, 0.80, 0.92); } // ice
+        case 37u: { return vec3<f32>(0.66, 0.80, 0.92); } // ice (38 glass is non-opaque -> stored 0)
+        case 39u: { return vec3<f32>(0.49, 0.49, 0.52); } // stone slab
+        case 40u: { return vec3<f32>(0.49, 0.49, 0.52); } // stone stairs
+        case 41u: { return vec3<f32>(0.62, 0.48, 0.30); } // wood slab
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }

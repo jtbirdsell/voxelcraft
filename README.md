@@ -63,6 +63,9 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   biomes. Fully seed-deterministic.
 - A **procedural texture atlas** painted in code at startup (stone, ores, planks, bricks, foliage,
   …), with cross-billboard plants drawn via **alpha cutout**.
+- **Translucent glass** (its own alpha-blended, depth-writing render pass — see-through and tinted,
+  non-occluding to light) plus **slabs and stairs** as half/partial blocks emitted through the
+  mesher's per-cell path; the greedy mesher now splits geometry into opaque / water / glass buckets.
 - **Day/night** cycle with a dynamic sky, distance fog, translucent **water**, and **flowing fluids**
   (water/lava cellular simulation). Animated water ripples and lava.
 - **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /
@@ -118,7 +121,7 @@ src/
   world.rs          Chunk (32³ blocks + light), World store, neighborhood view for meshing
   worldgen.rs       noise terrain, biomes, caves, ores, trees, decoration (Arc-shared across workers)
   light.rs          skylight + block-light flood (baked per-vertex during meshing)
-  mesher.rs         binary greedy mesher (opaque/water) + cross-billboard plants
+  mesher.rs         binary greedy mesher (opaque/water/glass) + cross-billboards + slab/stair boxes
   texture.rs        procedural block texture atlas (painted in code)
   font.rs           embedded 8×8 bitmap font, baked to an atlas
   worker.rs         crossbeam worker pool (generate + mesh off the main thread)
@@ -135,7 +138,7 @@ src/
   renderer.rs       pipelines (chunk/water/highlight/UI) + atlas/font bind groups, frame recording
   persistence.rs    LZ4 chunk save/load, level header, inventory save_state
   capture.rs        offscreen screenshot (headless verification)
-assets/shaders/     rtx_common (shared bindings + voxel DDA tracer) + chunk / water / line / ui WGSL
+assets/shaders/     rtx_common (shared bindings + voxel DDA tracer) + chunk / water / glass / line / ui WGSL
 ```
 
 **Hardware-driven choices:** worker threads keep all cores busy on generation/meshing/lighting while

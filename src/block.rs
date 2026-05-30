@@ -42,15 +42,23 @@ pub const BROWN_MUSHROOM: BlockId = 34;
 pub const SUGAR_CANE: BlockId = 35;
 pub const PUMPKIN: BlockId = 36;
 pub const ICE: BlockId = 37;
+// M26 glass + partial blocks.
+pub const GLASS: BlockId = 38;
+pub const STONE_SLAB: BlockId = 39;
+pub const STONE_STAIRS: BlockId = 40;
+pub const WOOD_SLAB: BlockId = 41;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = ICE;
+pub const MAX_BLOCK: BlockId = WOOD_SLAB;
 
-/// How a block is meshed: a full greedy cube, or an X-shaped cross billboard (plants).
+/// How a block is meshed: a full greedy cube, a cross billboard (plants), or a non-greedy partial
+/// shape (slab / stairs) emitted one cell at a time like a billboard.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenderKind {
     Cube,
     Cross,
+    Slab,
+    Stairs,
 }
 
 #[inline]
@@ -59,6 +67,8 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         POPPY | DANDELION | TALL_GRASS | FERN | RED_MUSHROOM | BROWN_MUSHROOM | SUGAR_CANE => {
             RenderKind::Cross
         }
+        STONE_SLAB | WOOD_SLAB => RenderKind::Slab,
+        STONE_STAIRS => RenderKind::Stairs,
         _ => RenderKind::Cube,
     }
 }
@@ -69,10 +79,29 @@ pub fn is_plant(id: BlockId) -> bool {
     matches!(render_kind(id), RenderKind::Cross)
 }
 
-/// A full greedy-meshed cube (everything except cross-billboard plants).
+/// A partial-geometry block (slab/stairs): solid for collision but emitted per-cell, not greedy.
+#[inline]
+pub fn is_partial(id: BlockId) -> bool {
+    matches!(render_kind(id), RenderKind::Slab | RenderKind::Stairs)
+}
+
+/// Translucent glass: a full cube that renders in its own alpha-blended pass and never blocks light.
+#[inline]
+pub fn is_glass(id: BlockId) -> bool {
+    id == GLASS
+}
+
+/// A full greedy-meshed cube (cubes incl. glass; excludes cross plants and partials).
 #[inline]
 pub fn is_cube(id: BlockId) -> bool {
     matches!(render_kind(id), RenderKind::Cube)
+}
+
+/// Whether a block occupies the ray-traced voxel volume as a full cube (casts shadows / AO). Glass
+/// is see-through (stored as 0); slabs/stairs are approximated as full cubes (like leaves today).
+#[inline]
+pub fn is_volume_solid(id: BlockId) -> bool {
+    is_opaque(id) || is_partial(id)
 }
 
 /// A block participates in collision (fluids and cross-billboard plants are passable).
@@ -91,7 +120,7 @@ pub fn is_fluid(id: BlockId) -> bool {
 /// Water and cross-billboard plants are non-opaque; leaves stay opaque (rendered as solid foliage).
 #[inline]
 pub fn is_opaque(id: BlockId) -> bool {
-    id != AIR && id != WATER && !is_plant(id)
+    id != AIR && id != WATER && id != GLASS && !is_plant(id) && !is_partial(id)
 }
 
 /// Whether a block produces any geometry at all.
@@ -160,6 +189,10 @@ pub fn display_name(id: BlockId) -> &'static str {
         SUGAR_CANE => "Sugar Cane",
         PUMPKIN => "Pumpkin",
         ICE => "Ice",
+        GLASS => "Glass",
+        STONE_SLAB => "Stone Slab",
+        STONE_STAIRS => "Stone Stairs",
+        WOOD_SLAB => "Wood Slab",
         _ => "Unknown",
     }
 }
@@ -227,6 +260,9 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
             }
         }
         ICE => [0.66, 0.80, 0.92],
+        GLASS => [0.82, 0.91, 0.98],
+        STONE_SLAB | STONE_STAIRS => [0.49, 0.49, 0.52], // stone
+        WOOD_SLAB => [0.62, 0.48, 0.30],                 // planks
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -320,6 +356,9 @@ pub fn hardness(id: BlockId) -> f32 {
         OBSIDIAN => 8.0,
         ICE => 0.5,
         PUMPKIN => 1.0,
+        GLASS => 0.3,
+        STONE_SLAB | STONE_STAIRS => 1.5,
+        WOOD_SLAB => 1.2,
         _ if is_plant(id) => 0.0,
         _ => 1.0,
     }
@@ -330,8 +369,8 @@ pub fn tool_class(id: BlockId) -> ToolClass {
     match id {
         STONE | COBBLESTONE | BRICKS | DEEPSLATE | OBSIDIAN | FURNACE | COAL_ORE | IRON_ORE
         | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE => ToolClass::Pickaxe,
-        ICE => ToolClass::Pickaxe,
-        WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN => ToolClass::Axe,
+        ICE | STONE_SLAB | STONE_STAIRS => ToolClass::Pickaxe,
+        WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB => ToolClass::Axe,
         DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
         _ => ToolClass::None,
     }
@@ -351,7 +390,8 @@ pub fn drops(id: BlockId) -> Option<BlockId> {
         STONE => Some(COBBLESTONE),
         GRASS => Some(DIRT),
         LEAVES => None,
-        ICE => None, // melts away (no silk touch yet)
+        ICE => None,   // melts away (no silk touch yet)
+        GLASS => None, // shatters
         _ => Some(id),
     }
 }
@@ -413,6 +453,7 @@ pub mod tile {
     pub const PUMPKIN_TOP: u32 = 39;
     pub const PUMPKIN_SIDE: u32 = 40;
     pub const ICE: u32 = 41;
+    pub const GLASS: u32 = 42;
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 
@@ -489,6 +530,9 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
             }
         }
         ICE => tile::ICE,
+        GLASS => tile::GLASS,
+        STONE_SLAB | STONE_STAIRS => tile::STONE,
+        WOOD_SLAB => tile::PLANKS,
         _ => tile::MAGENTA,
     }
 }

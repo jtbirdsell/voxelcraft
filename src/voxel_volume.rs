@@ -248,15 +248,16 @@ impl VoxelVolume {
         let tz = (pos.z * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_XZ) as u32;
 
         // Texture data order is x (fastest), then y, then z; row stride 128 texels (= 256 bytes,
-        // a multiple of COPY_BYTES_PER_ROW_ALIGNMENT). Opaque blocks store their id so the tracer
-        // can read material color; air and water (non-opaque) store 0 and cast no shadow.
+        // a multiple of COPY_BYTES_PER_ROW_ALIGNMENT). Volume-solid blocks store their id so the
+        // tracer can read material color; air, water, and glass store 0 and cast no shadow. Slabs/
+        // stairs are approximated as full cubes here (matches leaves).
         let row_stride = SCRATCH_ROW;
         for z in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
                 let base = z * row_stride * CHUNK_SIZE + y * row_stride;
                 for x in 0..CHUNK_SIZE {
                     let id = chunk.get(x, y, z);
-                    self.scratch[base + x] = if block::is_opaque(id) { id } else { 0 };
+                    self.scratch[base + x] = if block::is_volume_solid(id) { id } else { 0 };
                 }
             }
         }

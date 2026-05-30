@@ -76,8 +76,21 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::PUMPKIN_TOP => [0.80, 0.52, 0.14],
         T::PUMPKIN_SIDE => [0.78, 0.48, 0.12],
         T::ICE => [0.66, 0.80, 0.92],
+        T::GLASS => [0.82, 0.91, 0.98],
         _ => [1.0, 0.0, 1.0],
     }
+}
+
+/// Glass: a near-transparent pale-blue pane with a more opaque border + the odd glint, so the
+/// alpha-blended glass pass reads as a framed sheet of glass you can see through.
+fn paint_glass(x: u32, y: u32) -> [u8; 4] {
+    let frame = x == 0 || y == 0 || x == 15 || y == 15;
+    if frame {
+        return [191, 217, 242, 235]; // light, mostly opaque border
+    }
+    let glint = hashf(x, y, 23) > 0.92;
+    let a = if glint { 110 } else { 36 };
+    [to_u8(0.82), to_u8(0.91), to_u8(0.98), a]
 }
 
 /// Cross-billboard plant tiles: an RGBA cutout (alpha 0 outside the plant shape) so the X quads
@@ -192,6 +205,9 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             | T::SUGAR_CANE
     ) {
         return paint_plant(tile, x, y);
+    }
+    if tile == T::GLASS {
+        return paint_glass(x, y);
     }
     let base = base_color(tile);
     let n = hashf(x, y, tile.wrapping_mul(131) + 7); // 0..1 fine grain

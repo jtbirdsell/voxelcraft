@@ -40,11 +40,13 @@ pub struct GpuPart {
 pub struct GpuMesh {
     pub opaque: Option<GpuPart>,
     pub water: Option<GpuPart>,
+    pub translucent: Option<GpuPart>,
 }
 
 pub struct ChunkRenderer {
     pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
+    glass_pipeline: wgpu::RenderPipeline,
     highlight_pipeline: wgpu::RenderPipeline,
     ui_pipeline: wgpu::RenderPipeline,
     ui_bind_group: wgpu::BindGroup,
@@ -286,6 +288,57 @@ impl ChunkRenderer {
             cache: None,
         });
 
+        // Glass pipeline: a translucent clone of the water pipeline, but depth-WRITE enabled (glass
+        // is a hard surface that should occlude what's behind it) and no UV animation (glass.wgsl).
+        let glass_src = format!("{rtx_common}{}", include_str!("../assets/shaders/glass.wgsl"));
+        let glass_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("glass-shader"),
+            source: wgpu::ShaderSource::Wgsl(glass_src.into()),
+        });
+        let glass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glass-pipeline"),
+            layout: Some(&chunk_layout),
+            vertex: wgpu::VertexState {
+                module: &glass_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &glass_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // Highlight wireframe pipeline (line list, depth-tested, reuses the camera bind group).
         let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("line-shader"),
@@ -464,6 +517,7 @@ impl ChunkRenderer {
         Self {
             pipeline,
             water_pipeline,
+            glass_pipeline,
             highlight_pipeline,
             ui_pipeline,
             ui_bind_group,
@@ -492,6 +546,7 @@ impl ChunkRenderer {
         GpuMesh {
             opaque: upload_geometry(&gpu.device, &mesh.opaque),
             water: upload_geometry(&gpu.device, &mesh.water),
+            translucent: upload_geometry(&gpu.device, &mesh.translucent),
         }
     }
 
@@ -541,6 +596,45 @@ impl ChunkRenderer {
             pass.set_bind_group(2, &self.atlas_bind_group, &[]);
             for mesh in meshes {
                 if let Some(part) = &mesh.opaque {
+                    pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
+                    pass.set_index_buffer(part.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..part.index_count, 0, 0..1);
+                }
+            }
+        }
+
+        // Glass pass (loads color + depth; alpha-blends over the opaque world, writes depth so it
+        // occludes the water drawn after it). Drawn before water since it's a hard surface.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glass-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.glass_pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, volume_bg, &[]);
+            pass.set_bind_group(2, &self.atlas_bind_group, &[]);
+            for mesh in meshes {
+                if let Some(part) = &mesh.translucent {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
                     pass.set_index_buffer(part.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..part.index_count, 0, 0..1);

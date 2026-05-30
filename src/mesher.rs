@@ -49,16 +49,18 @@ impl Geometry {
     }
 }
 
-/// Per-chunk mesh split by render layer: opaque (solids + foliage) and translucent water.
+/// Per-chunk mesh split by render layer: opaque (solids + foliage + partials), translucent water,
+/// and translucent glass (its own alpha-blended pass, drawn over opaque, with depth write).
 #[derive(Default)]
 pub struct MeshData {
     pub opaque: Geometry,
     pub water: Geometry,
+    pub translucent: Geometry,
 }
 
 impl MeshData {
     pub fn is_empty(&self) -> bool {
-        self.opaque.is_empty() && self.water.is_empty()
+        self.opaque.is_empty() && self.water.is_empty() && self.translucent.is_empty()
     }
 }
 
@@ -157,6 +159,8 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     let (blk, positive, face_light) = cell.unwrap();
                     let geom = if block::is_water(blk) {
                         &mut mesh.water
+                    } else if block::is_glass(blk) {
+                        &mut mesh.translucent
                     } else {
                         &mut mesh.opaque
                     };
@@ -177,19 +181,105 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
         }
     }
 
-    // Cross-billboard plants: an X of two quads per plant cell, lit and non-occluding. One pass over
-    // the block array (index = x + S*(z + S*y), see world::local_index).
+    // Non-greedy shapes emitted one cell at a time (cross plants + partial slabs/stairs). They were
+    // excluded from the greedy cube sweep above, so they never participate in face culling. One pass
+    // over the block array (index = x + S*(z + S*y), see world::local_index).
     for (i, &id) in neigh.center.blocks.iter().enumerate() {
-        if block::is_plant(id) {
-            let x = (i as i32) % S;
-            let z = (i as i32 / S) % S;
-            let y = i as i32 / (S * S);
-            let l = crate::light::at(&lightgrid, x, y, z);
-            emit_cross(&mut mesh.opaque, origin, x, y, z, id, l);
+        let kind = block::render_kind(id);
+        if matches!(kind, block::RenderKind::Cube) {
+            continue;
+        }
+        let x = (i as i32) % S;
+        let z = (i as i32 / S) % S;
+        let y = i as i32 / (S * S);
+        let l = crate::light::at(&lightgrid, x, y, z);
+        match kind {
+            block::RenderKind::Cross => emit_cross(&mut mesh.opaque, origin, x, y, z, id, l),
+            // Bottom slab: a half-height box.
+            block::RenderKind::Slab => {
+                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l)
+            }
+            // Stairs: a bottom slab + an upper-back quarter (fixed orientation, stepping toward +z).
+            block::RenderKind::Stairs => {
+                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l);
+                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.5, 0.5], [1.0, 1.0, 1.0], id, l);
+            }
+            block::RenderKind::Cube => {}
         }
     }
 
     mesh
+}
+
+/// Emit the 6 faces of an axis-aligned sub-cube `[lo,hi]` (local 0..1 within cell `(lx,ly,lz)`) into
+/// `geom`, textured per-face like a normal block. No face culling — partial blocks are rare and don't
+/// participate in greedy merging. `face_light` is the (sky<<4|block) value sampled at the cell.
+#[allow(clippy::too_many_arguments)]
+fn emit_box(
+    geom: &mut Geometry,
+    origin: [i32; 3],
+    lx: i32,
+    ly: i32,
+    lz: i32,
+    lo: [f32; 3],
+    hi: [f32; 3],
+    id: u16,
+    face_light: u8,
+) {
+    let cell = [
+        (origin[0] + lx) as f32,
+        (origin[1] + ly) as f32,
+        (origin[2] + lz) as f32,
+    ];
+    let light = [
+        (face_light >> 4) as f32 / 15.0,
+        (face_light & 0x0F) as f32 / 15.0,
+    ];
+    // World-space min/max corners of the sub-cube.
+    let wmin = [cell[0] + lo[0], cell[1] + lo[1], cell[2] + lo[2]];
+    let wmax = [cell[0] + hi[0], cell[1] + hi[1], cell[2] + hi[2]];
+
+    for d in 0..3usize {
+        let u = (d + 1) % 3;
+        let v = (d + 2) % 3;
+        for positive in [false, true] {
+            let foff = normal_offset(d, positive);
+            let normal = normal_vec(d, positive);
+            let tile = block::face_tile(id, foff);
+            let shade = [block::emission(id), block::tint_class(id, foff)];
+            // Plane position along d, and the face's extent along u,v (so the tile isn't stretched).
+            let pd = if positive { wmax[d] } else { wmin[d] };
+            let (su, sv) = (hi[u] - lo[u], hi[v] - lo[v]);
+            // Four corners in (u,v) order, expressed in world space.
+            let corner = |cu: f32, cv: f32| -> [f32; 3] {
+                let mut p = [0.0f32; 3];
+                p[d] = pd;
+                p[u] = if cu < 0.5 { wmin[u] } else { wmax[u] };
+                p[v] = if cv < 0.5 { wmin[v] } else { wmax[v] };
+                p
+            };
+            let p = [
+                corner(0.0, 0.0),
+                corner(1.0, 0.0),
+                corner(1.0, 1.0),
+                corner(0.0, 1.0),
+            ];
+            let uvs = [[0.0, 0.0], [su, 0.0], [su, sv], [0.0, sv]];
+            let base = geom.vertices.len() as u32;
+            for (pos, uv) in p.iter().zip(uvs.iter()) {
+                geom.vertices.push(Vertex {
+                    position: *pos,
+                    normal,
+                    uv: *uv,
+                    tile,
+                    light,
+                    shade,
+                });
+            }
+            geom.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
 }
 
 /// Emit a cross-billboard plant (two diagonal quads) for the cell at chunk-local (lx,ly,lz).
