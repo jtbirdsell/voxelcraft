@@ -77,6 +77,14 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::PUMPKIN_SIDE => [0.78, 0.48, 0.12],
         T::ICE => [0.66, 0.80, 0.92],
         T::GLASS => [0.82, 0.91, 0.98],
+        T::MOB_COW => [0.42, 0.30, 0.20],
+        T::MOB_PIG => [0.88, 0.55, 0.58],
+        T::MOB_SHEEP => [0.90, 0.90, 0.88],
+        T::MOB_CHICKEN => [0.95, 0.95, 0.90],
+        T::MOB_ZOMBIE => [0.32, 0.55, 0.34],
+        T::MOB_SKELETON => [0.82, 0.82, 0.78],
+        T::MOB_CREEPER => [0.36, 0.66, 0.34],
+        T::MOB_SPIDER => [0.20, 0.17, 0.20],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -299,6 +307,10 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
         }
         T::MOB | T::MOB_HEAD => {
             c = shade(base, (n - 0.5) * 0.10);
+        }
+        T::MOB_COW | T::MOB_PIG | T::MOB_SHEEP | T::MOB_CHICKEN | T::MOB_ZOMBIE
+        | T::MOB_SKELETON | T::MOB_CREEPER | T::MOB_SPIDER => {
+            c = shade(base, (n - 0.5) * 0.12); // subtle grain on the flat body color
         }
         T::COBBLE => {
             c = shade(base, (n - 0.5) * 0.30);

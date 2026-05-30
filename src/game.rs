@@ -719,8 +719,8 @@ impl Game {
         }
     }
 
-    pub fn spawn_mob(&mut self, pos: Vec3) {
-        self.entities.spawn_mob(pos);
+    pub fn spawn_mob(&mut self, pos: Vec3, species: crate::entity::Species) {
+        self.entities.spawn_mob(pos, species);
     }
 
     pub fn spawn_item(&mut self, pos: Vec3, stack: crate::item::ItemStack) {

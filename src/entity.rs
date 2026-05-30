@@ -8,13 +8,12 @@ use std::f32::consts::TAU;
 use glam::{IVec3, Vec3};
 
 use crate::block;
+use crate::block::tile as T;
 use crate::item::{self, ItemStack};
 use crate::mesher::{Geometry, MeshData, Vertex};
 
 const GRAVITY: f32 = 28.0;
 const MOB_SPEED: f32 = 1.8;
-const MOB_W: f32 = 0.8;
-const MOB_H: f32 = 0.9;
 const ITEM_SIZE: f32 = 0.28;
 const ITEM_LIFETIME: f32 = 90.0;
 const COLLECT_RADIUS: f32 = 1.2;
@@ -57,8 +56,161 @@ fn randf(state: &mut u64) -> f32 {
     (xorshift(state) >> 40) as f32 / 16_777_216.0
 }
 
+/// A creature type (M27). Passive species wander and flee; hostile species (used by combat in M29)
+/// will hunt the player. Each has a distinct size, health, and multi-box `model()`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Species {
+    Cow,
+    Pig,
+    Sheep,
+    Chicken,
+    Zombie,
+    Skeleton,
+    Creeper,
+    Spider,
+}
+
+impl Species {
+    /// All species, for spawning a representative set.
+    pub const ALL: [Species; 8] = [
+        Species::Cow,
+        Species::Pig,
+        Species::Sheep,
+        Species::Chicken,
+        Species::Zombie,
+        Species::Skeleton,
+        Species::Creeper,
+        Species::Spider,
+    ];
+
+    fn max_health(self) -> f32 {
+        match self {
+            Species::Chicken => 4.0,
+            Species::Sheep => 8.0,
+            Species::Cow | Species::Pig => 10.0,
+            Species::Spider => 16.0,
+            Species::Zombie | Species::Skeleton | Species::Creeper => 20.0,
+        }
+    }
+
+    /// Collision AABB (width, height).
+    fn size(self) -> (f32, f32) {
+        match self {
+            Species::Chicken => (0.4, 0.7),
+            Species::Pig => (0.8, 0.9),
+            Species::Sheep => (0.8, 1.3),
+            Species::Cow => (0.9, 1.4),
+            Species::Creeper => (0.6, 1.7),
+            Species::Zombie | Species::Skeleton => (0.6, 1.9),
+            Species::Spider => (1.1, 0.7),
+        }
+    }
+
+    /// Hostile species hunt the player (wired up by combat/AI in M28-M29).
+    #[allow(dead_code)]
+    pub fn hostile(self) -> bool {
+        matches!(
+            self,
+            Species::Zombie | Species::Skeleton | Species::Creeper | Species::Spider
+        )
+    }
+}
+
+/// One box of a mob's model, in local space (feet at origin, +x = forward/facing, +y = up).
+struct Part {
+    min: [f32; 3],
+    max: [f32; 3],
+    tile: u32,
+}
+
+#[inline]
+fn part(min: [f32; 3], max: [f32; 3], tile: u32) -> Part {
+    Part { min, max, tile }
+}
+
+/// Build a species' multi-box model. Distinct silhouettes/sizes/colors so types read apart.
+fn model(s: Species) -> Vec<Part> {
+    match s {
+        Species::Cow => quadruped(T::MOB_COW, 0.9, 0.6, 0.6, 1.15, 0.5),
+        Species::Pig => quadruped(T::MOB_PIG, 0.8, 0.55, 0.4, 0.85, 0.42),
+        Species::Sheep => quadruped(T::MOB_SHEEP, 0.85, 0.7, 0.55, 1.2, 0.42),
+        Species::Chicken => chicken(),
+        Species::Zombie => biped(T::MOB_ZOMBIE),
+        Species::Skeleton => biped(T::MOB_SKELETON),
+        Species::Creeper => creeper(),
+        Species::Spider => spider(),
+    }
+}
+
+/// A body + forward head + four corner legs.
+fn quadruped(tile: u32, len: f32, wid: f32, leg_h: f32, top: f32, hs: f32) -> Vec<Part> {
+    let (l, w) = (len * 0.5, wid * 0.5);
+    let mut v = vec![
+        part([-l, leg_h, -w], [l, top, w], tile), // body
+        part([l - 0.05, top - hs, -hs * 0.5], [l - 0.05 + hs, top - hs + hs * 1.2, hs * 0.5], tile), // head (front)
+    ];
+    let lw = 0.15;
+    for (lx, lz) in [(l - lw, w - lw), (l - lw, -w), (-l, w - lw), (-l, -w)] {
+        v.push(part([lx, 0.0, lz], [lx + lw, leg_h, lz + lw], tile));
+    }
+    v
+}
+
+/// A humanoid: two legs, torso, head, two forward arms.
+fn biped(tile: u32) -> Vec<Part> {
+    vec![
+        part([-0.18, 0.0, -0.12], [-0.01, 0.72, 0.12], tile), // left leg
+        part([0.01, 0.0, -0.12], [0.18, 0.72, 0.12], tile),   // right leg
+        part([-0.2, 0.72, -0.14], [0.2, 1.42, 0.14], tile),   // torso
+        part([-0.18, 1.42, -0.18], [0.18, 1.78, 0.18], tile), // head
+        part([0.04, 0.8, -0.36], [0.34, 1.4, -0.16], tile),   // arm (reaching forward)
+        part([0.04, 0.8, 0.16], [0.34, 1.4, 0.36], tile),     // arm
+    ]
+}
+
+fn chicken() -> Vec<Part> {
+    vec![
+        part([-0.18, 0.25, -0.15], [0.18, 0.58, 0.15], T::MOB_CHICKEN), // body
+        part([0.12, 0.48, -0.1], [0.3, 0.74, 0.1], T::MOB_CHICKEN),     // head/neck
+        part([0.28, 0.56, -0.04], [0.4, 0.64, 0.04], T::MOB_PIG),       // beak
+        part([-0.06, 0.0, -0.1], [0.04, 0.25, -0.02], T::MOB_PIG),      // legs
+        part([-0.06, 0.0, 0.02], [0.04, 0.25, 0.1], T::MOB_PIG),
+    ]
+}
+
+fn creeper() -> Vec<Part> {
+    let mut v = vec![
+        part([-0.2, 0.3, -0.13], [0.2, 1.3, 0.13], T::MOB_CREEPER), // tall body
+        part([-0.22, 1.25, -0.22], [0.22, 1.65, 0.22], T::MOB_CREEPER), // head
+    ];
+    for (lx, lz) in [(0.04, 0.01), (0.04, -0.13), (-0.2, 0.01), (-0.2, -0.13)] {
+        v.push(part([lx, 0.0, lz], [lx + 0.16, 0.3, lz + 0.12], T::MOB_CREEPER));
+    }
+    v
+}
+
+fn spider() -> Vec<Part> {
+    let mut v = vec![
+        part([-0.32, 0.18, -0.4], [0.3, 0.58, 0.4], T::MOB_SPIDER), // wide low abdomen
+        part([0.25, 0.22, -0.2], [0.58, 0.52, 0.2], T::MOB_SPIDER), // head
+    ];
+    for (lx, lz) in [(0.05, 0.4), (0.05, -0.52), (-0.3, 0.4), (-0.3, -0.52)] {
+        v.push(part([lx, 0.0, lz], [lx + 0.12, 0.36, lz + 0.12], T::MOB_SPIDER));
+    }
+    v
+}
+
+/// Per-mob state carried by `Kind::Mob`. `health`/`hurt` drive combat + the hurt-flash in M29.
+#[derive(Clone, Copy)]
+struct MobData {
+    species: Species,
+    health: f32,
+    hurt: f32,
+}
+
+#[derive(Clone, Copy)]
 enum Kind {
-    Mob,
+    Mob(MobData),
     Item(ItemStack),
     /// An experience orb worth `n` points; homes toward a nearby player and grants XP on pickup.
     Xp(u32),
@@ -107,11 +259,15 @@ impl Entities {
         h | 1
     }
 
-    pub fn spawn_mob(&mut self, pos: Vec3) {
+    pub fn spawn_mob(&mut self, pos: Vec3, species: Species) {
         let mut rng = self.next_seed();
         let heading = randf(&mut rng) * TAU;
         self.list.push(Entity {
-            kind: Kind::Mob,
+            kind: Kind::Mob(MobData {
+                species,
+                health: species.max_health(),
+                hurt: 0.0,
+            }),
             pos,
             vel: Vec3::ZERO,
             on_ground: false,
@@ -172,7 +328,9 @@ impl Entities {
         for e in &mut self.list {
             e.age += dt;
             match e.kind {
-                Kind::Mob => {
+                Kind::Mob(mut m) => {
+                    m.hurt = (m.hurt - dt).max(0.0); // hurt-flash decays (set by combat in M29)
+                    let (mw, mh) = m.species.size();
                     e.wander -= dt;
                     if e.wander <= 0.0 {
                         e.wander = 2.0 + randf(&mut e.rng) * 3.0;
@@ -191,10 +349,11 @@ impl Entities {
                         }
                     }
                     e.vel.y -= GRAVITY * dt;
-                    e.on_ground = collide_move(&mut e.pos, &mut e.vel, MOB_W, MOB_H, dt, &is_solid);
-                    if e.pos.y < FALL_OUT_Y {
+                    e.on_ground = collide_move(&mut e.pos, &mut e.vel, mw, mh, dt, &is_solid);
+                    if e.pos.y < FALL_OUT_Y || m.health <= 0.0 {
                         e.dead = true;
                     }
+                    e.kind = Kind::Mob(m); // persist hurt decay
                 }
                 Kind::Item(stack) => {
                     e.vel.y -= GRAVITY * dt;
@@ -248,27 +407,11 @@ impl Entities {
         let mut mesh = MeshData::default();
         for e in &self.list {
             match e.kind {
-                Kind::Mob => {
-                    let half = MOB_W * 0.5;
-                    let body_min = e.pos + Vec3::new(-half, 0.0, -half);
-                    let body_max = e.pos + Vec3::new(half, MOB_H * 0.78, half);
-                    push_box(&mut mesh.opaque, body_min, body_max, 0.0, block::tile::MOB, 0.0);
-                    // A smaller head offset toward the heading gives the box a facing.
-                    let hs = MOB_W * 0.3;
-                    let hc = e.pos
-                        + Vec3::new(
-                            e.heading.cos() * half * 0.9,
-                            MOB_H * 0.72,
-                            e.heading.sin() * half * 0.9,
-                        );
-                    push_box(
-                        &mut mesh.opaque,
-                        hc - Vec3::new(hs, hs, hs),
-                        hc + Vec3::new(hs, hs * 1.6, hs),
-                        0.0,
-                        block::tile::MOB_HEAD,
-                        0.0,
-                    );
+                Kind::Mob(m) => {
+                    // Each species draws its own multi-box model, yaw-rotated to face its heading.
+                    for p in model(m.species) {
+                        push_part(&mut mesh.opaque, e.pos, e.heading, &p, m.hurt);
+                    }
                 }
                 Kind::Item(stack) => {
                     let tile = item::item_tile(stack.item);
@@ -365,6 +508,58 @@ fn collide_move(
         }
     }
     on_ground
+}
+
+/// Emit one mob model part: a box given in LOCAL space (feet at origin, +x forward), rotated by
+/// `yaw` around the mob's vertical axis and placed at `feet`. `hurt` (0..1) goes in `shade.y` for
+/// the M29 hurt-flash. Faces are never culled (mobs are small and self-contained).
+fn push_part(geom: &mut Geometry, feet: Vec3, yaw: f32, p: &Part, hurt: f32) {
+    let (s, co) = yaw.sin_cos();
+    let rot = |lx: f32, ly: f32, lz: f32| -> [f32; 3] {
+        [feet.x + lx * co - lz * s, feet.y + ly, feet.z + lx * s + lz * co]
+    };
+    let rotn = |nx: f32, nz: f32| -> [f32; 3] { [nx * co - nz * s, 0.0, nx * s + nz * co] };
+    let (mn, mx) = (p.min, p.max);
+    let shade = [0.0, hurt];
+    let face_uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let cor = [
+        (mn[0], mn[1], mn[2]),
+        (mx[0], mn[1], mn[2]),
+        (mx[0], mn[1], mx[2]),
+        (mn[0], mn[1], mx[2]),
+        (mn[0], mx[1], mn[2]),
+        (mx[0], mx[1], mn[2]),
+        (mx[0], mx[1], mx[2]),
+        (mn[0], mx[1], mx[2]),
+    ];
+    let pw: [[f32; 3]; 8] = std::array::from_fn(|i| {
+        let (x, y, z) = cor[i];
+        rot(x, y, z)
+    });
+    let faces: [([usize; 4], [f32; 3]); 6] = [
+        ([1, 2, 6, 5], [1.0, 0.0, 0.0]),
+        ([3, 0, 4, 7], [-1.0, 0.0, 0.0]),
+        ([4, 5, 6, 7], [0.0, 1.0, 0.0]),
+        ([0, 3, 2, 1], [0.0, -1.0, 0.0]),
+        ([2, 3, 7, 6], [0.0, 0.0, 1.0]),
+        ([0, 1, 5, 4], [0.0, 0.0, -1.0]),
+    ];
+    for (idx, n) in faces {
+        let normal = if n[1] != 0.0 { n } else { rotn(n[0], n[2]) };
+        let base = geom.vertices.len() as u32;
+        for (j, &k) in idx.iter().enumerate() {
+            geom.vertices.push(Vertex {
+                position: pw[k],
+                normal,
+                uv: face_uv[j],
+                tile: p.tile,
+                light: [1.0, 1.0],
+                shade,
+            });
+        }
+        geom.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
 }
 
 /// Append a (optionally yaw-rotated) box textured with atlas `tile` to `geom`. `emission` is the

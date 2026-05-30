@@ -454,6 +454,15 @@ pub mod tile {
     pub const PUMPKIN_SIDE: u32 = 40;
     pub const ICE: u32 = 41;
     pub const GLASS: u32 = 42;
+    // M27 typed-mob body colors.
+    pub const MOB_COW: u32 = 43;
+    pub const MOB_PIG: u32 = 44;
+    pub const MOB_SHEEP: u32 = 45;
+    pub const MOB_CHICKEN: u32 = 46;
+    pub const MOB_ZOMBIE: u32 = 47;
+    pub const MOB_SKELETON: u32 = 48;
+    pub const MOB_CREEPER: u32 = 49;
+    pub const MOB_SPIDER: u32 = 50;
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 

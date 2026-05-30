@@ -893,6 +893,22 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // Debug: VOXELCRAFT_MOBS=1 spawns one of each species on a flat stage and ticks them a
+            // moment so they settle onto it (M27 typed-mob verification; pair with VOXELCRAFT_CAM).
+            if std::env::var("VOXELCRAFT_MOBS").is_ok() {
+                for z in 20..=28 {
+                    for x in 2..=20 {
+                        game.set_block(&gpu, &renderer, IVec3::new(x, 84, z), block::STONE);
+                    }
+                }
+                for (i, &sp) in crate::entity::Species::ALL.iter().enumerate() {
+                    game.spawn_mob(Vec3::new(4.5 + i as f32 * 1.7, 88.0, 24.0), sp);
+                }
+                for _ in 0..90 {
+                    let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0);
+                }
+            }
+
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.
             game.prime_volume(&gpu, player.position);
 
@@ -1029,9 +1045,13 @@ impl ApplicationHandler for App {
         let (inventory, saved_furnaces) = persistence::load_state(&dir, flying);
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
         game.restore_furnaces(saved_furnaces);
-        // A few mobs near spawn; they fall onto terrain as it streams in.
-        for (dx, dz) in [(-3, -5), (3, -6), (6, 2), (-5, 3), (1, 7), (7, -2)] {
-            game.spawn_mob(Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32));
+        // One of each species near spawn; they fall onto terrain as it streams in.
+        let ring = [(-4, -6), (4, -6), (7, 0), (4, 6), (-4, 6), (-7, 0), (0, 8), (0, -8)];
+        for (species, &(dx, dz)) in crate::entity::Species::ALL.iter().zip(ring.iter()) {
+            game.spawn_mob(
+                Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32),
+                *species,
+            );
         }
         let environment = Environment::new(time);
         let mut player = Player::new(spawn, flying);
