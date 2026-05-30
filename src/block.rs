@@ -103,3 +103,70 @@ pub fn emission(id: BlockId) -> f32 {
         _ => 0.0,
     }
 }
+
+/// Atlas tile ids (M13). Index = `row*ATLAS_COLS + col` into the procedural texture atlas. Kept
+/// beside `face_color`/`face_tile` so the painters (texture.rs) and the WGSL `tile_average()` stay
+/// in lockstep. The 0..63 space leaves ample room for the block expansion in M16.
+pub mod tile {
+    pub const STONE: u32 = 0;
+    pub const DIRT: u32 = 1;
+    pub const GRASS_TOP: u32 = 2;
+    pub const GRASS_SIDE: u32 = 3;
+    pub const SAND: u32 = 4;
+    pub const WOOD_TOP: u32 = 5;
+    pub const WOOD_SIDE: u32 = 6;
+    pub const LEAVES: u32 = 7;
+    pub const WATER: u32 = 8;
+    pub const SNOW: u32 = 9;
+    pub const COAL: u32 = 10;
+    pub const IRON: u32 = 11;
+    pub const LAVA: u32 = 12;
+    pub const MOB: u32 = 13;
+    pub const MOB_HEAD: u32 = 14;
+    pub const MAGENTA: u32 = 63; // missing/unknown sentinel
+}
+
+/// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
+/// 2 = water tint. Carried in the vertex `shade.y`; applied in-shader from M13d (biome tint) on.
+pub fn tint_class(id: BlockId, _face_offset: [i32; 3]) -> f32 {
+    match id {
+        GRASS | LEAVES => 1.0,
+        WATER => 2.0,
+        _ => 0.0,
+    }
+}
+
+/// Atlas tile for a block face. Mirrors `face_color`'s per-face logic (grass top/side/bottom,
+/// wood end/side) so `tile_average(face_tile(id, face))` reproduces `face_color(id, face)`.
+pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
+    let top = face_offset[1] == 1;
+    let bottom = face_offset[1] == -1;
+    match id {
+        GRASS => {
+            if top {
+                tile::GRASS_TOP
+            } else if bottom {
+                tile::DIRT
+            } else {
+                tile::GRASS_SIDE
+            }
+        }
+        DIRT => tile::DIRT,
+        STONE => tile::STONE,
+        SAND => tile::SAND,
+        WOOD => {
+            if top || bottom {
+                tile::WOOD_TOP
+            } else {
+                tile::WOOD_SIDE
+            }
+        }
+        LEAVES => tile::LEAVES,
+        WATER => tile::WATER,
+        SNOW => tile::SNOW,
+        COAL_ORE => tile::COAL,
+        IRON_ORE => tile::IRON,
+        LAVA => tile::LAVA,
+        _ => tile::MAGENTA,
+    }
+}

@@ -6,18 +6,27 @@
 use crate::block;
 use crate::world::{Neighborhood, CHUNK_SIZE_I};
 
+/// Unified world vertex (M13). 52 bytes. `color` is gone: rgb comes from the atlas `tile`/`uv`,
+/// emission/tint move to `shade`. `light` is filled by block-light (M14); until then it is (1,1).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
-    /// rgb = albedo, a = self-emission strength (see `block::emission`).
-    pub color: [f32; 4],
+    /// Tiled atlas UV: one unit per block, so a greedy-merged quad repeats its tile w*h times.
+    pub uv: [f32; 2],
+    /// Atlas tile index (see `block::face_tile` / `block::tile`); flat-interpolated.
+    pub tile: u32,
+    /// (skylight, blocklight) in 0..1; (1,1) until block-light (M14) fills it.
+    pub light: [f32; 2],
+    /// (self-emission, tint_class) — see `block::emission` / `block::tint_class`.
+    pub shade: [f32; 2],
 }
 
 impl Vertex {
-    pub const ATTRS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+    pub const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Uint32, 4 => Float32x2, 5 => Float32x2
+    ];
 
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -202,14 +211,25 @@ fn emit_quad(
     let p3 = [base[0] + dv[0], base[1] + dv[1], base[2] + dv[2]];
 
     let normal = normal_vec(d, positive);
-    let c = block::face_color(block_id, normal_offset(d, positive));
-    let color = [c[0], c[1], c[2], block::emission(block_id)];
+    let foff = normal_offset(d, positive);
+    let tile = block::face_tile(block_id, foff);
+    let shade = [block::emission(block_id), block::tint_class(block_id, foff)];
+    // Tiled UV: one unit per block so a greedy w*h quad repeats the tile, not stretches it.
+    let uvs = [
+        [0.0, 0.0],
+        [w as f32, 0.0],
+        [w as f32, h as f32],
+        [0.0, h as f32],
+    ];
     let v = geom.vertices.len() as u32;
-    for p in [p0, p1, p2, p3] {
+    for (p, uv) in [p0, p1, p2, p3].iter().zip(uvs.iter()) {
         geom.vertices.push(Vertex {
-            position: corner(p),
+            position: corner(*p),
             normal,
-            color,
+            uv: *uv,
+            tile,
+            light: [1.0, 1.0],
+            shade,
         });
     }
     // Cull is disabled so winding is irrelevant; two triangles per quad.

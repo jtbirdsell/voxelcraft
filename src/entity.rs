@@ -186,10 +186,9 @@ impl Entities {
             match e.kind {
                 Kind::Mob => {
                     let half = MOB_W * 0.5;
-                    let body = [0.86, 0.55, 0.58];
                     let body_min = e.pos + Vec3::new(-half, 0.0, -half);
                     let body_max = e.pos + Vec3::new(half, MOB_H * 0.78, half);
-                    push_box(&mut mesh.opaque, body_min, body_max, 0.0, body, 0.0);
+                    push_box(&mut mesh.opaque, body_min, body_max, 0.0, block::tile::MOB, 0.0);
                     // A smaller head offset toward the heading gives the box a facing.
                     let hs = MOB_W * 0.3;
                     let hc = e.pos
@@ -203,12 +202,12 @@ impl Entities {
                         hc - Vec3::new(hs, hs, hs),
                         hc + Vec3::new(hs, hs * 1.6, hs),
                         0.0,
-                        [0.80, 0.50, 0.52],
+                        block::tile::MOB_HEAD,
                         0.0,
                     );
                 }
                 Kind::Item(b) => {
-                    let c = block::face_color(b, [0, 1, 0]);
+                    let tile = block::face_tile(b, [0, 1, 0]);
                     let em = block::emission(b);
                     let s = ITEM_SIZE * 0.5;
                     let bob = (e.age * 3.0).sin() * 0.06;
@@ -218,7 +217,7 @@ impl Entities {
                         center - Vec3::new(s, s, s),
                         center + Vec3::new(s, s, s),
                         e.age * 1.6,
-                        c,
+                        tile,
                         em,
                     );
                 }
@@ -290,8 +289,9 @@ fn collide_move(
     on_ground
 }
 
-/// Append a (optionally yaw-rotated) colored box to `geom`. `color` is rgb, `emission` the alpha.
-fn push_box(geom: &mut Geometry, min: Vec3, max: Vec3, yaw: f32, color: [f32; 3], emission: f32) {
+/// Append a (optionally yaw-rotated) box textured with atlas `tile` to `geom`. `emission` is the
+/// self-glow strength (lava items). Uses the unified Vertex; each face spans one tile (uv 0..1).
+fn push_box(geom: &mut Geometry, min: Vec3, max: Vec3, yaw: f32, tile: u32, emission: f32) {
     let center = (min + max) * 0.5;
     let (s, co) = yaw.sin_cos();
     let rot = |p: Vec3| -> [f32; 3] {
@@ -300,7 +300,8 @@ fn push_box(geom: &mut Geometry, min: Vec3, max: Vec3, yaw: f32, color: [f32; 3]
         [center.x + dx * co - dz * s, p.y, center.z + dx * s + dz * co]
     };
     let rotn = |n: [f32; 3]| -> [f32; 3] { [n[0] * co - n[2] * s, n[1], n[0] * s + n[2] * co] };
-    let col = [color[0], color[1], color[2], emission];
+    let shade = [emission, 0.0];
+    let face_uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
     let cor = [
         Vec3::new(min.x, min.y, min.z),
@@ -324,11 +325,14 @@ fn push_box(geom: &mut Geometry, min: Vec3, max: Vec3, yaw: f32, color: [f32; 3]
     for (idx, n) in faces {
         let normal = rotn(n);
         let base = geom.vertices.len() as u32;
-        for &k in &idx {
+        for (j, &k) in idx.iter().enumerate() {
             geom.vertices.push(Vertex {
                 position: rot(cor[k]),
                 normal,
-                color: col,
+                uv: face_uv[j],
+                tile,
+                light: [1.0, 1.0],
+                shade,
             });
         }
         geom.indices

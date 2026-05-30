@@ -24,13 +24,19 @@ struct Volume {
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) color: vec4<f32>, // rgb albedo, a = self-emission strength
+    @location(2) uv: vec2<f32>,
+    @location(3) tile: u32,
+    @location(4) light: vec2<f32>,  // (sky, block) 0..1
+    @location(5) shade: vec2<f32>,  // (emission, tint_class)
 };
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) world_pos: vec3<f32>,
+    @location(1) world_pos: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) @interpolate(flat) tile: u32,
+    @location(4) light: vec2<f32>,
+    @location(5) shade: vec2<f32>,
 };
 
 @vertex
@@ -38,9 +44,35 @@ fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     out.clip_pos = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.normal = in.normal;
-    out.color = in.color;
     out.world_pos = in.position;
+    out.uv = in.uv;
+    out.tile = in.tile;
+    out.light = in.light;
+    out.shade = in.shade;
     return out;
+}
+
+// Average albedo of an atlas tile (mirrors block::face_tile -> face_color). Used as the surface
+// albedo until the atlas texture is sampled (M13b), and to keep GI/volume color consistent.
+fn tile_average(tile: u32) -> vec3<f32> {
+    switch (tile) {
+        case 0u:  { return vec3<f32>(0.49, 0.49, 0.52); } // stone
+        case 1u:  { return vec3<f32>(0.45, 0.33, 0.21); } // dirt
+        case 2u:  { return vec3<f32>(0.36, 0.60, 0.27); } // grass top
+        case 3u:  { return vec3<f32>(0.42, 0.42, 0.24); } // grass side
+        case 4u:  { return vec3<f32>(0.80, 0.75, 0.52); } // sand
+        case 5u:  { return vec3<f32>(0.55, 0.43, 0.27); } // wood top
+        case 6u:  { return vec3<f32>(0.40, 0.30, 0.18); } // wood side
+        case 7u:  { return vec3<f32>(0.20, 0.42, 0.18); } // leaves
+        case 8u:  { return vec3<f32>(0.16, 0.34, 0.62); } // water
+        case 9u:  { return vec3<f32>(0.92, 0.94, 0.97); } // snow
+        case 10u: { return vec3<f32>(0.28, 0.28, 0.30); } // coal ore
+        case 11u: { return vec3<f32>(0.60, 0.52, 0.45); } // iron ore
+        case 12u: { return vec3<f32>(1.0, 0.42, 0.06); }  // lava
+        case 13u: { return vec3<f32>(0.86, 0.55, 0.58); } // mob body
+        case 14u: { return vec3<f32>(0.80, 0.50, 0.52); } // mob head
+        default:  { return vec3<f32>(1.0, 0.0, 1.0); }
+    }
 }
 
 fn in_volume(p: vec3<i32>) -> bool {
