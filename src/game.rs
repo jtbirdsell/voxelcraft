@@ -14,13 +14,18 @@ use crate::frustum::Frustum;
 use crate::gpu::Gpu;
 use crate::mesher::{self, MeshData};
 use crate::renderer::{ChunkRenderer, GpuMesh};
+use crate::persistence::{self, Level};
 use crate::worker::{Job, JobResult, WorkerPool};
 use crate::worldgen::Worldgen;
-use crate::world::{self, World, CHUNK_SIZE_I, WORLD_HEIGHT_CHUNKS};
+use crate::world::{self, Chunk, World, CHUNK_SIZE_I, WORLD_HEIGHT_CHUNKS};
 
 pub struct Game {
     world: World,
     worldgen: Arc<Worldgen>,
+    seed: u64,
+    /// Player-edited chunks, kept resident (and persisted) regardless of streaming.
+    saved: FxHashMap<IVec3, Arc<Chunk>>,
+    dirty: bool,
     /// Built meshes per chunk; `None` means "meshed but empty" (no geometry).
     meshes: FxHashMap<IVec3, Option<GpuMesh>>,
     render_distance: i32,
@@ -41,7 +46,15 @@ pub struct Game {
 }
 
 impl Game {
-    pub fn new(seed: u64, render_distance: i32) -> Self {
+    pub fn new(
+        seed: u64,
+        render_distance: i32,
+        saved_chunks: FxHashMap<IVec3, Chunk>,
+    ) -> Self {
+        let saved: FxHashMap<IVec3, Arc<Chunk>> = saved_chunks
+            .into_iter()
+            .map(|(pos, chunk)| (pos, Arc::new(chunk)))
+            .collect();
         let r = render_distance + 1;
         let mut offsets = Vec::new();
         for dz in -r..=r {
@@ -65,6 +78,9 @@ impl Game {
         Self {
             world: World::new(),
             worldgen,
+            seed,
+            saved,
+            dirty: false,
             meshes: FxHashMap::default(),
             render_distance,
             center: IVec3::new(i32::MIN, 0, i32::MIN),
@@ -166,10 +182,15 @@ impl Game {
             for cy in 0..WORLD_HEIGHT_CHUNKS {
                 let pos = IVec3::new(cx + dx, cy, cz + dz);
                 if !self.world.is_generated(pos) && !self.pending_gen.contains(&pos) {
-                    self.pending_gen.insert(pos);
-                    self.pool.submit(Job::Generate { pos });
-                    if self.pending_gen.len() >= self.max_inflight_gen {
-                        break 'generate;
+                    if let Some(c) = self.saved.get(&pos) {
+                        // Edited chunk: load from memory instantly, no generation needed.
+                        self.world.chunks.insert(pos, c.clone());
+                    } else {
+                        self.pending_gen.insert(pos);
+                        self.pool.submit(Job::Generate { pos });
+                        if self.pending_gen.len() >= self.max_inflight_gen {
+                            break 'generate;
+                        }
                     }
                 }
             }
@@ -232,9 +253,11 @@ impl Game {
             for cy in 0..WORLD_HEIGHT_CHUNKS {
                 let pos = IVec3::new(cx + dx, cy, cz + dz);
                 if !self.world.is_generated(pos) {
-                    self.world
-                        .chunks
-                        .insert(pos, Arc::new(self.worldgen.generate_chunk(pos)));
+                    let chunk = match self.saved.get(&pos) {
+                        Some(c) => c.clone(),
+                        None => Arc::new(self.worldgen.generate_chunk(pos)),
+                    };
+                    self.world.chunks.insert(pos, chunk);
                 }
             }
         }
@@ -308,6 +331,12 @@ impl Game {
             chunk.set(lx, ly, lz, id);
         }
 
+        // Persist the edited chunk (kept resident in `saved`).
+        if let Some(arc) = self.world.chunks.get(&cpos) {
+            self.saved.insert(cpos, arc.clone());
+            self.dirty = true;
+        }
+
         // Edited chunk plus any neighbor sharing the touched boundary must re-mesh.
         let mut affected = vec![cpos];
         if lx == 0 {
@@ -344,6 +373,27 @@ impl Game {
                 Some(renderer.upload_mesh(gpu, &data))
             };
             self.meshes.insert(pos, gpu_mesh);
+        }
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    pub fn edited_chunk_count(&self) -> usize {
+        self.saved.len()
+    }
+
+    /// Write the edited chunks and the level header to disk.
+    pub fn save(&self, level: &Level) {
+        let dir = persistence::save_dir();
+        let chunks: Vec<(IVec3, &Chunk)> =
+            self.saved.iter().map(|(p, c)| (*p, c.as_ref())).collect();
+        if let Err(e) = persistence::save_chunks(&dir, &chunks) {
+            log::error!("failed to save chunks: {e}");
+        }
+        if let Err(e) = persistence::save_level(&dir, level) {
+            log::error!("failed to save level: {e}");
         }
     }
 

@@ -11,6 +11,7 @@ fastnoise-lite = "1.1.1"
 glam = "0.33.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 log = "0.4.30"
+lz4_flex = "0.13.1"
 pollster = "0.4.0"
 rustc-hash = "2.1.2"
 wgpu = "29.0.3"

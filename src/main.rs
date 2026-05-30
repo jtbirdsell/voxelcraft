@@ -15,6 +15,7 @@ mod game;
 mod gpu;
 mod mesher;
 mod overlay;
+mod persistence;
 mod player;
 mod raycast;
 mod renderer;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::{IVec3, Vec3};
+use rustc_hash::FxHashMap;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -41,6 +43,7 @@ use frustum::Frustum;
 use game::Game;
 use gpu::Gpu;
 use overlay::Hotbar;
+use persistence::Level;
 use player::{Input, Player};
 use renderer::ChunkRenderer;
 
@@ -97,9 +100,27 @@ impl App {
         }
     }
 
+    fn save_world(&self) {
+        if let Some(state) = &self.state {
+            let level = Level {
+                seed: state.game.seed(),
+                spawn: state.player.position.to_array(),
+                yaw: state.camera.yaw,
+                pitch: state.camera.pitch,
+                time: state.environment.time,
+                flying: state.player.flying,
+            };
+            state.game.save(&level);
+        }
+    }
+
     fn handle_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, event_loop: &ActiveEventLoop) {
         if code == KeyCode::Escape && pressed {
             event_loop.exit();
+            return;
+        }
+        if code == KeyCode::KeyP && pressed && !repeat {
+            self.save_world();
             return;
         }
         let Some(state) = &mut self.state else { return };
@@ -233,21 +254,16 @@ impl ApplicationHandler for App {
 
         let gpu = pollster::block_on(Gpu::new(window.clone()));
         let renderer = ChunkRenderer::new(&gpu);
-        let mut game = Game::new(SEED, RENDER_DISTANCE);
-        let environment = Environment::new(0.34);
 
-        // Spawn flying above the terrain.
-        let player = Player::new(Vec3::new(8.0, 96.0, 24.0), true);
-        let mut camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update(&camera, gpu.aspect());
-        renderer.update_camera(&gpu, &camera_uniform);
-
+        // Headless screenshot path: a fresh generated world with a few verification edits.
         if let Ok(path) = std::env::var("VOXELCRAFT_SHOT") {
-            game.load_all_blocking(&gpu, &renderer, player.position);
+            let mut game = Game::new(SEED, RENDER_DISTANCE, FxHashMap::default());
+            let environment = Environment::new(0.34);
+            let player = Player::new(Vec3::new(8.0, 96.0, 24.0), true);
+            let camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
+            let mut camera_uniform = CameraUniform::new();
 
-            // Verify set_block + synchronous remesh: build a visible tower + platform and
-            // carve a small crater, then highlight a block.
+            game.load_all_blocking(&gpu, &renderer, player.position);
             for y in 80..101 {
                 let id = if y % 2 == 0 { block::WOOD } else { block::STONE };
                 game.set_block(&gpu, &renderer, IVec3::new(4, y, 8), id);
@@ -259,6 +275,7 @@ impl ApplicationHandler for App {
             }
             let highlight = Some(IVec3::new(4, 101, 8));
 
+            camera_uniform.update(&camera, gpu.aspect());
             camera_uniform.set_environment(&environment, FOG_START, FOG_END);
             renderer.set_sky(environment.wgpu_clear());
             renderer.update_camera(&gpu, &camera_uniform);
@@ -286,7 +303,31 @@ impl ApplicationHandler for App {
             return;
         }
 
-        camera.position = player.eye();
+        // Interactive: load a saved world if one exists, else start a new one.
+        let dir = persistence::save_dir();
+        let level = persistence::load_level(&dir);
+        let (seed, spawn, yaw, pitch, time, flying) = match &level {
+            Some(l) => (l.seed, Vec3::from(l.spawn), l.yaw, l.pitch, l.time, l.flying),
+            None => (
+                SEED,
+                Vec3::new(8.0, 96.0, 24.0),
+                -std::f32::consts::FRAC_PI_2,
+                -0.30,
+                0.34,
+                true,
+            ),
+        };
+        let saved = persistence::load_chunks(&dir);
+        let game = Game::new(seed, RENDER_DISTANCE, saved);
+        let environment = Environment::new(time);
+        let player = Player::new(spawn, flying);
+        let camera = Camera::new(player.eye(), yaw, pitch);
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update(&camera, gpu.aspect());
+        camera_uniform.set_environment(&environment, FOG_START, FOG_END);
+        renderer.update_camera(&gpu, &camera_uniform);
+        renderer.set_sky(environment.wgpu_clear());
+
         self.state = Some(State {
             gpu,
             renderer,
@@ -306,7 +347,10 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.save_world();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state.gpu.resize(size);
