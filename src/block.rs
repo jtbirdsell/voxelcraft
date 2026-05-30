@@ -250,13 +250,30 @@ pub fn blocks_skylight(id: BlockId) -> bool {
 }
 
 /// The tool that mines a block fastest (for mining-speed + drop gating from M19).
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolClass {
     None,
     Pickaxe,
     Axe,
     Shovel,
+    Sword,
+    Hoe,
+}
+
+/// Whether a block needs the correct tool to yield a drop (pickaxe blocks do; wood/dirt drop by hand).
+pub fn requires_tool(id: BlockId) -> bool {
+    matches!(tool_class(id), ToolClass::Pickaxe)
+}
+
+/// Minimum harvest level needed to get a drop (0 = any pickaxe). Iron/lapis need stone, gold/diamond/
+/// redstone need iron, obsidian needs diamond.
+pub fn required_harvest(id: BlockId) -> u8 {
+    match id {
+        IRON_ORE | LAPIS_ORE => 1,
+        GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE => 2,
+        OBSIDIAN => 3,
+        _ => 0,
+    }
 }
 
 /// Time in seconds to break a block by hand (tools speed this up in M19). INFINITY = unbreakable.
@@ -276,8 +293,7 @@ pub fn hardness(id: BlockId) -> f32 {
     }
 }
 
-/// The tool class that mines a block fastest (scaffolding for M19 tool speed/gating).
-#[allow(dead_code)]
+/// The tool class that mines a block fastest (drives tool speed + drop gating).
 pub fn tool_class(id: BlockId) -> ToolClass {
     match id {
         STONE | COBBLESTONE | BRICKS | DEEPSLATE | OBSIDIAN | FURNACE | COAL_ORE | IRON_ORE

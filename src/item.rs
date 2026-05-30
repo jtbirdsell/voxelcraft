@@ -2,49 +2,207 @@
 //! abstraction leaves room for tools/food (M18+) to take ids outside the block range. The player
 //! `Inventory` is 9 hotbar + 27 main + 4 armor slots plus a held (cursor) stack.
 
-use crate::block::{self, BlockId};
+use crate::block::{self, BlockId, ToolClass};
 
 pub type ItemId = u16;
 
-/// The item that a block stacks as (identity for now).
-#[inline]
-pub fn item_of_block(b: BlockId) -> ItemId {
-    b
+/// Item ids `< TOOL_BASE` are block-items (id == BlockId). Tools occupy `[TOOL_BASE, TOOL_BASE+25)`,
+/// laid out as `TOOL_BASE + tier*5 + class` (Pickaxe0, Axe1, Shovel2, Sword3, Hoe4).
+pub const TOOL_BASE: ItemId = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Wood,
+    Stone,
+    Iron,
+    Gold,
+    Diamond,
 }
 
-/// The block an item places, if it is a block-item (all items, for now).
+const TOOL_CLASSES: [ToolClass; 5] = [
+    ToolClass::Pickaxe,
+    ToolClass::Axe,
+    ToolClass::Shovel,
+    ToolClass::Sword,
+    ToolClass::Hoe,
+];
+
+/// Tool id from a tier + class index (used by crafting recipes in M20).
+#[allow(dead_code)]
+#[inline]
+pub fn tool_id(tier: Tier, class_idx: u16) -> ItemId {
+    TOOL_BASE + (tier as u16) * 5 + class_idx
+}
+
+// A few named tool ids for the creative palette / recipes.
+pub const STONE_PICKAXE: ItemId = TOOL_BASE + 5; // Stone, Pickaxe
+pub const DIAMOND_PICKAXE: ItemId = TOOL_BASE + 20;
+pub const DIAMOND_AXE: ItemId = TOOL_BASE + 21;
+pub const DIAMOND_SHOVEL: ItemId = TOOL_BASE + 22;
+pub const DIAMOND_SWORD: ItemId = TOOL_BASE + 23;
+
+#[inline]
+pub fn is_tool(item: ItemId) -> bool {
+    (TOOL_BASE..TOOL_BASE + 25).contains(&item)
+}
+
+#[inline]
+pub fn tool_tier(item: ItemId) -> Tier {
+    match (item - TOOL_BASE) / 5 {
+        1 => Tier::Stone,
+        2 => Tier::Iron,
+        3 => Tier::Gold,
+        4 => Tier::Diamond,
+        _ => Tier::Wood,
+    }
+}
+
+#[inline]
+pub fn tool_class(item: ItemId) -> ToolClass {
+    TOOL_CLASSES[((item - TOOL_BASE) % 5) as usize]
+}
+
+/// Mining-speed multiplier of a tier (applied when the tool matches the block's tool class).
+pub fn tool_speed(tier: Tier) -> f32 {
+    match tier {
+        Tier::Wood => 2.0,
+        Tier::Stone => 4.0,
+        Tier::Iron => 6.0,
+        Tier::Gold => 12.0,
+        Tier::Diamond => 8.0,
+    }
+}
+
+/// Harvest level (which tiers a block needs to drop): wood/gold 0, stone 1, iron 2, diamond 3.
+pub fn harvest_level(tier: Tier) -> u8 {
+    match tier {
+        Tier::Wood | Tier::Gold => 0,
+        Tier::Stone => 1,
+        Tier::Iron => 2,
+        Tier::Diamond => 3,
+    }
+}
+
+pub fn tool_max_durability(item: ItemId) -> u16 {
+    match tool_tier(item) {
+        Tier::Wood => 59,
+        Tier::Stone => 131,
+        Tier::Iron => 250,
+        Tier::Gold => 32,
+        Tier::Diamond => 1561,
+    }
+}
+
+/// Melee damage (used by combat in M21). Swords hit hardest; other tools ~2.
+#[allow(dead_code)]
+pub fn attack_damage(item: ItemId) -> f32 {
+    if !is_tool(item) {
+        return 1.0; // bare hand / thrown block
+    }
+    if tool_class(item) == ToolClass::Sword {
+        match tool_tier(item) {
+            Tier::Wood | Tier::Gold => 4.0,
+            Tier::Stone => 5.0,
+            Tier::Iron => 6.0,
+            Tier::Diamond => 7.0,
+        }
+    } else {
+        2.0
+    }
+}
+
+/// The block an item places, if it is a block-item (tools place nothing).
 #[inline]
 pub fn block_of_item(i: ItemId) -> Option<BlockId> {
-    if i == block::AIR {
+    if i == block::AIR || i >= TOOL_BASE {
         None
     } else {
         Some(i)
     }
 }
 
-/// Max stack size for an item (64 for blocks; tools/food override later).
+/// The item that a block stacks as (identity).
 #[inline]
-pub fn max_stack(_item: ItemId) -> u8 {
-    64
+pub fn item_of_block(b: BlockId) -> ItemId {
+    b
+}
+
+/// Max stack size: tools don't stack.
+#[inline]
+pub fn max_stack(item: ItemId) -> u8 {
+    if is_tool(item) {
+        1
+    } else {
+        64
+    }
 }
 
 /// Display name for the tooltip/hotbar label.
-#[inline]
 pub fn item_name(item: ItemId) -> &'static str {
-    block::display_name(item)
+    if !is_tool(item) {
+        return block::display_name(item);
+    }
+    let tier = match tool_tier(item) {
+        Tier::Wood => "Wooden",
+        Tier::Stone => "Stone",
+        Tier::Iron => "Iron",
+        Tier::Gold => "Golden",
+        Tier::Diamond => "Diamond",
+    };
+    let class = match tool_class(item) {
+        ToolClass::Pickaxe => "Pickaxe",
+        ToolClass::Axe => "Axe",
+        ToolClass::Shovel => "Shovel",
+        ToolClass::Sword => "Sword",
+        ToolClass::Hoe => "Hoe",
+        ToolClass::None => "Tool",
+    };
+    // Small static table keyed by tool id (avoids per-call allocation).
+    TOOL_NAMES[(item - TOOL_BASE) as usize].get_or_init(|| format!("{tier} {class}"))
 }
+
+/// Representative UI color for an item: the block face color, or a tier color for tools.
+pub fn item_color(item: ItemId) -> [f32; 3] {
+    if let Some(b) = block_of_item(item) {
+        return block::face_color(b, [0, 1, 0]);
+    }
+    if is_tool(item) {
+        return match tool_tier(item) {
+            Tier::Wood => [0.55, 0.40, 0.22],
+            Tier::Stone => [0.45, 0.45, 0.47],
+            Tier::Iron => [0.80, 0.78, 0.74],
+            Tier::Gold => [0.92, 0.80, 0.25],
+            Tier::Diamond => [0.40, 0.85, 0.85],
+        };
+    }
+    [0.7, 0.7, 0.7]
+}
+
+use std::sync::OnceLock;
+static TOOL_NAMES: [OnceLock<String>; 25] = [const { OnceLock::new() }; 25];
 
 #[derive(Clone, Copy)]
 pub struct ItemStack {
     pub item: ItemId,
     pub count: u8,
+    /// Remaining durability for tools (0 for non-tools / unused).
+    pub durability: u16,
 }
 
 impl ItemStack {
     pub fn new(item: ItemId, count: u8) -> Self {
-        Self { item, count }
+        let durability = if is_tool(item) {
+            tool_max_durability(item)
+        } else {
+            0
+        };
+        Self {
+            item,
+            count,
+            durability,
+        }
     }
-    /// The block this stack places (None for non-block items).
+    /// The block this stack places (None for tools / non-block items).
     pub fn block(&self) -> Option<BlockId> {
         block_of_item(self.item)
     }
@@ -84,6 +242,19 @@ impl Inventory {
             for (i, &b) in PALETTE.iter().enumerate() {
                 slots[i] = Some(ItemStack::new(item_of_block(b), 1));
             }
+            // A starter tool set in the first main row (recipes to craft these arrive in M20).
+            for (i, &t) in [
+                DIAMOND_PICKAXE,
+                DIAMOND_AXE,
+                DIAMOND_SHOVEL,
+                DIAMOND_SWORD,
+                STONE_PICKAXE,
+            ]
+            .iter()
+            .enumerate()
+            {
+                slots[HOTBAR + i] = Some(ItemStack::new(t, 1));
+            }
         }
         Self {
             slots,
@@ -93,11 +264,28 @@ impl Inventory {
         }
     }
 
-    /// The block the selected hotbar slot would place (AIR if empty).
+    /// The block the selected hotbar slot would place (AIR if empty / a tool).
     pub fn selected_block(&self) -> BlockId {
         self.slots[self.selected]
             .and_then(|s| s.block())
             .unwrap_or(block::AIR)
+    }
+
+    /// The item id in the selected hotbar slot (AIR if empty).
+    pub fn selected_item(&self) -> ItemId {
+        self.slots[self.selected].map(|s| s.item).unwrap_or(block::AIR)
+    }
+
+    /// Damage the selected tool by `amount` on use; remove it if it breaks. No-op for non-tools.
+    pub fn damage_selected(&mut self, amount: u16) {
+        if let Some(stack) = &mut self.slots[self.selected] {
+            if is_tool(stack.item) {
+                stack.durability = stack.durability.saturating_sub(amount);
+                if stack.durability == 0 {
+                    self.slots[self.selected] = None;
+                }
+            }
+        }
     }
 
     pub fn select(&mut self, index: usize) {
@@ -282,5 +470,35 @@ mod tests {
         assert_eq!(block::drops(block::GRASS), Some(block::DIRT));
         assert_eq!(block::drops(block::LEAVES), None);
         assert_eq!(block::drops(block::DIRT), Some(block::DIRT));
+    }
+
+    #[test]
+    fn tool_id_layout() {
+        assert!(is_tool(DIAMOND_PICKAXE) && !is_tool(block::STONE));
+        assert_eq!(tool_class(DIAMOND_PICKAXE), block::ToolClass::Pickaxe);
+        assert_eq!(tool_class(DIAMOND_SWORD), block::ToolClass::Sword);
+        assert!(matches!(tool_tier(DIAMOND_PICKAXE), Tier::Diamond));
+        assert!(matches!(tool_tier(STONE_PICKAXE), Tier::Stone));
+        assert_eq!(max_stack(DIAMOND_PICKAXE), 1);
+        assert_eq!(max_stack(item_of_block(block::STONE)), 64);
+        assert_eq!(block_of_item(DIAMOND_PICKAXE), None); // tools place nothing
+        assert_eq!(block_of_item(item_of_block(block::STONE)), Some(block::STONE));
+    }
+
+    #[test]
+    fn harvest_gating() {
+        // Diamond ore (required harvest 2) needs >= iron; a stone pickaxe (level 1) can't.
+        assert_eq!(block::required_harvest(block::DIAMOND_ORE), 2);
+        assert!(harvest_level(Tier::Diamond) >= block::required_harvest(block::DIAMOND_ORE));
+        assert!(harvest_level(Tier::Stone) < block::required_harvest(block::DIAMOND_ORE));
+        assert!(block::requires_tool(block::STONE) && !block::requires_tool(block::DIRT));
+    }
+
+    #[test]
+    fn tool_durability_init() {
+        let s = ItemStack::new(DIAMOND_PICKAXE, 1);
+        assert_eq!(s.durability, tool_max_durability(DIAMOND_PICKAXE));
+        let b = ItemStack::new(item_of_block(block::STONE), 10);
+        assert_eq!(b.durability, 0);
     }
 }

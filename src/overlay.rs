@@ -3,7 +3,6 @@
 
 use glam::{IVec3, Vec3};
 
-use crate::block;
 use crate::font;
 use crate::item;
 
@@ -220,23 +219,20 @@ pub fn build_inventory_screen(
         let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.28, 0.28, 0.32, 1.0] };
         push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
         if let Some(stack) = inv.slots[slot_i] {
-            if let Some(b) = stack.block() {
-                let c = block::face_color(b, [0, 1, 0]);
-                push_px_rect(&mut v, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
-            }
+            let c = item::item_color(stack.item);
+            push_px_rect(&mut v, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
             if stack.count > 1 {
                 let label = format!("{}", stack.count);
                 let tw = text_width(&label, 2.0);
                 push_text(&mut v, sw, sh, x + INV_SLOT - tw - 3.0, y + INV_SLOT - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
             }
+            durability_bar(&mut v, sw, sh, x, y, INV_SLOT, stack);
         }
     }
     // Held stack follows the cursor.
     if let Some(held) = inv.held {
-        if let Some(b) = held.block() {
-            let c = block::face_color(b, [0, 1, 0]);
-            push_px_rect(&mut v, sw, sh, cursor.0 - INV_SLOT * 0.5, cursor.1 - INV_SLOT * 0.5, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
-        }
+        let c = item::item_color(held.item);
+        push_px_rect(&mut v, sw, sh, cursor.0 - INV_SLOT * 0.5, cursor.1 - INV_SLOT * 0.5, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
         if held.count > 1 {
             let label = format!("{}", held.count);
             push_text(&mut v, sw, sh, cursor.0 + 6.0, cursor.1 + 4.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
@@ -251,6 +247,22 @@ pub fn build_inventory_screen(
         }
     }
     v
+}
+
+/// A small wear bar at the bottom of a slot for a damaged tool (green → red); hidden when full.
+fn durability_bar(out: &mut Vec<UiVertex>, sw: f32, sh: f32, sx: f32, y: f32, slot: f32, stack: item::ItemStack) {
+    if !item::is_tool(stack.item) {
+        return;
+    }
+    let max = item::tool_max_durability(stack.item).max(1) as f32;
+    let frac = (stack.durability as f32 / max).clamp(0.0, 1.0);
+    if frac >= 1.0 {
+        return;
+    }
+    let bw = slot - 8.0;
+    let (bx, by) = (sx + 4.0, y + slot - 8.0);
+    push_px_rect(out, sw, sh, bx, by, bw, 4.0, [0.0, 0.0, 0.0, 0.85]);
+    push_px_rect(out, sw, sh, bx, by, bw * frac, 4.0, [1.0 - frac, frac, 0.12, 1.0]);
 }
 
 /// One row of `pips` square cells, each worth 2 units, filled left-to-right to show `value`.
@@ -314,15 +326,14 @@ pub fn build_ui(
         }
         match inv.slots[i] {
             Some(stack) => {
-                if let Some(b) = stack.block() {
-                    let c = block::face_color(b, [0, 1, 0]);
-                    push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [c[0], c[1], c[2], 1.0]);
-                }
+                let c = item::item_color(stack.item);
+                push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [c[0], c[1], c[2], 1.0]);
                 if stack.count > 1 {
                     let label = format!("{}", stack.count);
                     let tw = text_width(&label, 2.0);
                     push_text(&mut v, sw, sh, sx + slot - tw - 3.0, y + slot - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
                 }
+                durability_bar(&mut v, sw, sh, sx, y, slot, stack);
             }
             None => {
                 push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [0.1, 0.1, 0.12, 0.5]);

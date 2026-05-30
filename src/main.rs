@@ -307,17 +307,40 @@ impl App {
                         state.mine_target = Some(hit);
                         state.mine_progress = 0.0;
                     }
-                    let time = if state.inventory.creative { 0.0 } else { block::hardness(id) };
+                    let sel = state.inventory.selected_item();
+                    let block_tool = block::tool_class(id);
+                    // A matching tool divides the break time by its tier speed.
+                    let mut time = block::hardness(id);
+                    if item::is_tool(sel)
+                        && item::tool_class(sel) == block_tool
+                        && block_tool != block::ToolClass::None
+                    {
+                        time /= item::tool_speed(item::tool_tier(sel));
+                    }
+                    if state.inventory.creative {
+                        time = 0.0;
+                    }
                     state.mine_progress += if time <= 0.0 { 1.0 } else { dt / time };
                     if state.mine_progress >= 1.0 {
-                        if state.game.set_block(&state.gpu, &state.renderer, hit, block::AIR)
-                            && !state.inventory.creative
-                        {
-                            // Drop the block's item (stone→cobblestone, grass→dirt, leaves→nothing…).
-                            if let Some(drop) = block::drops(id) {
-                                let center = hit.as_vec3() + Vec3::splat(0.5);
-                                state.game.spawn_item(center, drop);
+                        let removed =
+                            state.game.set_block(&state.gpu, &state.renderer, hit, block::AIR);
+                        if removed && !state.inventory.creative {
+                            // Pickaxe blocks need a matching tool of sufficient harvest level to drop.
+                            let harvest_ok = if block::requires_tool(id) {
+                                item::is_tool(sel)
+                                    && item::tool_class(sel) == block_tool
+                                    && item::harvest_level(item::tool_tier(sel))
+                                        >= block::required_harvest(id)
+                            } else {
+                                true
+                            };
+                            if harvest_ok {
+                                if let Some(drop) = block::drops(id) {
+                                    let center = hit.as_vec3() + Vec3::splat(0.5);
+                                    state.game.spawn_item(center, drop);
+                                }
                             }
+                            state.inventory.damage_selected(1);
                         }
                         state.mine_target = None;
                         state.mine_progress = 0.0;
@@ -636,6 +659,11 @@ impl ApplicationHandler for App {
             let mut shot_inv = Inventory::new(true);
             shot_inv.slots[2] = Some(item::ItemStack::new(item::item_of_block(block::STONE), 32));
             shot_inv.slots[4] = Some(item::ItemStack::new(item::item_of_block(block::WOOD), 7));
+            // A partly-worn diamond pickaxe in the selected slot (tool swatch + durability bar + name).
+            let mut pick = item::ItemStack::new(item::DIAMOND_PICKAXE, 1);
+            pick.durability = (item::tool_max_durability(item::DIAMOND_PICKAXE) as f32 * 0.55) as u16;
+            shot_inv.slots[5] = Some(pick);
+            shot_inv.selected = 5;
             shot_inv.slots[9] = Some(item::ItemStack::new(item::item_of_block(block::COAL_ORE), 12));
             shot_inv.slots[11] = Some(item::ItemStack::new(item::item_of_block(block::DIRT), 64));
             shot_inv.slots[19] = Some(item::ItemStack::new(item::item_of_block(block::IRON_ORE), 5));

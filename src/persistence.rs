@@ -74,7 +74,7 @@ pub fn save_inventory(dir: &Path, inv: &Inventory) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     let mut b = Vec::new();
     b.extend_from_slice(&INV_MAGIC.to_le_bytes());
-    b.push(1); // version
+    b.push(2); // version 2: per-slot item(u16) + count(u8) + durability(u16)
     b.push(inv.selected as u8);
     b.push(inv.creative as u8);
     let filled: Vec<(usize, ItemStack)> = inv
@@ -88,6 +88,7 @@ pub fn save_inventory(dir: &Path, inv: &Inventory) -> std::io::Result<()> {
         b.push(i as u8);
         b.extend_from_slice(&s.item.to_le_bytes());
         b.push(s.count);
+        b.extend_from_slice(&s.durability.to_le_bytes());
     }
     fs::write(dir.join("save_state.bin"), b)
 }
@@ -98,8 +99,12 @@ pub fn load_inventory(dir: &Path, creative_default: bool) -> Inventory {
     let Ok(d) = fs::read(dir.join("save_state.bin")) else {
         return inv;
     };
-    if d.len() < 8 || rd_u32(&d, 0) != INV_MAGIC || d[4] != 1 {
-        return inv; // unknown magic or version -> fresh inventory
+    if d.len() < 8 || rd_u32(&d, 0) != INV_MAGIC {
+        return inv;
+    }
+    let version = d[4];
+    if version != 1 && version != 2 {
+        return inv; // unknown version -> fresh inventory
     }
     inv.selected = (d[5] as usize).min(HOTBAR - 1);
     inv.creative = d[6] != 0;
@@ -107,18 +112,23 @@ pub fn load_inventory(dir: &Path, creative_default: bool) -> Inventory {
         *s = None; // saved state is authoritative (replaces the default palette)
     }
     let count = d[7] as usize;
+    let rec = if version >= 2 { 6 } else { 4 };
     let mut o = 8;
     for _ in 0..count {
-        if o + 4 > d.len() {
+        if o + rec > d.len() {
             break;
         }
         let slot = d[o] as usize;
         let item = u16::from_le_bytes([d[o + 1], d[o + 2]]);
         let cnt = d[o + 3];
         if slot < SLOTS && cnt > 0 {
-            inv.slots[slot] = Some(ItemStack::new(item, cnt));
+            let mut stack = ItemStack::new(item, cnt); // durability defaults (max for tools)
+            if version >= 2 {
+                stack.durability = u16::from_le_bytes([d[o + 4], d[o + 5]]);
+            }
+            inv.slots[slot] = Some(stack);
         }
-        o += 4;
+        o += rec;
     }
     inv
 }
@@ -240,6 +250,9 @@ mod tests {
         inv.selected = 3;
         inv.slots[0] = Some(ItemStack::new(1, 64));
         inv.slots[10] = Some(ItemStack::new(5, 12));
+        let mut pick = ItemStack::new(crate::item::DIAMOND_PICKAXE, 1);
+        pick.durability = 1000;
+        inv.slots[5] = Some(pick);
         save_inventory(&dir, &inv).unwrap();
 
         let loaded = load_inventory(&dir, true);
@@ -248,6 +261,7 @@ mod tests {
         assert_eq!(loaded.slots[0].unwrap().item, 1);
         assert_eq!(loaded.slots[0].unwrap().count, 64);
         assert_eq!(loaded.slots[10].unwrap().count, 12);
+        assert_eq!(loaded.slots[5].unwrap().durability, 1000); // tool durability roundtrips
         assert!(loaded.slots[1].is_none());
 
         let _ = fs::remove_dir_all(&dir);
