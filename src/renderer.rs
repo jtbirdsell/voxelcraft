@@ -48,6 +48,7 @@ pub struct ChunkRenderer {
     highlight_pipeline: wgpu::RenderPipeline,
     ui_pipeline: wgpu::RenderPipeline,
     ui_bind_group: wgpu::BindGroup,
+    atlas_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     volume_bgl: wgpu::BindGroupLayout,
@@ -104,9 +105,89 @@ impl ChunkRenderer {
             immediate_size: 0,
         });
         let volume_bgl = VoxelVolume::bind_group_layout(device);
+
+        // Procedural block texture atlas (group 2), shared by the chunk + water pipelines.
+        let atlas_img = crate::texture::build_atlas();
+        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("block-atlas"),
+            size: wgpu::Extent3d {
+                width: crate::texture::ATLAS_W,
+                height: crate::texture::ATLAS_H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atlas_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &atlas_img,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(crate::texture::ATLAS_W * 4),
+                rows_per_image: Some(crate::texture::ATLAS_H),
+            },
+            wgpu::Extent3d {
+                width: crate::texture::ATLAS_W,
+                height: crate::texture::ATLAS_H,
+                depth_or_array_layers: 1,
+            },
+        );
+        let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("atlas-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let atlas_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("atlas-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas-bg"),
+            layout: &atlas_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+
         let chunk_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("chunk-pipeline-layout"),
-            bind_group_layouts: &[Some(&camera_bgl), Some(&volume_bgl)],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&volume_bgl), Some(&atlas_bgl)],
             immediate_size: 0,
         });
 
@@ -386,6 +467,7 @@ impl ChunkRenderer {
             highlight_pipeline,
             ui_pipeline,
             ui_bind_group,
+            atlas_bind_group,
             camera_buffer,
             camera_bind_group,
             volume_bgl,
@@ -456,6 +538,7 @@ impl ChunkRenderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, volume_bg, &[]);
+            pass.set_bind_group(2, &self.atlas_bind_group, &[]);
             for mesh in meshes {
                 if let Some(part) = &mesh.opaque {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
@@ -493,6 +576,7 @@ impl ChunkRenderer {
             pass.set_pipeline(&self.water_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, volume_bg, &[]);
+            pass.set_bind_group(2, &self.atlas_bind_group, &[]);
             for mesh in meshes {
                 if let Some(part) = &mesh.water {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));

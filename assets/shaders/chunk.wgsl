@@ -73,7 +73,7 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
-    let albedo = tile_average(in.tile);
+    let albedo = sample_tile(in.tile, in.uv);
     let emission = in.shade.x;
     let sun = normalize(camera.sun_dir.xyz);
     let ambient = camera.params.z;

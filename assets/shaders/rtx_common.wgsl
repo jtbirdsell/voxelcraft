@@ -21,6 +21,19 @@ struct Volume {
 @group(1) @binding(0) var voxels: texture_3d<u32>;
 @group(1) @binding(1) var<uniform> volume: Volume;
 
+// Procedural block atlas (8x8 grid of 16px tiles), nearest-sampled. `uv` tiles one unit per block,
+// so fract() repeats the tile across a greedy-merged quad.
+@group(2) @binding(0) var atlas_tex: texture_2d<f32>;
+@group(2) @binding(1) var atlas_samp: sampler;
+
+fn sample_tile(tile: u32, uv: vec2<f32>) -> vec3<f32> {
+    let col = f32(tile % 8u);
+    let row = f32(tile / 8u);
+    let local = fract(uv);
+    let atlas_uv = (vec2<f32>(col, row) + local) / 8.0;
+    return textureSample(atlas_tex, atlas_samp, atlas_uv).rgb;
+}
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,

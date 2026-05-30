@@ -21,6 +21,7 @@ mod persistence;
 mod player;
 mod raycast;
 mod renderer;
+mod texture;
 mod voxel_volume;
 mod worker;
 mod world;
