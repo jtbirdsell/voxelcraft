@@ -9,6 +9,7 @@
 mod block;
 mod camera;
 mod capture;
+mod crafting;
 mod entity;
 mod environment;
 mod font;
@@ -65,6 +66,18 @@ const FOG_START: f32 = FOG_END * 0.68;
 enum Screen {
     None,
     Inventory,
+    Crafting,
+}
+
+impl Screen {
+    /// Craft-grid size for this screen (2x2 in the inventory, 3x3 at a table).
+    fn craft_size(self) -> usize {
+        if self == Screen::Crafting {
+            3
+        } else {
+            2
+        }
+    }
 }
 
 struct State {
@@ -85,6 +98,10 @@ struct State {
     elapsed: f32,
     screen: Screen,
     cursor: (f32, f32),
+    /// Items placed in the craft grid (top-left of the 9-cell array; 2x2 inventory or 3x3 table).
+    craft: [Option<item::ItemStack>; 9],
+    /// A screen the frame asked to open (processed after the frame's state borrow ends).
+    pending_open: Option<Screen>,
     /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
     mine_target: Option<IVec3>,
     mine_progress: f32,
@@ -142,7 +159,8 @@ impl App {
     fn toggle_inventory(&mut self) {
         let open = {
             let Some(state) = &mut self.state else { return };
-            if state.screen == Screen::Inventory {
+            if state.screen != Screen::None {
+                return_craft_to_inventory(state);
                 drop_leftover(&mut state.inventory, &mut state.game, state.player.position);
                 state.screen = Screen::None;
                 false
@@ -159,9 +177,22 @@ impl App {
         self.set_grab(!open);
     }
 
+    fn open_crafting(&mut self) {
+        if let Some(state) = &mut self.state {
+            state.screen = Screen::Crafting;
+            state.input = Input::default();
+            state.cursor = (
+                state.gpu.config.width as f32 * 0.5,
+                state.gpu.config.height as f32 * 0.5,
+            );
+        }
+        self.set_grab(false);
+    }
+
     fn close_screen(&mut self) {
         if let Some(state) = &mut self.state {
             if state.screen != Screen::None {
+                return_craft_to_inventory(state);
                 drop_leftover(&mut state.inventory, &mut state.game, state.player.position);
                 state.screen = Screen::None;
             }
@@ -178,11 +209,29 @@ impl App {
         };
         let (w, h) = (state.gpu.config.width, state.gpu.config.height);
         let (cx, cy) = state.cursor;
+        let hit = |x: f32, y: f32| {
+            cx >= x && cx < x + overlay::INV_SLOT && cy >= y && cy < y + overlay::INV_SLOT
+        };
         for (slot_i, x, y) in overlay::inventory_slot_rects(w, h) {
-            if cx >= x && cx < x + overlay::INV_SLOT && cy >= y && cy < y + overlay::INV_SLOT {
+            if hit(x, y) {
                 state.inventory.click_slot(slot_i, right);
-                break;
+                return;
             }
+        }
+        let size = state.screen.craft_size();
+        for (cell, x, y) in overlay::craft_cell_rects(w, h, size) {
+            if hit(x, y) {
+                let mut held = state.inventory.held;
+                let mut c = state.craft[cell];
+                item::slot_click(&mut held, &mut c, right);
+                state.inventory.held = held;
+                state.craft[cell] = c;
+                return;
+            }
+        }
+        let (ox, oy) = overlay::craft_output_rect(w, h, size);
+        if hit(ox, oy) {
+            craft_take_output(state);
         }
     }
 
@@ -357,17 +406,22 @@ impl App {
         if state.input.place_pressed {
             state.input.place_pressed = false;
             if let Some(hit) = &target {
-                let place = hit.block + hit.normal;
-                let id = state.inventory.selected_block();
-                let blocks_player = block::is_solid(id) && state.player.intersects_block(place);
-                if id != block::AIR
-                    && !blocks_player
-                    && state.game.set_block(&state.gpu, &state.renderer, place, id)
-                {
-                    state.inventory.consume_selected();
-                    if block::is_fluid(id) {
-                        // Placed water/lava becomes a flowing source.
-                        state.game.add_fluid_source(place, id);
+                if state.game.block_at(hit.block) == block::CRAFTING_TABLE {
+                    // Right-clicking a crafting table opens the 3x3 crafting screen instead.
+                    state.pending_open = Some(Screen::Crafting);
+                } else {
+                    let place = hit.block + hit.normal;
+                    let id = state.inventory.selected_block();
+                    let blocks_player = block::is_solid(id) && state.player.intersects_block(place);
+                    if id != block::AIR
+                        && !blocks_player
+                        && state.game.set_block(&state.gpu, &state.renderer, place, id)
+                    {
+                        state.inventory.consume_selected();
+                        if block::is_fluid(id) {
+                            // Placed water/lava becomes a flowing source.
+                            state.game.add_fluid_source(place, id);
+                        }
                     }
                 }
             }
@@ -439,11 +493,13 @@ impl App {
             !state.player.flying,
             debug_lines.as_deref(),
         );
-        if state.screen == Screen::Inventory {
+        if state.screen != Screen::None {
             ui.extend(overlay::build_inventory_screen(
                 state.gpu.config.width,
                 state.gpu.config.height,
                 &state.inventory,
+                &state.craft,
+                state.screen.craft_size(),
                 state.cursor,
             ));
         }
@@ -482,6 +538,53 @@ fn maybe_select(state: &mut State, pressed: bool, index: usize) {
 fn drop_leftover(inventory: &mut Inventory, game: &mut Game, player_pos: Vec3) {
     if let Some(left) = inventory.return_held() {
         game.spawn_item(player_pos + Vec3::new(0.0, 1.0, 0.0), left);
+    }
+}
+
+/// Click the craft output: if the grid matches a recipe and the held stack can take the result,
+/// consume one of each ingredient and add the output to the cursor.
+fn craft_take_output(state: &mut State) {
+    let ids: [u16; 9] = std::array::from_fn(|i| state.craft[i].map(|s| s.item).unwrap_or(0));
+    let Some((out_item, out_count)) = crafting::match_grid(&ids) else {
+        return;
+    };
+    let held_ok = match state.inventory.held {
+        None => true,
+        Some(h) => {
+            h.item == out_item
+                && !item::is_tool(out_item)
+                && h.count as u16 + out_count as u16 <= item::max_stack(out_item) as u16
+        }
+    };
+    if !held_ok {
+        return;
+    }
+    for cell in state.craft.iter_mut() {
+        if let Some(s) = cell {
+            s.count -= 1;
+            if s.count == 0 {
+                *cell = None;
+            }
+        }
+    }
+    state.inventory.held = Some(match state.inventory.held {
+        Some(mut h) => {
+            h.count += out_count;
+            h
+        }
+        None => item::ItemStack::new(out_item, out_count),
+    });
+}
+
+/// On screen close, return any items left in the craft grid to the inventory (or drop them).
+fn return_craft_to_inventory(state: &mut State) {
+    let pos = state.player.position + Vec3::new(0.0, 1.0, 0.0);
+    for cell in state.craft.iter_mut() {
+        if let Some(stack) = cell.take() {
+            if let Some(left) = state.inventory.insert(stack) {
+                state.game.spawn_item(pos, left);
+            }
+        }
     }
 }
 
@@ -670,13 +773,26 @@ impl ApplicationHandler for App {
                 false,
                 Some(&dbg),
             );
-            if std::env::var("VOXELCRAFT_SCREEN").map(|s| s == "inv").unwrap_or(false) {
-                // Cursor hovering the first main slot (coal ore) to show its tooltip.
+            let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();
+            if screen_env == "inv" || screen_env == "craft" {
+                let size = if screen_env == "craft" { 3 } else { 2 };
+                let mut shot_craft: [Option<item::ItemStack>; 9] = [None; 9];
+                if size == 3 {
+                    // A stone-pickaxe recipe so the output preview shows a result.
+                    let cobble = item::item_of_block(block::COBBLESTONE);
+                    shot_craft[0] = Some(item::ItemStack::new(cobble, 1));
+                    shot_craft[1] = Some(item::ItemStack::new(cobble, 1));
+                    shot_craft[2] = Some(item::ItemStack::new(cobble, 1));
+                    shot_craft[4] = Some(item::ItemStack::new(item::STICK, 1));
+                    shot_craft[7] = Some(item::ItemStack::new(item::STICK, 1));
+                }
                 let cursor = (600.0, 343.0);
                 ui.extend(overlay::build_inventory_screen(
                     gpu.config.width,
                     gpu.config.height,
                     &shot_inv,
+                    &shot_craft,
+                    size,
                     cursor,
                 ));
             }
@@ -749,6 +865,8 @@ impl ApplicationHandler for App {
             elapsed: 0.0,
             screen: Screen::None,
             cursor: (0.0, 0.0),
+            craft: [None; 9],
+            pending_open: None,
             mine_target: None,
             mine_progress: 0.0,
         });
@@ -810,7 +928,15 @@ impl ApplicationHandler for App {
                     self.handle_key(code, pressed, event.repeat, event_loop);
                 }
             }
-            WindowEvent::RedrawRequested => self.frame(),
+            WindowEvent::RedrawRequested => {
+                self.frame();
+                // Process a screen-open requested during the frame (after the state borrow ends).
+                if let Some(sc) = self.state.as_mut().and_then(|s| s.pending_open.take()) {
+                    if sc == Screen::Crafting {
+                        self.open_crafting();
+                    }
+                }
+            }
             _ => {}
         }
     }

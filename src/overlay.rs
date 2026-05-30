@@ -3,6 +3,7 @@
 
 use glam::{IVec3, Vec3};
 
+use crate::crafting;
 use crate::font;
 use crate::item;
 
@@ -190,11 +191,53 @@ pub fn inventory_slot_rects(width: u32, height: u32) -> Vec<(usize, f32, f32)> {
     rects
 }
 
-/// Build the inventory screen overlay: dim backdrop, panel, slots, the held (cursor) stack, tooltip.
+/// Craft-grid cell rects: (craft cell index 0..9, x, y) for a `size`x`size` grid above the inventory.
+/// Cells map into the top-left of the 9-cell craft array (so size=2 uses 0,1,3,4).
+pub fn craft_cell_rects(width: u32, height: u32, size: usize) -> Vec<(usize, f32, f32)> {
+    let step = INV_SLOT + 4.0;
+    let inv_top = inventory_slot_rects(width, height)[0].2;
+    let total = size as f32 * step + 60.0 + INV_SLOT; // grid + gap/arrow + output
+    let ox = width as f32 * 0.5 - total * 0.5;
+    let oy = inv_top - size as f32 * step - 36.0;
+    let mut rects = Vec::with_capacity(size * size);
+    for r in 0..size {
+        for c in 0..size {
+            rects.push((r * 3 + c, ox + c as f32 * step, oy + r as f32 * step));
+        }
+    }
+    rects
+}
+
+/// Output-slot rect (x, y) to the right of the craft grid.
+pub fn craft_output_rect(width: u32, height: u32, size: usize) -> (f32, f32) {
+    let step = INV_SLOT + 4.0;
+    let cells = craft_cell_rects(width, height, size);
+    let (ox, oy) = (cells[0].1, cells[0].2);
+    (ox + size as f32 * step + 56.0, oy + (size as f32 * step - INV_SLOT) * 0.5)
+}
+
+fn slot_item(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, stack: Option<item::ItemStack>) {
+    push_px_rect(out, sw, sh, x, y, INV_SLOT, INV_SLOT, [0.28, 0.28, 0.32, 1.0]);
+    if let Some(s) = stack {
+        let c = item::item_color(s.item);
+        push_px_rect(out, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
+        if s.count > 1 {
+            let label = format!("{}", s.count);
+            let tw = text_width(&label, 2.0);
+            push_text(out, sw, sh, x + INV_SLOT - tw - 3.0, y + INV_SLOT - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+        }
+        durability_bar(out, sw, sh, x, y, INV_SLOT, s);
+    }
+}
+
+/// Build the inventory / crafting screen: dim backdrop, panel, inventory slots, a `size`x`size`
+/// craft grid + output preview, the held (cursor) stack, and a tooltip.
 pub fn build_inventory_screen(
     width: u32,
     height: u32,
     inv: &item::Inventory,
+    craft: &[Option<item::ItemStack>; 9],
+    size: usize,
     cursor: (f32, f32),
 ) -> Vec<UiVertex> {
     let sw = width as f32;
@@ -208,7 +251,8 @@ pub fn build_inventory_screen(
     let pad = 14.0;
     let panel_h = rects[35].2 + INV_SLOT - miny;
     push_px_rect(&mut v, sw, sh, minx - pad, miny - pad - 24.0, panel_w + 2.0 * pad, panel_h + 2.0 * pad + 24.0, [0.12, 0.12, 0.14, 0.97]);
-    push_text(&mut v, sw, sh, minx, miny - pad - 18.0, 2.0, "Inventory", [0.95, 0.95, 0.95, 1.0]);
+    let title = if size >= 3 { "Crafting Table" } else { "Inventory" };
+    push_text(&mut v, sw, sh, minx, miny - pad - 18.0, 2.0, title, [0.95, 0.95, 0.95, 1.0]);
 
     let mut hovered: Option<usize> = None;
     for &(slot_i, x, y) in &rects {
@@ -229,6 +273,22 @@ pub fn build_inventory_screen(
             durability_bar(&mut v, sw, sh, x, y, INV_SLOT, stack);
         }
     }
+    // Craft grid + output preview, on its own backing panel above the inventory grid.
+    let cells = craft_cell_rects(width, height, size);
+    let (out_x, out_y) = craft_output_rect(width, height, size);
+    let (cox, coy) = (cells[0].1, cells[0].2);
+    let cpw = out_x + INV_SLOT + 8.0 - (cox - 8.0);
+    let cph = size as f32 * step + 16.0;
+    push_px_rect(&mut v, sw, sh, cox - 8.0, coy - 8.0, cpw, cph, [0.12, 0.12, 0.14, 0.97]);
+    let mut grid_ids = [0u16; 9];
+    for &(cell, cx, cy) in &cells {
+        slot_item(&mut v, sw, sh, cx, cy, craft[cell]);
+        grid_ids[cell] = craft[cell].map(|s| s.item).unwrap_or(0);
+    }
+    push_px_rect(&mut v, sw, sh, out_x - 40.0, out_y + INV_SLOT * 0.5 - 2.0, 28.0, 4.0, [0.8, 0.8, 0.8, 0.9]);
+    let result = crafting::match_grid(&grid_ids).map(|(it, n)| item::ItemStack::new(it, n));
+    slot_item(&mut v, sw, sh, out_x, out_y, result);
+
     // Held stack follows the cursor.
     if let Some(held) = inv.held {
         let c = item::item_color(held.item);

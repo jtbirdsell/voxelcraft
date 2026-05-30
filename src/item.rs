@@ -27,23 +27,38 @@ const TOOL_CLASSES: [ToolClass; 5] = [
     ToolClass::Hoe,
 ];
 
-/// Tool id from a tier + class index (used by crafting recipes in M20).
-#[allow(dead_code)]
+/// Tool id from a tier + class index (Pickaxe0/Axe1/Shovel2/Sword3/Hoe4).
 #[inline]
-pub fn tool_id(tier: Tier, class_idx: u16) -> ItemId {
+pub const fn tool_id(tier: Tier, class_idx: u16) -> ItemId {
     TOOL_BASE + (tier as u16) * 5 + class_idx
 }
 
-// A few named tool ids for the creative palette / recipes.
-pub const STONE_PICKAXE: ItemId = TOOL_BASE + 5; // Stone, Pickaxe
-pub const DIAMOND_PICKAXE: ItemId = TOOL_BASE + 20;
-pub const DIAMOND_AXE: ItemId = TOOL_BASE + 21;
-pub const DIAMOND_SHOVEL: ItemId = TOOL_BASE + 22;
-pub const DIAMOND_SWORD: ItemId = TOOL_BASE + 23;
+// Named tool ids for the creative palette + recipes.
+pub const WOOD_PICKAXE: ItemId = tool_id(Tier::Wood, 0);
+pub const WOOD_AXE: ItemId = tool_id(Tier::Wood, 1);
+pub const WOOD_SHOVEL: ItemId = tool_id(Tier::Wood, 2);
+pub const WOOD_SWORD: ItemId = tool_id(Tier::Wood, 3);
+pub const STONE_PICKAXE: ItemId = tool_id(Tier::Stone, 0);
+pub const STONE_AXE: ItemId = tool_id(Tier::Stone, 1);
+pub const STONE_SHOVEL: ItemId = tool_id(Tier::Stone, 2);
+pub const STONE_SWORD: ItemId = tool_id(Tier::Stone, 3);
+pub const DIAMOND_PICKAXE: ItemId = tool_id(Tier::Diamond, 0);
+pub const DIAMOND_AXE: ItemId = tool_id(Tier::Diamond, 1);
+pub const DIAMOND_SHOVEL: ItemId = tool_id(Tier::Diamond, 2);
+pub const DIAMOND_SWORD: ItemId = tool_id(Tier::Diamond, 3);
+
+/// Crafting materials (non-block, non-tool items) occupy `[MATERIAL_BASE, MATERIAL_BASE+16)`.
+pub const MATERIAL_BASE: ItemId = 512;
+pub const STICK: ItemId = MATERIAL_BASE;
 
 #[inline]
 pub fn is_tool(item: ItemId) -> bool {
     (TOOL_BASE..TOOL_BASE + 25).contains(&item)
+}
+
+#[inline]
+pub fn is_material(item: ItemId) -> bool {
+    (MATERIAL_BASE..MATERIAL_BASE + 16).contains(&item)
 }
 
 #[inline]
@@ -139,8 +154,14 @@ pub fn max_stack(item: ItemId) -> u8 {
 
 /// Display name for the tooltip/hotbar label.
 pub fn item_name(item: ItemId) -> &'static str {
+    if let Some(b) = block_of_item(item) {
+        return block::display_name(b);
+    }
+    if item == STICK {
+        return "Stick";
+    }
     if !is_tool(item) {
-        return block::display_name(item);
+        return "Unknown";
     }
     let tier = match tool_tier(item) {
         Tier::Wood => "Wooden",
@@ -174,15 +195,18 @@ pub fn item_emission(item: ItemId) -> f32 {
     block_of_item(item).map(block::emission).unwrap_or(0.0)
 }
 
-/// True if `item` is a registered block or tool (used to reject corrupt save ids).
+/// True if `item` is a registered block, tool, or material (used to reject corrupt save ids).
 pub fn is_known(item: ItemId) -> bool {
-    is_tool(item) || (item != block::AIR && item <= block::CACTUS)
+    is_tool(item) || is_material(item) || (item != block::AIR && item <= block::CACTUS)
 }
 
 /// Representative UI color for an item: the block face color, or a tier color for tools.
 pub fn item_color(item: ItemId) -> [f32; 3] {
     if let Some(b) = block_of_item(item) {
         return block::face_color(b, [0, 1, 0]);
+    }
+    if item == STICK {
+        return [0.55, 0.40, 0.22];
     }
     if is_tool(item) {
         return match tool_tier(item) {
@@ -198,6 +222,46 @@ pub fn item_color(item: ItemId) -> [f32; 3] {
 
 use std::sync::OnceLock;
 static TOOL_NAMES: [OnceLock<String>; 25] = [const { OnceLock::new() }; 25];
+
+/// Standard cursor-vs-slot click: left = pick up / drop / merge / swap; right = half / one. Works on
+/// any external `slot` (inventory or craft grid). Preserves tool durability; tools never stack.
+pub fn slot_click(held: &mut Option<ItemStack>, slot: &mut Option<ItemStack>, right: bool) {
+    let with = |item: ItemId, count: u8, dur: u16| ItemStack { item, count, durability: dur };
+    match (*held, *slot) {
+        (None, Some(s)) => {
+            if right {
+                let half = s.count.div_ceil(2);
+                let rem = s.count - half;
+                *held = Some(with(s.item, half, s.durability));
+                *slot = (rem > 0).then(|| with(s.item, rem, s.durability));
+            } else {
+                *held = slot.take();
+            }
+        }
+        (Some(h), None) => {
+            if right {
+                *slot = Some(with(h.item, 1, h.durability));
+                let rem = h.count - 1;
+                *held = (rem > 0).then(|| with(h.item, rem, h.durability));
+            } else {
+                *slot = held.take();
+            }
+        }
+        (Some(h), Some(s)) => {
+            if h.item == s.item && !is_tool(h.item) {
+                let room = max_stack(s.item).saturating_sub(s.count);
+                let moved = if right { 1.min(h.count) } else { h.count }.min(room);
+                *slot = Some(with(s.item, s.count + moved, s.durability));
+                let rem = h.count - moved;
+                *held = (rem > 0).then(|| with(h.item, rem, h.durability));
+            } else if !right {
+                *slot = Some(h);
+                *held = Some(s);
+            }
+        }
+        (None, None) => {}
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct ItemStack {
@@ -272,6 +336,18 @@ impl Inventory {
             .enumerate()
             {
                 slots[HOTBAR + i] = Some(ItemStack::new(t, 1));
+            }
+            // Crafting materials in the next main row.
+            for (i, &b) in [
+                block::CRAFTING_TABLE,
+                block::WOOD,
+                block::PLANKS,
+                block::COBBLESTONE,
+            ]
+            .iter()
+            .enumerate()
+            {
+                slots[HOTBAR + 5 + i] = Some(ItemStack::new(item_of_block(b), 64));
             }
         }
         Self {
@@ -404,41 +480,11 @@ impl Inventory {
         if slot >= SLOTS {
             return;
         }
-        match (self.held, self.slots[slot]) {
-            (None, Some(s)) => {
-                if right {
-                    let half = s.count.div_ceil(2);
-                    let rem = s.count - half;
-                    self.held = Some(ItemStack::new(s.item, half));
-                    self.slots[slot] = (rem > 0).then(|| ItemStack::new(s.item, rem));
-                } else {
-                    self.held = self.slots[slot].take();
-                }
-            }
-            (Some(h), None) => {
-                if right {
-                    self.slots[slot] = Some(ItemStack::new(h.item, 1));
-                    let rem = h.count - 1;
-                    self.held = (rem > 0).then(|| ItemStack::new(h.item, rem));
-                } else {
-                    self.slots[slot] = self.held.take();
-                }
-            }
-            (Some(h), Some(s)) => {
-                if h.item == s.item {
-                    let cap = max_stack(s.item);
-                    let room = cap.saturating_sub(s.count);
-                    let moved = if right { 1.min(h.count) } else { h.count }.min(room);
-                    self.slots[slot] = Some(ItemStack::new(s.item, s.count + moved));
-                    let rem = h.count - moved;
-                    self.held = (rem > 0).then(|| ItemStack::new(h.item, rem));
-                } else if !right {
-                    self.slots[slot] = Some(h);
-                    self.held = Some(s);
-                }
-            }
-            (None, None) => {}
-        }
+        let mut held = self.held;
+        let mut cell = self.slots[slot];
+        slot_click(&mut held, &mut cell, right);
+        self.held = held;
+        self.slots[slot] = cell;
     }
 
     /// Return the held stack to the inventory when a screen closes; yields any leftover that didn't
