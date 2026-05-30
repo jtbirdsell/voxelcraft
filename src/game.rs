@@ -152,7 +152,13 @@ impl Game {
         true
     }
 
-    pub fn update(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, camera_pos: Vec3, dt: f32) {
+    pub fn update(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        camera_pos: Vec3,
+        dt: f32,
+    ) -> Vec<BlockId> {
         self.center = Self::center_of(camera_pos);
         let r = self.render_distance;
 
@@ -293,7 +299,7 @@ impl Game {
         // Update mobs and dropped items (AI + physics). The collision closure borrows only the
         // chunk map, leaving `self.entities` free to mutate.
         let chunks = &self.world.chunks;
-        self.entities.update(dt, camera_pos, |wp| {
+        let collected = self.entities.update(dt, camera_pos, |wp| {
             let cpos = world::chunk_of(wp);
             match chunks.get(&cpos) {
                 Some(c) => {
@@ -310,6 +316,8 @@ impl Game {
 
         // Feed the GPU voxel volume (ray-traced lighting) around the player.
         self.volume.update(gpu, &self.world, self.center);
+
+        collected
     }
 
     /// Fully generate and mesh the current radius synchronously (used for headless screenshots).

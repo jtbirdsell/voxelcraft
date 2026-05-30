@@ -3,8 +3,9 @@
 
 use glam::{IVec3, Vec3};
 
-use crate::block::{self, BlockId};
+use crate::block;
 use crate::font;
+use crate::item;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -42,46 +43,6 @@ impl UiVertex {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRS,
         }
-    }
-}
-
-pub struct Hotbar {
-    pub slots: Vec<BlockId>,
-    pub selected: usize,
-}
-
-impl Hotbar {
-    pub fn new() -> Self {
-        Self {
-            slots: vec![
-                block::GRASS,
-                block::DIRT,
-                block::STONE,
-                block::SAND,
-                block::WOOD,
-                block::LEAVES,
-                block::GLOWSTONE,
-                block::TORCH,
-                block::WATER,
-                block::LAVA,
-            ],
-            selected: 0,
-        }
-    }
-
-    pub fn selected_block(&self) -> BlockId {
-        self.slots[self.selected]
-    }
-
-    pub fn select(&mut self, index: usize) {
-        if index < self.slots.len() {
-            self.selected = index;
-        }
-    }
-
-    pub fn scroll(&mut self, delta: i32) {
-        let n = self.slots.len() as i32;
-        self.selected = (((self.selected as i32 + delta) % n + n) % n) as usize;
     }
 }
 
@@ -212,7 +173,7 @@ fn stat_bar(
 pub fn build_ui(
     width: u32,
     height: u32,
-    hotbar: &Hotbar,
+    inv: &item::Inventory,
     health: f32,
     hunger: f32,
     survival: bool,
@@ -228,31 +189,41 @@ pub fn build_ui(
     push_px_rect(&mut v, sw, sh, cx - 9.0, cy - 1.5, 18.0, 3.0, white);
     push_px_rect(&mut v, sw, sh, cx - 1.5, cy - 9.0, 3.0, 18.0, white);
 
-    // Hotbar.
-    let n = hotbar.slots.len();
+    // Hotbar (9 slots backed by the inventory; shows block swatch + stack count).
+    let n = item::HOTBAR;
     let slot = 46.0;
     let pad = 5.0;
     let total = n as f32 * slot + (n as f32 - 1.0) * pad;
     let start_x = (sw - total) * 0.5;
     let y = sh - slot - 18.0;
-    let bg = [0.0, 0.0, 0.0, 0.35];
-    push_px_rect(
-        &mut v,
-        sw,
-        sh,
-        start_x - 6.0,
-        y - 6.0,
-        total + 12.0,
-        slot + 12.0,
-        bg,
-    );
-    for (i, &id) in hotbar.slots.iter().enumerate() {
+    push_px_rect(&mut v, sw, sh, start_x - 6.0, y - 6.0, total + 12.0, slot + 12.0, [0.0, 0.0, 0.0, 0.35]);
+    for i in 0..n {
         let sx = start_x + i as f32 * (slot + pad);
-        if i == hotbar.selected {
+        if i == inv.selected {
             push_px_rect(&mut v, sw, sh, sx - 3.0, y - 3.0, slot + 6.0, slot + 6.0, [1.0, 1.0, 1.0, 0.95]);
         }
-        let c = block::face_color(id, [0, 1, 0]);
-        push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [c[0], c[1], c[2], 1.0]);
+        match inv.slots[i] {
+            Some(stack) => {
+                if let Some(b) = stack.block() {
+                    let c = block::face_color(b, [0, 1, 0]);
+                    push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [c[0], c[1], c[2], 1.0]);
+                }
+                if stack.count > 1 {
+                    let label = format!("{}", stack.count);
+                    let tw = text_width(&label, 2.0);
+                    push_text(&mut v, sw, sh, sx + slot - tw - 3.0, y + slot - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+                }
+            }
+            None => {
+                push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [0.1, 0.1, 0.12, 0.5]);
+            }
+        }
+    }
+    // Selected item name, centered above the hotbar (and above the stat bars).
+    if let Some(stack) = inv.slots[inv.selected] {
+        let name = item::item_name(stack.item);
+        let tw = text_width(name, 2.0);
+        push_text(&mut v, sw, sh, (sw - tw) * 0.5, y - 52.0, 2.0, name, [0.95, 0.95, 0.95, 1.0]);
     }
 
     // Health (red) and hunger (orange) pip bars sit just above the hotbar in survival mode.

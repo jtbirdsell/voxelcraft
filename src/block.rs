@@ -62,6 +62,27 @@ pub fn occludes(self_id: BlockId, neighbor: BlockId) -> bool {
     }
 }
 
+/// Human-readable block name (hotbar label, tooltips, F3).
+pub fn display_name(id: BlockId) -> &'static str {
+    match id {
+        AIR => "Air",
+        STONE => "Stone",
+        DIRT => "Dirt",
+        GRASS => "Grass Block",
+        SAND => "Sand",
+        WOOD => "Wood",
+        LEAVES => "Leaves",
+        WATER => "Water",
+        SNOW => "Snow",
+        COAL_ORE => "Coal Ore",
+        IRON_ORE => "Iron Ore",
+        LAVA => "Lava",
+        TORCH => "Torch",
+        GLOWSTONE => "Glowstone",
+        _ => "Unknown",
+    }
+}
+
 /// Base albedo for a block face. `face_offset[1] == 1` is the +Y (top) face.
 pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
     let top = face_offset[1] == 1;

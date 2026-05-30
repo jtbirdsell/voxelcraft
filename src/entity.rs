@@ -130,8 +130,10 @@ impl Entities {
         });
     }
 
-    /// Advance AI + physics for all entities and drop the dead/collected ones.
-    pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) {
+    /// Advance AI + physics for all entities and drop the dead/collected ones. Returns the blocks
+    /// of any item drops the player walked over this frame (to add to their inventory).
+    pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Vec<BlockId> {
+        let mut collected = Vec::new();
         for e in &mut self.list {
             e.age += dt;
             match e.kind {
@@ -159,7 +161,7 @@ impl Entities {
                         e.dead = true;
                     }
                 }
-                Kind::Item(_) => {
+                Kind::Item(b) => {
                     e.vel.y -= GRAVITY * dt;
                     e.on_ground = collide_move(&mut e.pos, &mut e.vel, ITEM_SIZE, ITEM_SIZE, dt, &is_solid);
                     if e.on_ground {
@@ -169,14 +171,15 @@ impl Entities {
                     // Collect once it has settled a moment and the player is close.
                     if e.age > 0.4 && (player_pos - e.pos).length() < COLLECT_RADIUS {
                         e.dead = true;
-                    }
-                    if e.age > ITEM_LIFETIME || e.pos.y < FALL_OUT_Y {
+                        collected.push(b);
+                    } else if e.age > ITEM_LIFETIME || e.pos.y < FALL_OUT_Y {
                         e.dead = true;
                     }
                 }
             }
         }
         self.list.retain(|e| !e.dead);
+        collected
     }
 
     /// Box geometry for every entity (opaque layer), lit by the chunk pipeline.

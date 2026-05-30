@@ -15,6 +15,7 @@ mod font;
 mod frustum;
 mod game;
 mod gpu;
+mod item;
 mod light;
 mod mesher;
 mod overlay;
@@ -47,7 +48,7 @@ use environment::Environment;
 use frustum::Frustum;
 use game::Game;
 use gpu::Gpu;
-use overlay::Hotbar;
+use item::Inventory;
 use persistence::Level;
 use player::{Input, Player};
 use renderer::ChunkRenderer;
@@ -66,7 +67,7 @@ struct State {
     camera: Camera,
     player: Player,
     input: Input,
-    hotbar: Hotbar,
+    inventory: Inventory,
     environment: Environment,
     camera_uniform: CameraUniform,
     last_frame: Instant,
@@ -192,10 +193,19 @@ impl App {
             state.camera.position = state.player.eye();
         }
 
-        // Stream chunks around the player and advance flowing fluids.
-        state
-            .game
-            .update(&state.gpu, &state.renderer, state.player.position, dt);
+        // Stream chunks, advance fluids/entities; collect any picked-up item drops into inventory.
+        let collected =
+            state
+                .game
+                .update(&state.gpu, &state.renderer, state.player.position, dt);
+        for b in collected {
+            if !state.inventory.add_block(b) {
+                // Inventory full — drop it back so blocks aren't vacuum-deleted.
+                state
+                    .game
+                    .spawn_item(state.player.position + Vec3::new(0.0, 1.0, 0.0), b);
+            }
+        }
 
         // Block targeting.
         let eye = state.camera.position;
@@ -222,14 +232,17 @@ impl App {
             state.input.place_pressed = false;
             if let Some(hit) = &target {
                 let place = hit.block + hit.normal;
-                let id = state.hotbar.selected_block();
+                let id = state.inventory.selected_block();
                 let blocks_player = block::is_solid(id) && state.player.intersects_block(place);
-                if !blocks_player
+                if id != block::AIR
+                    && !blocks_player
                     && state.game.set_block(&state.gpu, &state.renderer, place, id)
-                    && block::is_fluid(id)
                 {
-                    // Placed water/lava becomes a flowing source.
-                    state.game.add_fluid_source(place, id);
+                    state.inventory.consume_selected();
+                    if block::is_fluid(id) {
+                        // Placed water/lava becomes a flowing source.
+                        state.game.add_fluid_source(place, id);
+                    }
                 }
             }
         }
@@ -278,7 +291,7 @@ impl App {
         let ui = overlay::build_ui(
             state.gpu.config.width,
             state.gpu.config.height,
-            &state.hotbar,
+            &state.inventory,
             state.player.health,
             state.player.hunger,
             !state.player.flying,
@@ -310,7 +323,7 @@ impl App {
 
 fn maybe_select(state: &mut State, pressed: bool, index: usize) {
     if pressed {
-        state.hotbar.select(index);
+        state.inventory.select(index);
     }
 }
 
@@ -474,10 +487,14 @@ impl ApplicationHandler for App {
                 false,
                 game.rtx_mode_name(),
             );
+            // A couple of stacks so the headless shot exercises the count rendering.
+            let mut shot_inv = Inventory::new(true);
+            shot_inv.slots[2] = Some(item::ItemStack::new(item::item_of_block(block::STONE), 32));
+            shot_inv.slots[4] = Some(item::ItemStack::new(item::item_of_block(block::WOOD), 7));
             let ui = overlay::build_ui(
                 gpu.config.width,
                 gpu.config.height,
-                &Hotbar::new(),
+                &shot_inv,
                 20.0,
                 20.0,
                 false,
@@ -540,7 +557,7 @@ impl ApplicationHandler for App {
             camera,
             player,
             input: Input::default(),
-            hotbar: Hotbar::new(),
+            inventory: Inventory::new(flying),
             environment,
             camera_uniform,
             last_frame: Instant::now(),
@@ -585,7 +602,7 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::PixelDelta(p) => -(p.y.signum() as i32),
                     };
                     if dir != 0 {
-                        state.hotbar.scroll(dir);
+                        state.inventory.scroll(dir);
                     }
                 }
             }
