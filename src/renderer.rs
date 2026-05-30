@@ -10,6 +10,7 @@ use crate::camera::CameraUniform;
 use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::mesher::{Geometry, MeshData, Vertex};
 use crate::overlay::{self, LineVertex, UiVertex};
+use crate::voxel_volume::VoxelVolume;
 
 fn upload_geometry(device: &wgpu::Device, geom: &Geometry) -> Option<GpuPart> {
     if geom.is_empty() {
@@ -48,6 +49,7 @@ pub struct ChunkRenderer {
     ui_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    volume_bgl: wgpu::BindGroupLayout,
     sky_color: Cell<wgpu::Color>,
 }
 
@@ -90,15 +92,22 @@ impl ChunkRenderer {
             }],
         });
 
+        // Camera-only layout (highlight) and camera+volume layout (chunks/water).
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("chunk-pipeline-layout"),
+            label: Some("camera-pipeline-layout"),
             bind_group_layouts: &[Some(&camera_bgl)],
+            immediate_size: 0,
+        });
+        let volume_bgl = VoxelVolume::bind_group_layout(device);
+        let chunk_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("chunk-pipeline-layout"),
+            bind_group_layouts: &[Some(&camera_bgl), Some(&volume_bgl)],
             immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk-pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&chunk_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -148,7 +157,7 @@ impl ChunkRenderer {
         });
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water-pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&chunk_layout),
             vertex: wgpu::VertexState {
                 module: &water_shader,
                 entry_point: Some("vs_main"),
@@ -294,6 +303,7 @@ impl ChunkRenderer {
             ui_pipeline,
             camera_buffer,
             camera_bind_group,
+            volume_bgl,
             sky_color: Cell::new(wgpu::Color {
                 r: 0.46,
                 g: 0.64,
@@ -305,6 +315,10 @@ impl ChunkRenderer {
 
     pub fn set_sky(&self, color: wgpu::Color) {
         self.sky_color.set(color);
+    }
+
+    pub fn volume_bgl(&self) -> &wgpu::BindGroupLayout {
+        &self.volume_bgl
     }
 
     pub fn upload_mesh(&self, gpu: &Gpu, mesh: &MeshData) -> GpuMesh {
@@ -327,6 +341,7 @@ impl ChunkRenderer {
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
+        volume_bg: &wgpu::BindGroup,
     ) {
         // Opaque pass (clears color + depth).
         {
@@ -355,6 +370,7 @@ impl ChunkRenderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, volume_bg, &[]);
             for mesh in meshes {
                 if let Some(part) = &mesh.opaque {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
@@ -391,6 +407,7 @@ impl ChunkRenderer {
             });
             pass.set_pipeline(&self.water_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, volume_bg, &[]);
             for mesh in meshes {
                 if let Some(part) = &mesh.water {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
@@ -403,6 +420,7 @@ impl ChunkRenderer {
 
     /// Record a complete frame (chunks → highlight → HUD) into `encoder` against the given
     /// targets. Shared by the on-screen present path and the offscreen screenshot path.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_full(
         &self,
         gpu: &Gpu,
@@ -410,11 +428,12 @@ impl ChunkRenderer {
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
+        volume_bg: &wgpu::BindGroup,
         highlight: Option<IVec3>,
         ui_verts: &[UiVertex],
     ) {
-        // Chunk pass (clears color + depth).
-        self.record(encoder, color_view, depth_view, meshes);
+        // Chunk + water passes (clears color + depth).
+        self.record(encoder, color_view, depth_view, meshes, volume_bg);
 
         // Build overlay buffers (kept alive until this function returns; wgpu retains the
         // underlying resources in the command buffer until execution).
@@ -497,6 +516,7 @@ impl ChunkRenderer {
         &self,
         gpu: &Gpu,
         meshes: &[&GpuMesh],
+        volume_bg: &wgpu::BindGroup,
         highlight: Option<IVec3>,
         ui_verts: &[UiVertex],
     ) {
@@ -523,6 +543,7 @@ impl ChunkRenderer {
             &view,
             &gpu.depth_view,
             meshes,
+            volume_bg,
             highlight,
             ui_verts,
         );

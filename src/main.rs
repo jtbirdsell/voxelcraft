@@ -19,6 +19,7 @@ mod persistence;
 mod player;
 mod raycast;
 mod renderer;
+mod voxel_volume;
 mod worker;
 mod world;
 mod worldgen;
@@ -136,6 +137,10 @@ impl App {
                 state.player.flying = !state.player.flying;
                 state.player.velocity = Vec3::ZERO;
             }
+            KeyCode::KeyR if pressed && !repeat => {
+                state.game.toggle_rtx();
+                log::info!("RTX shadows: {}", state.game.rtx_enabled());
+            }
             KeyCode::Digit1 => maybe_select(state, pressed, 0),
             KeyCode::Digit2 => maybe_select(state, pressed, 1),
             KeyCode::Digit3 => maybe_select(state, pressed, 2),
@@ -213,9 +218,10 @@ impl App {
         let visible = state.game.visible_meshes(&frustum);
         let highlight = target.as_ref().map(|h| h.block);
         let ui = overlay::build_ui(state.gpu.config.width, state.gpu.config.height, &state.hotbar);
+        let volume_bg = state.game.volume_bind_group();
         state
             .renderer
-            .render_frame(&state.gpu, &visible, highlight, &ui);
+            .render_frame(&state.gpu, &visible, volume_bg, highlight, &ui);
 
         // Stats.
         state.fps_accum += dt;
@@ -257,7 +263,13 @@ impl ApplicationHandler for App {
 
         // Headless screenshot path: a fresh generated world with a few verification edits.
         if let Ok(path) = std::env::var("VOXELCRAFT_SHOT") {
-            let mut game = Game::new(SEED, RENDER_DISTANCE, FxHashMap::default());
+            let mut game = Game::new(
+                &gpu,
+                renderer.volume_bgl(),
+                SEED,
+                RENDER_DISTANCE,
+                FxHashMap::default(),
+            );
             let environment = Environment::new(0.34);
             let player = Player::new(Vec3::new(8.0, 96.0, 24.0), true);
             let camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
@@ -275,6 +287,9 @@ impl ApplicationHandler for App {
             }
             let highlight = Some(IVec3::new(4, 101, 8));
 
+            // Populate the voxel volume so ray-traced shadows appear in the screenshot.
+            game.prime_volume(&gpu, player.position);
+
             camera_uniform.update(&camera, gpu.aspect());
             camera_uniform.set_environment(&environment, FOG_START, FOG_END);
             renderer.set_sky(environment.wgpu_clear());
@@ -282,6 +297,7 @@ impl ApplicationHandler for App {
 
             let frustum = Frustum::from_view_proj(camera.view_proj(gpu.aspect()));
             let visible = game.visible_meshes(&frustum);
+            let volume_bg = game.volume_bind_group();
             let ui = overlay::build_ui(gpu.config.width, gpu.config.height, &Hotbar::new());
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",
@@ -293,6 +309,7 @@ impl ApplicationHandler for App {
                 &gpu,
                 &renderer,
                 &visible,
+                volume_bg,
                 highlight,
                 &ui,
                 gpu.config.width,
@@ -318,7 +335,7 @@ impl ApplicationHandler for App {
             ),
         };
         let saved = persistence::load_chunks(&dir);
-        let game = Game::new(seed, RENDER_DISTANCE, saved);
+        let game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
         let environment = Environment::new(time);
         let player = Player::new(spawn, flying);
         let camera = Camera::new(player.eye(), yaw, pitch);

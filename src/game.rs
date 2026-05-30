@@ -15,6 +15,7 @@ use crate::gpu::Gpu;
 use crate::mesher::{self, MeshData};
 use crate::renderer::{ChunkRenderer, GpuMesh};
 use crate::persistence::{self, Level};
+use crate::voxel_volume::VoxelVolume;
 use crate::worker::{Job, JobResult, WorkerPool};
 use crate::worldgen::Worldgen;
 use crate::world::{self, Chunk, World, CHUNK_SIZE_I, WORLD_HEIGHT_CHUNKS};
@@ -33,6 +34,7 @@ pub struct Game {
     /// XZ offsets within (render_distance + 1), sorted nearest-first.
     offsets: Vec<(i32, i32, i32)>, // (dx, dz, dist2)
 
+    volume: VoxelVolume,
     pool: WorkerPool,
     pending_gen: FxHashSet<IVec3>,
     pending_mesh: FxHashSet<IVec3>,
@@ -47,6 +49,8 @@ pub struct Game {
 
 impl Game {
     pub fn new(
+        gpu: &Gpu,
+        volume_bgl: &wgpu::BindGroupLayout,
         seed: u64,
         render_distance: i32,
         saved_chunks: FxHashMap<IVec3, Chunk>,
@@ -55,6 +59,7 @@ impl Game {
             .into_iter()
             .map(|(pos, chunk)| (pos, Arc::new(chunk)))
             .collect();
+        let volume = VoxelVolume::new(gpu, volume_bgl);
         let r = render_distance + 1;
         let mut offsets = Vec::new();
         for dz in -r..=r {
@@ -81,6 +86,7 @@ impl Game {
             seed,
             saved,
             dirty: false,
+            volume,
             meshes: FxHashMap::default(),
             render_distance,
             center: IVec3::new(i32::MIN, 0, i32::MIN),
@@ -241,6 +247,9 @@ impl Game {
         self.pending_mesh.retain(in_keep);
         self.pending_gen
             .retain(|pos| (pos.x - center.x).abs() <= keep + 1 && (pos.z - center.z).abs() <= keep + 1);
+
+        // Feed the GPU voxel volume (ray-traced shadows) around the player.
+        self.volume.update(gpu, &self.world, self.center);
     }
 
     /// Fully generate and mesh the current radius synchronously (used for headless screenshots).
@@ -331,11 +340,12 @@ impl Game {
             chunk.set(lx, ly, lz, id);
         }
 
-        // Persist the edited chunk (kept resident in `saved`).
+        // Persist the edited chunk (kept resident in `saved`) and refresh its volume voxels.
         if let Some(arc) = self.world.chunks.get(&cpos) {
             self.saved.insert(cpos, arc.clone());
             self.dirty = true;
         }
+        self.volume.invalidate(cpos);
 
         // Edited chunk plus any neighbor sharing the touched boundary must re-mesh.
         let mut affected = vec![cpos];
@@ -378,6 +388,24 @@ impl Game {
 
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    pub fn volume_bind_group(&self) -> &wgpu::BindGroup {
+        self.volume.bind_group()
+    }
+
+    /// Fully populate the voxel volume (headless screenshots).
+    pub fn prime_volume(&mut self, gpu: &Gpu, camera_pos: Vec3) {
+        let pc = Self::center_of(camera_pos);
+        self.volume.prime(gpu, &self.world, pc);
+    }
+
+    pub fn toggle_rtx(&mut self) {
+        self.volume.toggle_rtx();
+    }
+
+    pub fn rtx_enabled(&self) -> bool {
+        self.volume.rtx_enabled()
     }
 
     pub fn edited_chunk_count(&self) -> usize {

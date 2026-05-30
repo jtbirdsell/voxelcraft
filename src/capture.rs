@@ -12,6 +12,7 @@ pub fn screenshot(
     gpu: &Gpu,
     renderer: &ChunkRenderer,
     meshes: &[&GpuMesh],
+    volume_bg: &wgpu::BindGroup,
     highlight: Option<IVec3>,
     ui_verts: &[UiVertex],
     width: u32,
@@ -74,6 +75,7 @@ pub fn screenshot(
         &color_view,
         &depth_view,
         meshes,
+        volume_bg,
         highlight,
         ui_verts,
     );
