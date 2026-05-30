@@ -42,6 +42,11 @@ impl Camera {
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub cam_pos: [f32; 4],
+    pub sun_dir: [f32; 4],
+    pub sky_color: [f32; 4],
+    pub fog_color: [f32; 4],
+    /// (fog_start, fog_end, ambient, sun_intensity)
+    pub params: [f32; 4],
 }
 
 impl CameraUniform {
@@ -49,16 +54,25 @@ impl CameraUniform {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             cam_pos: [0.0; 4],
+            sun_dir: [0.4, 0.8, 0.45, 0.0],
+            sky_color: [0.46, 0.64, 0.92, 1.0],
+            fog_color: [0.46, 0.64, 0.92, 1.0],
+            params: [280.0, 370.0, 0.34, 1.0],
         }
     }
 
     pub fn update(&mut self, camera: &Camera, aspect: f32) {
         self.view_proj = camera.view_proj(aspect).to_cols_array_2d();
-        self.cam_pos = [
-            camera.position.x,
-            camera.position.y,
-            camera.position.z,
-            1.0,
-        ];
+        self.cam_pos = [camera.position.x, camera.position.y, camera.position.z, 1.0];
+    }
+
+    pub fn set_environment(&mut self, env: &crate::environment::Environment, fog_start: f32, fog_end: f32) {
+        let s = env.sun_dir();
+        self.sun_dir = [s.x, s.y, s.z, 0.0];
+        let sky = env.sky_color();
+        self.sky_color = [sky[0], sky[1], sky[2], 1.0];
+        let fog = env.fog_color();
+        self.fog_color = [fog[0], fog[1], fog[2], 1.0];
+        self.params = [fog_start, fog_end, env.ambient(), env.sun_intensity()];
     }
 }

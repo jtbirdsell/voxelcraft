@@ -1,6 +1,8 @@
 //! Chunk render pipeline: a camera uniform bind group + a textured/lit triangle pipeline,
 //! plus helpers to upload a `MeshData` to GPU buffers and draw it.
 
+use std::cell::Cell;
+
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
@@ -21,7 +23,7 @@ pub struct ChunkRenderer {
     ui_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    sky_color: wgpu::Color,
+    sky_color: Cell<wgpu::Color>,
 }
 
 impl ChunkRenderer {
@@ -217,13 +219,17 @@ impl ChunkRenderer {
             ui_pipeline,
             camera_buffer,
             camera_bind_group,
-            sky_color: wgpu::Color {
+            sky_color: Cell::new(wgpu::Color {
                 r: 0.46,
                 g: 0.64,
                 b: 0.92,
                 a: 1.0,
-            },
+            }),
         }
+    }
+
+    pub fn set_sky(&self, color: wgpu::Color) {
+        self.sky_color.set(color);
     }
 
     pub fn upload_mesh(&self, gpu: &Gpu, mesh: &MeshData) -> GpuMesh {
@@ -249,10 +255,6 @@ impl ChunkRenderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[*uniform]));
     }
 
-    pub fn sky_color(&self) -> wgpu::Color {
-        self.sky_color
-    }
-
     /// Record the chunk pass into an existing encoder against arbitrary color/depth targets,
     /// drawing every mesh in `meshes`. Shared by the present and screenshot paths.
     pub fn record(
@@ -269,7 +271,7 @@ impl ChunkRenderer {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(self.sky_color),
+                    load: wgpu::LoadOp::Clear(self.sky_color.get()),
                     store: wgpu::StoreOp::Store,
                 },
             })],

@@ -9,6 +9,7 @@
 mod block;
 mod camera;
 mod capture;
+mod environment;
 mod frustum;
 mod game;
 mod gpu;
@@ -35,6 +36,7 @@ use winit::{
 };
 
 use camera::{Camera, CameraUniform};
+use environment::Environment;
 use frustum::Frustum;
 use game::Game;
 use gpu::Gpu;
@@ -46,6 +48,8 @@ const SEED: u64 = 0x5EED_C0FFEE;
 const RENDER_DISTANCE: i32 = 12;
 const REACH: f32 = 6.0;
 const SENSITIVITY: f32 = 0.0022;
+const FOG_END: f32 = (RENDER_DISTANCE as f32 - 1.0) * 32.0;
+const FOG_START: f32 = FOG_END * 0.68;
 
 struct State {
     gpu: Gpu,
@@ -55,6 +59,7 @@ struct State {
     player: Player,
     input: Input,
     hotbar: Hotbar,
+    environment: Environment,
     camera_uniform: CameraUniform,
     last_frame: Instant,
     fps_accum: f32,
@@ -128,6 +133,7 @@ impl App {
         let now = Instant::now();
         let dt = (now - state.last_frame).as_secs_f32().min(0.1);
         state.last_frame = now;
+        state.environment.update(dt);
 
         // Apply mouse look.
         let (yaw_d, pitch_d) = state.input.take_look();
@@ -176,7 +182,11 @@ impl App {
         // Render.
         let aspect = state.gpu.aspect();
         state.camera_uniform.update(&state.camera, aspect);
+        state
+            .camera_uniform
+            .set_environment(&state.environment, FOG_START, FOG_END);
         state.renderer.update_camera(&state.gpu, &state.camera_uniform);
+        state.renderer.set_sky(state.environment.wgpu_clear());
 
         let frustum = Frustum::from_view_proj(state.camera.view_proj(aspect));
         let visible = state.game.visible_meshes(&frustum);
@@ -224,6 +234,7 @@ impl ApplicationHandler for App {
         let gpu = pollster::block_on(Gpu::new(window.clone()));
         let renderer = ChunkRenderer::new(&gpu);
         let mut game = Game::new(SEED, RENDER_DISTANCE);
+        let environment = Environment::new(0.34);
 
         // Spawn flying above the terrain.
         let player = Player::new(Vec3::new(8.0, 96.0, 24.0), true);
@@ -247,6 +258,10 @@ impl ApplicationHandler for App {
                 }
             }
             let highlight = Some(IVec3::new(4, 101, 8));
+
+            camera_uniform.set_environment(&environment, FOG_START, FOG_END);
+            renderer.set_sky(environment.wgpu_clear());
+            renderer.update_camera(&gpu, &camera_uniform);
 
             let frustum = Frustum::from_view_proj(camera.view_proj(gpu.aspect()));
             let visible = game.visible_meshes(&frustum);
@@ -280,6 +295,7 @@ impl ApplicationHandler for App {
             player,
             input: Input::default(),
             hotbar: Hotbar::new(),
+            environment,
             camera_uniform,
             last_frame: Instant::now(),
             fps_accum: 0.0,
