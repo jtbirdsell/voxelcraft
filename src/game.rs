@@ -608,26 +608,6 @@ impl Game {
         }
     }
 
-    /// Settle spawned entities onto the ground with pure physics (headless screenshots).
-    pub fn settle_entities(&mut self, steps: usize) {
-        let chunks = &self.world.chunks;
-        self.entities.settle(steps, |wp| {
-            let cpos = world::chunk_of(wp);
-            match chunks.get(&cpos) {
-                Some(c) => {
-                    let o = world::chunk_origin(cpos);
-                    block::is_solid(c.get(
-                        (wp.x - o.x) as usize,
-                        (wp.y - o.y) as usize,
-                        (wp.z - o.z) as usize,
-                    ))
-                }
-                None => false,
-            }
-        });
-    }
-
-
     pub fn seed(&self) -> u64 {
         self.seed
     }

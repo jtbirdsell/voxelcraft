@@ -179,25 +179,6 @@ impl Entities {
         self.list.retain(|e| !e.dead);
     }
 
-    /// Run pure physics (no AI heading changes) for a few steps so spawned entities rest on the
-    /// ground — used by the headless screenshot to place them deterministically.
-    pub fn settle(&mut self, steps: usize, is_solid: impl Fn(IVec3) -> bool) {
-        for _ in 0..steps {
-            for e in &mut self.list {
-                e.vel.y -= GRAVITY * (1.0 / 60.0);
-                let (w, h) = match e.kind {
-                    Kind::Mob => (MOB_W, MOB_H),
-                    Kind::Item(_) => (ITEM_SIZE, ITEM_SIZE),
-                };
-                e.on_ground = collide_move(&mut e.pos, &mut e.vel, w, h, 1.0 / 60.0, &is_solid);
-                if e.on_ground {
-                    e.vel.x = 0.0;
-                    e.vel.z = 0.0;
-                }
-            }
-        }
-    }
-
     /// Box geometry for every entity (opaque layer), lit by the chunk pipeline.
     pub fn build_mesh(&self) -> MeshData {
         let mut mesh = MeshData::default();

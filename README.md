@@ -57,10 +57,12 @@ The world saves automatically on quit to `saves/world/`.
   and sun-lit *material color* on a hit — soft contact AO and colored light bleeding between blocks.
   `R` cycles off → shadows → shadows + GI; interactive traces a few rays per pixel, the headless
   screenshot path traces 64 for a clean image.
-- **M8** — **ray-traced water reflections**: the water surface marches a mirror ray through the
-  same voxel volume (lit material on a hit, sky + a sun glint on a miss) and blends it in by a
-  Schlick-Fresnel term, so water mirrors the shoreline and sky at grazing angles and shows its own
-  tint head-on. The DDA tracer now lives in one shared `rtx_common.wgsl` used by both shaders.
+- **M8** — **ray-traced water reflections + depth-based clarity**: the water marches a mirror ray
+  through the voxel volume (Schlick-Fresnel reflection of shoreline/sky, softened by a static ripple
+  normal and a distance fade so it never reads as hard blotches), while its transparency comes from
+  water **depth** via a straight-down Beer-Lambert march — shallow water shows the bottom and deep
+  water turns opaque blue-green, consistently regardless of view angle. The DDA tracer lives in one
+  shared `rtx_common.wgsl` used by both shaders.
 - **M9** — **flowing fluids + emissive lava**: placed water/lava are simulated by a cellular tick
   (a bounded frontier flood that falls, then spreads with diminishing reach, and cascades over
   ledges). Lava is **emissive** — the per-vertex color carries an emission channel, and GI /

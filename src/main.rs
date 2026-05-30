@@ -303,34 +303,55 @@ impl ApplicationHandler for App {
             );
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
             game.set_rtx_quality(64);
-            // A daytime grass field of mobs and dropped items, floating clear above the terrain so
-            // the entities frame cleanly. Stacks M7/M8/M10 (GI-lit, shadowed entities + survival
-            // HUD) with M11 (the entities themselves).
+            // A sloped sandy pool to verify depth-driven water clarity: shallow at the near (-X)
+            // shore, deepening away, filled to a flat surface (top at y=150). The sandy bottom shows
+            // through the shallows and fades to opaque blue-green with depth — driven by depth, not
+            // view angle. A colored strip atop the far wall is reflected in the deep end. The camera
+            // looks down the slope so the whole shallow->deep gradient is in frame.
             let environment = Environment::new(0.30);
-            let player = Player::new(Vec3::new(40.0, 100.98, 22.0), false);
-            let camera = Camera::new(player.eye(), std::f32::consts::PI, -0.12);
+            let player = Player::new(Vec3::new(4.0, 152.38, 20.0), false);
+            let camera = Camera::new(player.eye(), 0.0, -0.32);
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);
 
-            // Floating grass platform for the entities to stand on.
-            for z in 6..=38 {
-                for x in 4..=40 {
-                    game.set_block(&gpu, &renderer, IVec3::new(x, 100, z), block::GRASS);
+            // Sand bottom that drops ~1 block every 3 along +X (water depth = 149 - floor_y, so it
+            // ramps from 1 at the near shore to ~9 at the far wall), with the water column above it.
+            for x in 8..=32 {
+                let floor_y = 148 - (x - 8) / 3;
+                for z in 10..=30 {
+                    game.set_block(&gpu, &renderer, IVec3::new(x, floor_y, z), block::SAND);
+                    for y in (floor_y + 1)..=149 {
+                        game.set_block(&gpu, &renderer, IVec3::new(x, y, z), block::WATER);
+                    }
                 }
             }
-            // A herd of mobs and a few dropped-item cubes near the camera; spawned above the
-            // platform and settled onto it.
-            for &(mx, mz) in &[(25, 16), (30, 24), (34, 14), (27, 29), (36, 20), (32, 30), (23, 23)] {
-                game.spawn_mob(Vec3::new(mx as f32 + 0.5, 103.0, mz as f32 + 0.5));
+            // Stone side + far walls contain the pool (tops at the waterline, except the far wall).
+            for z in 9..=31 {
+                for y in 138..=150 {
+                    game.set_block(&gpu, &renderer, IVec3::new(33, y, z), block::STONE);
+                }
             }
-            for &(ix, iz, b) in &[(33, 23, block::WOOD), (29, 19, block::STONE), (35, 27, block::COAL_ORE)] {
-                game.spawn_item(Vec3::new(ix as f32 + 0.5, 103.0, iz as f32 + 0.5), b);
+            for x in 8..=33 {
+                for y in 138..=150 {
+                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 9), block::STONE);
+                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 31), block::STONE);
+                }
             }
-            game.settle_entities(150);
+            // A colored strip on the far wall above the water, reflected by the deep end.
+            for z in 10..=30 {
+                let id = match z % 3 {
+                    0 => block::LEAVES,
+                    1 => block::SNOW,
+                    _ => block::SAND,
+                };
+                for y in 151..=156 {
+                    game.set_block(&gpu, &renderer, IVec3::new(33, y, z), id);
+                }
+            }
             let highlight: Option<IVec3> = None;
 
-            // Populate the voxel volume so shadows / AO / GI trace against the platform.
+            // Populate the voxel volume so the depth march + reflections trace against the pool.
             game.prime_volume(&gpu, player.position);
 
             camera_uniform.update(&camera, gpu.aspect());
@@ -345,14 +366,13 @@ impl ApplicationHandler for App {
                 visible.push(em);
             }
             let volume_bg = game.volume_bind_group();
-            // Partially-depleted bars so the survival HUD is clearly exercised.
             let ui = overlay::build_ui(
                 gpu.config.width,
                 gpu.config.height,
                 &Hotbar::new(),
-                13.0,
-                9.0,
-                true,
+                20.0,
+                20.0,
+                false,
             );
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",

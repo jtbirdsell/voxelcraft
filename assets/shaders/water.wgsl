@@ -1,66 +1,147 @@
-// Water surface: translucent base shading (sun + ambient + fog) plus a ray-traced reflection —
-// a mirror ray marched through the voxel volume — blended in by a Schlick-Fresnel term so the
-// water mirrors the sky and shoreline at grazing angles and shows its own tint when looked into.
-// rtx_common.wgsl (prepended at build time) supplies Camera/Volume, the vertex stage, trace(),
-// voxel_color() and sun_visibility().
+// Water surface: translucent base shading (sun + ambient + fog) over the already-rendered floor,
+// plus a ray-traced reflection blended in by a Schlick-Fresnel term. The key correctness rule:
+// the water draws with ALPHA_BLENDING over opaque terrain, so `rgb` is the water's OWN color and
+// `alpha` is how much of the underwater floor it hides. Clarity must therefore be driven by water
+// DEPTH (how much water the column holds), not by view angle. rtx_common.wgsl (prepended at build
+// time) supplies Camera/Volume, the vertex stage, trace(), voxel_color(), voxel_emission() and
+// sun_visibility().
+
+// Beer-Lambert extinction per block, per channel: red is absorbed fastest so deep water trends
+// blue-green. `WATER_TINT` is the body color seen once the floor is fully absorbed.
+const WATER_EXTINCTION: vec3<f32> = vec3<f32>(0.42, 0.20, 0.12);
+const WATER_TINT:       vec3<f32> = vec3<f32>(0.06, 0.22, 0.30);
+const DEPTH_MAX:        f32 = 24.0;   // cap on the downward depth march (deep just saturates)
+const REFL_MAX:         f32 = 80.0;   // reflection ray range
+const RIPPLE_AMP:       f32 = 0.06;   // tangent-space tilt of the static ripple (small => calm)
+const RIPPLE_SCALE:     f32 = 0.55;   // spatial frequency of the dominant wave
+
+// Static sum-of-sines height field on world XZ, returning its analytic xz-gradient
+// (dh/dx, dh/dz). No time uniform exists, so this is frozen in world space: it reads as calm
+// textured water and, crucially, breaks the perfectly-flat mirror so reflection hit/miss edges
+// dither across a few pixels instead of snapping into hard blotches.
+fn ripple_grad(p: vec2<f32>) -> vec2<f32> {
+    let d0 = vec2<f32>( 0.80,  0.60); let f0 = RIPPLE_SCALE * 1.0; let a0 = 1.00;
+    let d1 = vec2<f32>(-0.50,  0.87); let f1 = RIPPLE_SCALE * 1.7; let a1 = 0.55;
+    let d2 = vec2<f32>( 0.20, -0.98); let f2 = RIPPLE_SCALE * 2.9; let a2 = 0.28;
+    var g = a0 * f0 * cos(dot(d0, p) * f0) * d0;
+    g += a1 * f1 * cos(dot(d1, p) * f1) * d1;
+    g += a2 * f2 * cos(dot(d2, p) * f2) * d2;
+    return g;
+}
+
+// Perturb the flat +Y water normal by the ripple gradient. Side faces (base_n.y ~ 0) are left
+// alone so vertical water edges keep their true normal.
+fn ripple_normal(world_pos: vec3<f32>, base_n: vec3<f32>) -> vec3<f32> {
+    let g = ripple_grad(world_pos.xz);
+    let perturbed = normalize(vec3<f32>(-g.x * RIPPLE_AMP, 1.0, -g.y * RIPPLE_AMP));
+    let upness = clamp(base_n.y, 0.0, 1.0);
+    return normalize(mix(base_n, perturbed, upness));
+}
 
 fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>, sun_intensity: f32) -> vec3<f32> {
-    // Base sky tint plus a sharp sun glint when the reflected ray points near the sun.
-    let glint = pow(max(dot(dir, sun), 0.0), 200.0) * sun_intensity * 3.0;
+    // Broad, daylight-gated sun lobe (was pow 200 * 3 -> a razor specular that aliased into hard
+    // bright specks). A wider exponent + lower gain spreads the glint over many fragments.
+    let day = clamp(sun.y, 0.0, 1.0);
+    let glint = pow(max(dot(dir, sun), 0.0), 60.0) * sun_intensity * day * 1.0;
     return camera.sky_color.rgb + vec3<f32>(glint);
 }
 
-// Colour seen along the mirror ray: lit material on a hit, sky (with sun glint) on a miss.
+// Colour along the mirror ray: lit terrain on a hit (faded toward sky over the far end of its
+// range so distant grazing silhouettes dissolve instead of forming hard hit/miss blotches),
+// otherwise sky. Reflected radiance is clamped so one bright lava/snow hit can't spike a pixel.
 fn reflection_color(world_pos: vec3<f32>, n: vec3<f32>, incident: vec3<f32>) -> vec3<f32> {
     let sun = normalize(camera.sun_dir.xyz);
     let sun_intensity = camera.params.w;
     let ambient = camera.params.z;
     let refl = reflect(incident, n);
     let origin = world_pos + n * 0.05 + refl * 0.05;
-    let h = trace(origin, refl, 80.0, 180);
+    let sky = sky_radiance(refl, sun, sun_intensity);
+    let h = trace(origin, refl, REFL_MAX, 180);
     if (h.hit) {
         let ndl = max(dot(h.normal, sun), 0.0);
         var vis = 1.0;
         if (ndl > 0.0) {
             vis = sun_visibility(h.pos, h.normal, 64.0);
         }
-        return voxel_color(h.id) * (ambient + sun_intensity * ndl * vis) + voxel_emission(h.id);
+        var lit = voxel_color(h.id) * (ambient + sun_intensity * ndl * vis) + voxel_emission(h.id);
+        lit = min(lit, vec3<f32>(2.0)); // tame emissive spikes
+        let d = length(h.pos - origin);
+        let fade = smoothstep(REFL_MAX * 0.6, REFL_MAX, d);
+        return mix(lit, sky, fade);
     }
-    return sky_radiance(refl, sun, sun_intensity);
+    return sky;
+}
+
+// Water-column depth below `p`, in blocks: march the opaque volume straight DOWN. Water is not
+// opaque (id 7 is absent from the volume), so the ray passes through the column and stops at the
+// first floor voxel; that hit distance IS the depth. Marching straight down (rather than along the
+// view ray) keeps depth a stable per-location property, so it adds no per-pixel direction noise.
+fn water_depth(p: vec3<f32>) -> f32 {
+    let origin = p + vec3<f32>(0.0, -0.05, 0.0); // nudge just below the surface
+    let h = trace(origin, vec3<f32>(0.0, -1.0, 0.0), DEPTH_MAX, i32(DEPTH_MAX * 2.0) + 4);
+    if (h.hit) {
+        return clamp(length(origin - h.pos), 0.0, DEPTH_MAX);
+    }
+    return DEPTH_MAX; // no floor within range -> treat as deep
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
+    let base_n = normalize(in.normal);
     let sun = normalize(camera.sun_dir.xyz);
     let ambient = camera.params.z;
     let sun_intensity = camera.params.w;
+    let rtx = volume.params.y >= 1u;
+
+    // Calm static ripple breaks the flat mirror; only applied to up-facing (top) water.
+    var n = base_n;
+    if (rtx) {
+        n = ripple_normal(in.world_pos, base_n);
+    }
     let ndl = max(dot(n, sun), 0.0);
 
-    // Base translucent water shading, sun-shadowed when ray-traced lighting is on.
+    // Shadow ray uses the TRUE flat normal/origin to avoid ripple-induced self-intersection acne.
     var shadow = 1.0;
-    if (volume.params.y >= 1u) {
-        shadow = sun_visibility(in.world_pos, n, 96.0);
+    if (rtx) {
+        shadow = sun_visibility(in.world_pos, base_n, 96.0);
     }
-    let base = in.color.rgb * (ambient + sun_intensity * ndl * shadow);
+    let lit = ambient + sun_intensity * ndl * shadow;
 
     let view_dir = normalize(camera.cam_pos.xyz - in.world_pos); // surface -> camera
-    var rgb = base;
-    var alpha = 0.7;
 
-    if (volume.params.y >= 1u) {
-        // Schlick Fresnel, F0 ~ 0.02 for water: grazing angles reflect, head-on shows water tint.
+    // ---- OPACITY FROM DEPTH (Beer-Lambert), NOT FROM VIEW ANGLE -------------------------------
+    // The same depth of water reads identically near and far, so the sheet is one coherent
+    // surface. Top faces measure the column below them; thin vertical side faces would read ~1
+    // block (too clear), so floor their depth so edges still read as water.
+    var depth = water_depth(in.world_pos);
+    if (base_n.y < 0.5) {
+        depth = max(depth, 4.0);
+    }
+    let transmit = exp(-WATER_EXTINCTION * depth);          // per-channel surviving-floor fraction
+    let clarity = (transmit.r + transmit.g + transmit.b) / 3.0;
+    // The water's own color: its tinted albedo over shallow water, trending to WATER_TINT as the
+    // floor is absorbed. Both lit the same way so the surface shades consistently.
+    let shallow_col = in.color.rgb * lit;
+    let deep_col = WATER_TINT * lit;
+    var rgb = mix(deep_col, shallow_col, clarity);
+    var alpha = clamp(1.0 - clarity, 0.18, 0.95);           // shallow -> floor shows, deep -> opaque
+
+    if (rtx) {
+        // Fresnel drives REFLECTION AMOUNT only. Capped so far/grazing water is a strong-but-not-
+        // pure mirror, which (with the ripple + distance fade) keeps reflections from reading as
+        // binary blotches.
         let cos_t = max(dot(n, view_dir), 0.0);
-        let fres = clamp(0.02 + 0.98 * pow(1.0 - cos_t, 5.0), 0.0, 1.0);
+        var fres = clamp(0.02 + 0.98 * pow(1.0 - cos_t, 5.0), 0.0, 1.0);
+        fres = min(fres, 0.6);
         let refl = reflection_color(in.world_pos, n, -view_dir);
-        rgb = mix(base, refl, fres);
-        // A reflective sheet reads more opaque, especially at grazing angles.
-        alpha = mix(0.7, 0.95, fres);
+        rgb = mix(rgb, refl, fres);
+        // A reflective surface also hides the floor: opacity is the max of depth-absorption and
+        // reflectance, so it can only rise, never drop below the depth-driven value.
+        alpha = clamp(max(alpha, fres), 0.18, 0.95);
     } else {
-        // Legacy specular sheen when ray-traced lighting is off.
         let halfway = normalize(sun + view_dir);
-        let spec = pow(max(dot(n, halfway), 0.0), 64.0) * sun_intensity * 0.6;
-        rgb = base + vec3<f32>(spec);
+        let spec = pow(max(dot(base_n, halfway), 0.0), 64.0) * sun_intensity * 0.6;
+        rgb = rgb + vec3<f32>(spec);
     }
 
     let dist = length(in.world_pos - camera.cam_pos.xyz);
