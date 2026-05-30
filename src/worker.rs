@@ -19,6 +19,7 @@ pub enum Job {
     },
     Mesh {
         pos: IVec3,
+        version: u32,
         neigh: Neighborhood,
         origin: [i32; 3],
     },
@@ -26,7 +27,7 @@ pub enum Job {
 
 pub enum JobResult {
     Generated { pos: IVec3, chunk: Chunk },
-    Meshed { pos: IVec3, mesh: MeshData },
+    Meshed { pos: IVec3, version: u32, mesh: MeshData },
 }
 
 pub struct WorkerPool {
@@ -83,8 +84,14 @@ fn worker_loop(worldgen: Arc<Worldgen>, job_rx: Receiver<Job>, result_tx: Sender
                 pos,
                 chunk: worldgen.generate_chunk(pos),
             },
-            Job::Mesh { pos, neigh, origin } => JobResult::Meshed {
+            Job::Mesh {
                 pos,
+                version,
+                neigh,
+                origin,
+            } => JobResult::Meshed {
+                pos,
+                version,
                 mesh: mesher::build_mesh(&neigh, origin),
             },
         };

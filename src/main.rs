@@ -1,7 +1,9 @@
-//! Voxelcraft — M2: an infinite, procedurally generated world streamed as chunks around a
-//! fly camera, greedy-meshed with cross-chunk face culling and frustum-culled for drawing.
+//! Voxelcraft — M4: an interactive voxel sandbox.
 //!
-//! Controls: WASD move, mouse look, Space up, Left-Shift down, Left-Ctrl boost, Esc quit.
+//! Controls:
+//!   WASD move · mouse look · Space up/jump · Left-Shift down · Left-Ctrl sprint/boost
+//!   F toggle fly/walk · Left-click break · Right-click place · 1-9 / scroll select block · Esc quit
+//!
 //! Set VOXELCRAFT_SHOT=path.png to render one frame offscreen (headless verification).
 
 mod block;
@@ -11,6 +13,9 @@ mod frustum;
 mod game;
 mod gpu;
 mod mesher;
+mod overlay;
+mod player;
+mod raycast;
 mod renderer;
 mod worker;
 mod world;
@@ -19,31 +24,37 @@ mod worldgen;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::Vec3;
+use glam::{IVec3, Vec3};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{DeviceEvent, DeviceId, ElementState, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use camera::{Camera, CameraUniform, FlyController};
+use camera::{Camera, CameraUniform};
 use frustum::Frustum;
 use game::Game;
 use gpu::Gpu;
+use overlay::Hotbar;
+use player::{Input, Player};
 use renderer::ChunkRenderer;
 
 const SEED: u64 = 0x5EED_C0FFEE;
 const RENDER_DISTANCE: i32 = 12;
+const REACH: f32 = 6.0;
+const SENSITIVITY: f32 = 0.0022;
 
 struct State {
     gpu: Gpu,
     renderer: ChunkRenderer,
     game: Game,
     camera: Camera,
-    controller: FlyController,
+    player: Player,
+    input: Input,
+    hotbar: Hotbar,
     camera_uniform: CameraUniform,
     last_frame: Instant,
     fps_accum: f32,
@@ -81,21 +92,33 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, pressed: bool, event_loop: &ActiveEventLoop) {
+    fn handle_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, event_loop: &ActiveEventLoop) {
         if code == KeyCode::Escape && pressed {
             event_loop.exit();
             return;
         }
         let Some(state) = &mut self.state else { return };
-        let c = &mut state.controller;
         match code {
-            KeyCode::KeyW => c.forward = pressed,
-            KeyCode::KeyS => c.back = pressed,
-            KeyCode::KeyA => c.left = pressed,
-            KeyCode::KeyD => c.right = pressed,
-            KeyCode::Space => c.up = pressed,
-            KeyCode::ShiftLeft => c.down = pressed,
-            KeyCode::ControlLeft => c.fast = pressed,
+            KeyCode::KeyW => state.input.forward = pressed,
+            KeyCode::KeyS => state.input.back = pressed,
+            KeyCode::KeyA => state.input.left = pressed,
+            KeyCode::KeyD => state.input.right = pressed,
+            KeyCode::Space => state.input.up = pressed,
+            KeyCode::ShiftLeft => state.input.down = pressed,
+            KeyCode::ControlLeft => state.input.sprint = pressed,
+            KeyCode::KeyF if pressed && !repeat => {
+                state.player.flying = !state.player.flying;
+                state.player.velocity = Vec3::ZERO;
+            }
+            KeyCode::Digit1 => maybe_select(state, pressed, 0),
+            KeyCode::Digit2 => maybe_select(state, pressed, 1),
+            KeyCode::Digit3 => maybe_select(state, pressed, 2),
+            KeyCode::Digit4 => maybe_select(state, pressed, 3),
+            KeyCode::Digit5 => maybe_select(state, pressed, 4),
+            KeyCode::Digit6 => maybe_select(state, pressed, 5),
+            KeyCode::Digit7 => maybe_select(state, pressed, 6),
+            KeyCode::Digit8 => maybe_select(state, pressed, 7),
+            KeyCode::Digit9 => maybe_select(state, pressed, 8),
             _ => {}
         }
     }
@@ -106,37 +129,84 @@ impl App {
         let dt = (now - state.last_frame).as_secs_f32().min(0.1);
         state.last_frame = now;
 
-        state.controller.update(&mut state.camera, dt);
+        // Apply mouse look.
+        let (yaw_d, pitch_d) = state.input.take_look();
+        state.camera.yaw += yaw_d * SENSITIVITY;
+        state.camera.pitch = (state.camera.pitch - pitch_d * SENSITIVITY).clamp(-1.5533, 1.5533);
 
+        // Player physics (disjoint field borrows: player mut, game/input shared).
+        let yaw = state.camera.yaw;
+        let game_ref = &state.game;
+        state
+            .player
+            .update(dt, yaw, &state.input, |p| game_ref.is_solid_at(p));
+        state.camera.position = state.player.eye();
+
+        // Stream chunks around the player.
+        state
+            .game
+            .update(&state.gpu, &state.renderer, state.player.position);
+
+        // Block targeting.
+        let eye = state.camera.position;
+        let fwd = state.camera.forward();
+        let target = raycast::cast(eye, fwd, REACH, |p| state.game.is_solid_at(p));
+
+        // Break / place (edge-triggered).
+        if state.input.break_pressed {
+            state.input.break_pressed = false;
+            if let Some(hit) = &target {
+                state
+                    .game
+                    .set_block(&state.gpu, &state.renderer, hit.block, block::AIR);
+            }
+        }
+        if state.input.place_pressed {
+            state.input.place_pressed = false;
+            if let Some(hit) = &target {
+                let place = hit.block + hit.normal;
+                let id = state.hotbar.selected_block();
+                let blocks_player = block::is_solid(id) && state.player.intersects_block(place);
+                if !blocks_player {
+                    state.game.set_block(&state.gpu, &state.renderer, place, id);
+                }
+            }
+        }
+
+        // Render.
         let aspect = state.gpu.aspect();
         state.camera_uniform.update(&state.camera, aspect);
         state.renderer.update_camera(&state.gpu, &state.camera_uniform);
 
-        // Stream chunks around the camera.
-        state
-            .game
-            .update(&state.gpu, &state.renderer, state.camera.position);
-
-        // Cull + draw.
         let frustum = Frustum::from_view_proj(state.camera.view_proj(aspect));
         let visible = state.game.visible_meshes(&frustum);
-        state.renderer.render_world(&state.gpu, &visible);
+        let highlight = target.as_ref().map(|h| h.block);
+        let ui = overlay::build_ui(state.gpu.config.width, state.gpu.config.height, &state.hotbar);
+        state
+            .renderer
+            .render_frame(&state.gpu, &visible, highlight, &ui);
 
-        // Periodic stats.
+        // Stats.
         state.fps_accum += dt;
         state.fps_frames += 1;
         if state.fps_accum >= 2.0 {
-            let fps = state.fps_frames as f32 / state.fps_accum;
             log::info!(
-                "{:.0} fps | {} chunks loaded | {} meshes | {} drawn",
-                fps,
+                "{:.0} fps | {} chunks | {} meshes | {} drawn | {}",
+                state.fps_frames as f32 / state.fps_accum,
                 state.game.loaded_chunk_count(),
                 state.game.mesh_count(),
-                visible.len()
+                visible.len(),
+                if state.player.flying { "fly" } else { "walk" }
             );
             state.fps_accum = 0.0;
             state.fps_frames = 0;
         }
+    }
+}
+
+fn maybe_select(state: &mut State, pressed: bool, index: usize) {
+    if pressed {
+        state.hotbar.select(index);
     }
 }
 
@@ -146,7 +216,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("Voxelcraft — M2")
+            .with_title("Voxelcraft — M4")
             .with_inner_size(LogicalSize::new(1600.0, 900.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         self.window = Some(window.clone());
@@ -155,33 +225,61 @@ impl ApplicationHandler for App {
         let renderer = ChunkRenderer::new(&gpu);
         let mut game = Game::new(SEED, RENDER_DISTANCE);
 
-        let camera = Camera::new(Vec3::new(8.0, 98.0, 24.0), -std::f32::consts::FRAC_PI_2, -0.30);
+        // Spawn flying above the terrain.
+        let player = Player::new(Vec3::new(8.0, 96.0, 24.0), true);
+        let mut camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update(&camera, gpu.aspect());
         renderer.update_camera(&gpu, &camera_uniform);
 
-        // Headless screenshot: synchronously load the area, then render one frame to a PNG.
         if let Ok(path) = std::env::var("VOXELCRAFT_SHOT") {
-            game.load_all_blocking(&gpu, &renderer, camera.position);
+            game.load_all_blocking(&gpu, &renderer, player.position);
+
+            // Verify set_block + synchronous remesh: build a visible tower + platform and
+            // carve a small crater, then highlight a block.
+            for y in 80..101 {
+                let id = if y % 2 == 0 { block::WOOD } else { block::STONE };
+                game.set_block(&gpu, &renderer, IVec3::new(4, y, 8), id);
+            }
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    game.set_block(&gpu, &renderer, IVec3::new(4 + dx, 101, 8 + dz), block::SNOW);
+                }
+            }
+            let highlight = Some(IVec3::new(4, 101, 8));
+
             let frustum = Frustum::from_view_proj(camera.view_proj(gpu.aspect()));
             let visible = game.visible_meshes(&frustum);
+            let ui = overlay::build_ui(gpu.config.width, gpu.config.height, &Hotbar::new());
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",
                 game.loaded_chunk_count(),
                 game.mesh_count(),
                 visible.len()
             );
-            capture::screenshot(&gpu, &renderer, &visible, gpu.config.width, gpu.config.height, &path);
+            capture::screenshot(
+                &gpu,
+                &renderer,
+                &visible,
+                highlight,
+                &ui,
+                gpu.config.width,
+                gpu.config.height,
+                &path,
+            );
             event_loop.exit();
             return;
         }
 
+        camera.position = player.eye();
         self.state = Some(State {
             gpu,
             renderer,
             game,
             camera,
-            controller: FlyController::default(),
+            player,
+            input: Input::default(),
+            hotbar: Hotbar::new(),
             camera_uniform,
             last_frame: Instant::now(),
             fps_accum: 0.0,
@@ -199,18 +297,34 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => self.set_grab(false),
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                ..
-            } => {
-                if !self.grabbed {
-                    self.set_grab(true);
+            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                if btn_state == ElementState::Pressed {
+                    if !self.grabbed {
+                        self.set_grab(true);
+                    } else if let Some(state) = &mut self.state {
+                        match button {
+                            MouseButton::Left => state.input.break_pressed = true,
+                            MouseButton::Right => state.input.place_pressed = true,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(state) = &mut self.state {
+                    let dir = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
+                        MouseScrollDelta::PixelDelta(p) => -(p.y.signum() as i32),
+                    };
+                    if dir != 0 {
+                        state.hotbar.scroll(dir);
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    self.handle_key(code, pressed, event_loop);
+                    self.handle_key(code, pressed, event.repeat, event_loop);
                 }
             }
             WindowEvent::RedrawRequested => self.frame(),
@@ -218,18 +332,12 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn device_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: DeviceId,
-        event: DeviceEvent,
-    ) {
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.grabbed {
                 if let Some(state) = &mut self.state {
-                    state
-                        .controller
-                        .process_mouse(delta.0 as f32, delta.1 as f32);
+                    state.input.yaw_delta += delta.0 as f32;
+                    state.input.pitch_delta += delta.1 as f32;
                 }
             }
         }

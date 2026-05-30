@@ -1,13 +1,19 @@
 //! Offscreen screenshot: render one frame to a texture and read it back to a PNG.
 //! Used for headless milestone verification (set VOXELCRAFT_SHOT=path.png).
 
+use glam::IVec3;
+
 use crate::gpu::{Gpu, DEPTH_FORMAT};
+use crate::overlay::UiVertex;
 use crate::renderer::{ChunkRenderer, GpuMesh};
 
+#[allow(clippy::too_many_arguments)]
 pub fn screenshot(
     gpu: &Gpu,
     renderer: &ChunkRenderer,
     meshes: &[&GpuMesh],
+    highlight: Option<IVec3>,
+    ui_verts: &[UiVertex],
     width: u32,
     height: u32,
     path: &str,
@@ -62,7 +68,15 @@ pub fn screenshot(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("shot-encoder"),
     });
-    renderer.record(&mut encoder, &color_view, &depth_view, meshes);
+    renderer.record_full(
+        gpu,
+        &mut encoder,
+        &color_view,
+        &depth_view,
+        meshes,
+        highlight,
+        ui_verts,
+    );
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: &color,

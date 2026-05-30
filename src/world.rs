@@ -22,6 +22,7 @@ fn local_index(x: usize, y: usize, z: usize) -> usize {
 }
 
 /// One cubic section of blocks.
+#[derive(Clone)]
 pub struct Chunk {
     pub blocks: Vec<BlockId>,
     pub solid_count: u32,

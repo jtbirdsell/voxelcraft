@@ -31,7 +31,9 @@ pub struct Game {
     pool: WorkerPool,
     pending_gen: FxHashSet<IVec3>,
     pending_mesh: FxHashSet<IVec3>,
-    ready_meshes: VecDeque<(IVec3, MeshData)>,
+    ready_meshes: VecDeque<(IVec3, u32, MeshData)>,
+    /// Mesh version per chunk; bumped on edit so stale in-flight mesh jobs are discarded.
+    versions: FxHashMap<IVec3, u32>,
 
     max_inflight_gen: usize,
     max_inflight_mesh: usize,
@@ -71,6 +73,7 @@ impl Game {
             pending_gen: FxHashSet::default(),
             pending_mesh: FxHashSet::default(),
             ready_meshes: VecDeque::new(),
+            versions: FxHashMap::default(),
             max_inflight_gen: 1024,
             max_inflight_mesh: 512,
             upload_budget: 64,
@@ -118,12 +121,15 @@ impl Game {
                         self.world.chunks.insert(pos, Arc::new(chunk));
                     }
                 }
-                JobResult::Meshed { pos, mesh } => {
-                    // Keep `pos` in `pending_mesh` until it is actually uploaded, so the
-                    // submission loop below doesn't re-submit a chunk that's awaiting upload.
-                    if self.within(pos, r + 1) {
-                        self.ready_meshes.push_back((pos, mesh));
+                JobResult::Meshed { pos, version, mesh } => {
+                    let current = self.versions.get(&pos).copied().unwrap_or(0);
+                    if version == current && self.within(pos, r + 1) {
+                        // Keep `pos` in `pending_mesh` until it is actually uploaded, so the
+                        // submission loop below doesn't re-submit a chunk awaiting upload.
+                        self.ready_meshes.push_back((pos, version, mesh));
                     } else {
+                        // Stale (edited since submission) or out of range — discard and allow
+                        // re-submission if still needed.
                         self.pending_mesh.remove(&pos);
                     }
                 }
@@ -133,16 +139,20 @@ impl Game {
         // 2. Upload a budget of finished meshes to the GPU (main thread only).
         let mut uploads = 0;
         while uploads < self.upload_budget {
-            let Some((pos, data)) = self.ready_meshes.pop_front() else {
+            let Some((pos, version, data)) = self.ready_meshes.pop_front() else {
                 break;
             };
+            self.pending_mesh.remove(&pos);
+            // Skip if edited since this mesh was built.
+            if self.versions.get(&pos).copied().unwrap_or(0) != version {
+                continue;
+            }
             let gpu_mesh = if data.is_empty() {
                 None
             } else {
                 Some(renderer.upload_mesh(gpu, &data))
             };
             self.meshes.insert(pos, gpu_mesh);
-            self.pending_mesh.remove(&pos);
             uploads += 1;
         }
 
@@ -181,8 +191,14 @@ impl Game {
                 {
                     if let Some(neigh) = self.world.neighborhood(pos) {
                         let origin = world::chunk_origin(pos).to_array();
+                        let version = self.versions.get(&pos).copied().unwrap_or(0);
                         self.pending_mesh.insert(pos);
-                        self.pool.submit(Job::Mesh { pos, neigh, origin });
+                        self.pool.submit(Job::Mesh {
+                            pos,
+                            version,
+                            neigh,
+                            origin,
+                        });
                         if self.pending_mesh.len() >= self.max_inflight_mesh {
                             break 'mesh;
                         }
@@ -243,6 +259,91 @@ impl Game {
                     self.meshes.insert(pos, gpu_mesh);
                 }
             }
+        }
+    }
+
+    /// Block id at a world position (air if the chunk isn't loaded).
+    pub fn block_at(&self, wp: IVec3) -> crate::block::BlockId {
+        let cpos = world::chunk_of(wp);
+        let origin = world::chunk_origin(cpos);
+        match self.world.get(cpos) {
+            Some(chunk) => chunk.get(
+                (wp.x - origin.x) as usize,
+                (wp.y - origin.y) as usize,
+                (wp.z - origin.z) as usize,
+            ),
+            None => crate::block::AIR,
+        }
+    }
+
+    pub fn is_solid_at(&self, wp: IVec3) -> bool {
+        crate::block::is_solid(self.block_at(wp))
+    }
+
+    /// Set a block at a world position and synchronously re-mesh the affected chunk(s).
+    /// Returns true if a change was made.
+    pub fn set_block(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        wp: IVec3,
+        id: crate::block::BlockId,
+    ) -> bool {
+        let cpos = world::chunk_of(wp);
+        let origin = world::chunk_origin(cpos);
+        let (lx, ly, lz) = (
+            (wp.x - origin.x) as usize,
+            (wp.y - origin.y) as usize,
+            (wp.z - origin.z) as usize,
+        );
+
+        {
+            let Some(arc) = self.world.chunks.get_mut(&cpos) else {
+                return false;
+            };
+            let chunk = Arc::make_mut(arc);
+            if chunk.get(lx, ly, lz) == id {
+                return false;
+            }
+            chunk.set(lx, ly, lz, id);
+        }
+
+        // Edited chunk plus any neighbor sharing the touched boundary must re-mesh.
+        let mut affected = vec![cpos];
+        if lx == 0 {
+            affected.push(cpos - IVec3::X);
+        } else if lx == 31 {
+            affected.push(cpos + IVec3::X);
+        }
+        if ly == 0 {
+            affected.push(cpos - IVec3::Y);
+        } else if ly == 31 {
+            affected.push(cpos + IVec3::Y);
+        }
+        if lz == 0 {
+            affected.push(cpos - IVec3::Z);
+        } else if lz == 31 {
+            affected.push(cpos + IVec3::Z);
+        }
+
+        for p in affected {
+            *self.versions.entry(p).or_insert(0) += 1;
+            self.pending_mesh.remove(&p);
+            self.remesh_sync(gpu, renderer, p);
+        }
+        true
+    }
+
+    fn remesh_sync(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, pos: IVec3) {
+        if let Some(neigh) = self.world.neighborhood(pos) {
+            let origin = world::chunk_origin(pos).to_array();
+            let data = mesher::build_mesh(&neigh, origin);
+            let gpu_mesh = if data.is_empty() {
+                None
+            } else {
+                Some(renderer.upload_mesh(gpu, &data))
+            };
+            self.meshes.insert(pos, gpu_mesh);
         }
     }
 
