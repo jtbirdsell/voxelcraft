@@ -1,0 +1,12 @@
+# Normalize line endings: store LF in the repo, check out native on each platform.
+* text=auto
+
+# Source and assets are text.
+*.rs    text
+*.wgsl  text
+*.toml  text
+*.md    text
+*.lock  text
+
+# Binary assets.
+*.png   binary

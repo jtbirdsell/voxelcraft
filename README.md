@@ -1,24 +1,32 @@
 # Voxelcraft
 
-A Minecraft-equivalent voxel sandbox written from scratch in **Rust + wgpu**, tuned for an
-RTX 4090 / i9-14900K. Infinite procedurally-generated world, multithreaded chunk streaming,
-break/place building, day/night, transparent water, **flowing fluids**, **survival**
-(health/hunger/fall damage), **mobs + item drops**, world save/load, and **ray-traced lighting** —
+A Minecraft-style voxel sandbox written from scratch in **Rust + [wgpu](https://wgpu.rs)** (DirectX 12),
+tuned for a high-end PC (developed on an RTX 4090 / i9-14900K). It features an infinite,
+procedurally-generated world streamed across all CPU cores, a procedural texture atlas, real
+block-light + skylight (dark caves, glowing torches), a full inventory, and **ray-traced lighting** —
 sun shadows, ambient occlusion, one-bounce colored global illumination, water reflections, and
-**emissive lava** that lights the scene — computed against the actual voxel geometry on the GPU.
+emissive blocks — all computed against the actual voxel geometry on the GPU.
+
+> **Status:** the engine and world systems are complete and the survival loop is in active
+> development (see [Roadmap](#roadmap)). Everything here is built from scratch — no game engine, and
+> the textures, fonts, and worldgen are all generated in code.
 
 ## Run
 
-The Rust toolchain (MSVC) is already installed. From the project directory:
+Requires the Rust toolchain (stable, MSVC on Windows). From the project directory:
 
-```powershell
+```sh
 cargo run --release
 ```
 
-First release build takes ~50s (fat LTO); after that it's instant. A debug build (`cargo run`)
-compiles faster but the worldgen/meshing run unoptimized, so use `--release` to play.
+The first release build takes ~50s (fat LTO); after that it's instant. A debug build (`cargo run`)
+compiles faster but runs the worldgen/mesher unoptimized, so use `--release` to play.
 
-`cargo test --release` runs the unit tests (worldgen determinism, physics, persistence).
+```sh
+cargo test --release   # worldgen determinism, physics, inventory + save round-trips
+```
+
+The world auto-saves to `saves/world/` on quit.
 
 ## Controls
 
@@ -31,85 +39,97 @@ compiles faster but the worldgen/meshing run unoptimized, so use `--release` to 
 | **Left-Ctrl** | Sprint / fly boost |
 | **F** | Toggle fly / walk |
 | **Left-click** | Break block |
-| **Right-click** | Place block |
-| **1–9 / scroll** | Select hotbar block |
+| **Right-click** | Place selected block |
+| **1–9 / scroll** | Select hotbar slot |
+| **E** | Open / close inventory |
 | **R** | Cycle ray-traced lighting: off → shadows → shadows + GI |
+| **F3** | Toggle debug overlay (fps, position, biome, facing) |
 | **P** | Save world |
-| **Esc** | Quit |
+| **Esc** | Close menu, or quit |
 
-The world saves automatically on quit to `saves/world/`.
+Breaking a block drops a collectible item that falls into your inventory; the hotbar shows stack
+counts and the selected item's name.
 
-## What's implemented
+## Features
 
-- **M1** — winit 0.30 + wgpu 29 on the **DX12** backend, depth buffer, fly camera.
-- **M2** — infinite world streamed as 32³ chunks, generated + **binary greedy meshed** across a
-  worker pool (cores − 2 threads), CPU frustum culling.
-- **M3** — multi-octave OpenSimplex2 terrain, parameter-space **biomes**, 3D-noise **caves**,
-  ores, sea-level water, deterministic **trees** (no cross-chunk writes). Seed-deterministic.
-- **M4** — swept-AABB **player physics** (walk/fly, gravity, jump), 3D-DDA **block targeting**,
-  **break/place** with incremental re-mesh, block highlight, hotbar + crosshair HUD.
-- **M5** — **day/night** cycle, dynamic sky + distance **fog**, translucent **water**, world
-  **save/load** (LZ4-packed edited chunks; unedited chunks regenerate from the seed).
-- **M6** — **ray-traced sun shadows**: a GPU-resident 256³ toroidal voxel volume that follows the
-  player; the fragment shader DDA-marches a shadow ray toward the sun.
-- **M7** — **ray-traced ambient occlusion + one-bounce global illumination**: the volume now stores
-  block ids (not just occupancy), so cosine-weighted hemisphere rays gather sky radiance on a miss
-  and sun-lit *material color* on a hit — soft contact AO and colored light bleeding between blocks.
-  `R` cycles off → shadows → shadows + GI; interactive traces a few rays per pixel, the headless
-  screenshot path traces 64 for a clean image.
-- **M8** — **ray-traced water reflections + depth-based clarity**: the water marches a mirror ray
-  through the voxel volume (Schlick-Fresnel reflection of shoreline/sky, softened by a static ripple
-  normal and a distance fade so it never reads as hard blotches), while its transparency comes from
-  water **depth** via a straight-down Beer-Lambert march — shallow water shows the bottom and deep
-  water turns opaque blue-green, consistently regardless of view angle. The DDA tracer lives in one
-  shared `rtx_common.wgsl` used by both shaders.
-- **M9** — **flowing fluids + emissive lava**: placed water/lava are simulated by a cellular tick
-  (a bounded frontier flood that falls, then spreads with diminishing reach, and cascades over
-  ledges). Lava is **emissive** — the per-vertex color carries an emission channel, and GI /
-  reflection rays treat a lava hit as a light source, so a lava lake glows and washes nearby blocks
-  in orange indirect light (and reflects in water).
-- **M10** — **survival basics**: in walk mode the player has health + hunger; a hard fall deals
-  damage past a safe distance, hunger drains (faster sprinting), regenerates health when full and
-  starves when empty, and death respawns at spawn. Red/orange pip bars render above the hotbar
-  (flying is treated as creative — invulnerable, bars hidden).
-- **M11** — **mobs + item drops**: an entity system with the same swept-AABB voxel collision as the
-  player. Mobs wander with a small random AI; breaking a block drops a small item cube that falls,
-  rests, bobs/spins, and is collected when walked over. Entities are drawn as boxes through the
-  chunk pipeline, so they pick up the same ray-traced shadows / AO / GI as the world.
+**World & rendering**
+- Infinite world streamed as 32³ chunks, generated and **binary greedy-meshed** across a worker pool
+  (cores − 2 threads), with CPU frustum culling.
+- Multi-octave OpenSimplex terrain with parameter-space **biomes**, 3D-noise **caves**, depth-banded
+  **ores**, a jagged **bedrock** floor, **deepslate** at depth, and deterministic **trees** and
+  surface **decoration** (flowers, tall grass, cactus). Fully seed-deterministic.
+- A **procedural texture atlas** painted in code at startup (stone, ores, planks, bricks, foliage,
+  …), with cross-billboard plants drawn via **alpha cutout**.
+- **Day/night** cycle with a dynamic sky, distance fog, translucent **water**, and **flowing fluids**
+  (water/lava cellular simulation). Animated water ripples and lava.
+- **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /
+  glowstone / lava illuminate their surroundings.
 
-Performance: **~144 fps (vsync-capped)** at render distance 12 with shadows on — the GPU has
-large headroom, which GI and reflections spend on per-pixel ray tracing.
+**Ray-traced lighting** (a GPU-resident 768×256 toroidal voxel volume the fragment shaders DDA-march)
+- **Sun shadows** against the real voxel geometry.
+- **Ambient occlusion + one-bounce colored global illumination** (cosine-weighted hemisphere rays
+  gather sky on a miss and sun-lit material color on a hit).
+- **Water reflections** via a Schlick-Fresnel mirror ray, with depth-based clarity (Beer–Lambert).
+- **Emissive blocks** (lava, glowstone, torches) that cast colored light into the scene and reflect.
+
+**Gameplay & UI**
+- Swept-AABB **player physics** (walk/fly, gravity, jump, sprint), 3D-DDA block targeting, break/place
+  with incremental re-meshing, and a block highlight.
+- **Survival basics**: health + hunger, fall damage, hunger drain/regen/starvation, death → respawn.
+- A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
+  screen with drag/drop and tooltips, and persistence.
+- **Mobs + item drops**: AABB entities that wander and drop collectible items, lit by the same
+  ray-traced pipeline as the world.
+- A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
+
+Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;
+the GPU has large headroom, which the lighting spends on per-pixel ray tracing.
 
 ## Architecture
 
 ```
 src/
   gpu.rs            wgpu device/surface/depth; DX12-preferred adapter selection
-  camera.rs         fly camera + globals UBO (view-proj, sun, sky/fog)
+  camera.rs         fly camera + globals UBO (view-proj, sun, sky/fog, time)
   environment.rs    day/night: sun direction, sky/fog color, ambient/intensity
-  world.rs          Chunk (32³), World store, neighbor view for meshing
-  worldgen.rs       noise terrain, biomes, caves, ores, trees (Arc-shared across workers)
-  mesher.rs         binary greedy mesher → opaque + translucent geometry
+  world.rs          Chunk (32³ blocks + light), World store, neighborhood view for meshing
+  worldgen.rs       noise terrain, biomes, caves, ores, trees, decoration (Arc-shared across workers)
+  light.rs          skylight + block-light flood (baked per-vertex during meshing)
+  mesher.rs         binary greedy mesher (opaque/water) + cross-billboard plants
+  texture.rs        procedural block texture atlas (painted in code)
+  font.rs           embedded 8×8 bitmap font, baked to an atlas
   worker.rs         crossbeam worker pool (generate + mesh off the main thread)
-  game.rs           streaming manager: gen/mesh budgets, frustum cull, edits, fluid tick, saves
+  game.rs           streaming manager: gen/mesh budgets, frustum cull, edits, fluids, saves
   voxel_volume.rs   GPU voxel material volume (block ids) for ray-traced shadows + AO/GI
   raycast.rs        Amanatides–Woo voxel DDA (block targeting)
-  player.rs         AABB collision, gravity/jump/fly, input, survival (health/hunger/fall damage)
-  entity.rs         mobs + dropped items: AABB physics, wander AI, box geometry (GI-lit)
+  player.rs         AABB collision, gravity/jump/fly, input, survival
+  entity.rs         mobs + dropped items: AABB physics, wander AI, GI-lit box geometry
+  item.rs           item registry, ItemStack, Inventory (hotbar/main/armor/cursor)
+  overlay.rs        HUD, hotbar, inventory screen, block highlight (UI geometry)
   frustum.rs        Gribb–Hartmann frustum culling
-  renderer.rs       pipelines (opaque/water/highlight/HUD), frame recording
-  overlay.rs        block highlight + crosshair/hotbar geometry
-  persistence.rs    LZ4 chunk save/load + level header
+  renderer.rs       pipelines (chunk/water/highlight/UI) + atlas/font bind groups, frame recording
+  persistence.rs    LZ4 chunk save/load, level header, inventory save_state
   capture.rs        offscreen screenshot (headless verification)
 assets/shaders/     rtx_common (shared bindings + voxel DDA tracer) + chunk / water / line / ui WGSL
 ```
 
-**Hardware-driven choices:** worker threads keep all cores busy on generation/meshing while the
-render thread stays light; greedy meshing + per-chunk draws keep geometry cheap; the over-powered
-GPU is spent on ray-traced shadows, ambient occlusion and global illumination rather than idling.
+**Hardware-driven choices:** worker threads keep all cores busy on generation/meshing/lighting while
+the render thread stays light; greedy meshing keeps geometry cheap; the over-powered GPU is spent on
+ray-traced shadows, AO, and global illumination rather than idling.
 
-## Possible next steps
+### Headless verification
 
-An inventory + crafting grid; mob health/combat and more creature types; a texture atlas;
-GPU-driven indirect rendering for much larger render distances; and a temporal/spatial denoiser so
-interactive GI can use fewer rays per pixel without noise.
+Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and exits — used to
+verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
+`VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv`, `VOXELCRAFT_ROOM`.
+
+## Roadmap
+
+Done: the full engine, world generation, lighting, rendering, inventory, and block library. In
+progress / planned: progressive mining with tool tiers, crafting + smelting, food & deeper survival,
+typed mobs + combat, structures (dungeons/villages), an RTX temporal denoiser, particles + audio,
+redstone, and additional dimensions.
+
+## License
+
+[MIT](LICENSE) © Jordan Birdsell. Built with the help of Claude Code.

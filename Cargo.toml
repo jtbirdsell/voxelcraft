@@ -2,6 +2,13 @@
 name = "voxelcraft"
 version = "0.1.0"
 edition = "2024"
+description = "A from-scratch Minecraft-style voxel sandbox in Rust + wgpu with ray-traced lighting"
+authors = ["Jordan Birdsell <jordantbirdsell@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/jtbirdsell/voxelcraft"
+readme = "README.md"
+keywords = ["voxel", "minecraft", "wgpu", "raytracing", "gamedev"]
+categories = ["games", "graphics"]
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
