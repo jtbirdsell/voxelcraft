@@ -232,11 +232,15 @@ pub fn build_inventory_screen(
     // Held stack follows the cursor.
     if let Some(held) = inv.held {
         let c = item::item_color(held.item);
-        push_px_rect(&mut v, sw, sh, cursor.0 - INV_SLOT * 0.5, cursor.1 - INV_SLOT * 0.5, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
+        let sz = INV_SLOT - 6.0;
+        let (hx, hy) = (cursor.0 - sz * 0.5, cursor.1 - sz * 0.5); // centered on the cursor
+        push_px_rect(&mut v, sw, sh, hx, hy, sz, sz, [c[0], c[1], c[2], 1.0]);
         if held.count > 1 {
             let label = format!("{}", held.count);
-            push_text(&mut v, sw, sh, cursor.0 + 6.0, cursor.1 + 4.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+            let tw = text_width(&label, 2.0);
+            push_text(&mut v, sw, sh, hx + sz - tw - 2.0, hy + sz - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
         }
+        durability_bar(&mut v, sw, sh, hx - 4.0, hy, sz + 8.0, held);
     } else if let Some(slot_i) = hovered {
         // Tooltip when not dragging.
         if let Some(stack) = inv.slots[slot_i] {

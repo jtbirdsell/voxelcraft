@@ -161,6 +161,24 @@ pub fn item_name(item: ItemId) -> &'static str {
     TOOL_NAMES[(item - TOOL_BASE) as usize].get_or_init(|| format!("{tier} {class}"))
 }
 
+/// Atlas tile for a dropped item entity: the block's tile, or a generic tool tile.
+pub fn item_tile(item: ItemId) -> u32 {
+    match block_of_item(item) {
+        Some(b) => block::face_tile(b, [0, 1, 0]),
+        None => block::tile::PLANKS, // generic handle-colored placeholder for tool drops
+    }
+}
+
+/// Self-emission of a dropped item (lava block glows; tools don't).
+pub fn item_emission(item: ItemId) -> f32 {
+    block_of_item(item).map(block::emission).unwrap_or(0.0)
+}
+
+/// True if `item` is a registered block or tool (used to reject corrupt save ids).
+pub fn is_known(item: ItemId) -> bool {
+    is_tool(item) || (item != block::AIR && item <= block::CACTUS)
+}
+
 /// Representative UI color for an item: the block face color, or a tier color for tools.
 pub fn item_color(item: ItemId) -> [f32; 3] {
     if let Some(b) = block_of_item(item) {
@@ -348,14 +366,9 @@ impl Inventory {
         Some(stack)
     }
 
-    /// Add one item of `block` (a pickup). Returns false if the inventory is full.
-    pub fn add_block(&mut self, b: BlockId) -> bool {
-        self.insert(ItemStack::new(item_of_block(b), 1)).is_none()
-    }
-
-    /// Drop one of the selected stack (Q). Returns the block to spawn in the world, or None if the
-    /// slot is empty. Decrements the stack unless in creative.
-    pub fn drop_one_selected(&mut self) -> Option<BlockId> {
+    /// Drop one of the selected stack (Q): returns the single-item stack to spawn (preserving tool
+    /// durability), or None if empty. Decrements the slot unless in creative.
+    pub fn drop_one_selected(&mut self) -> Option<ItemStack> {
         let stack = self.slots[self.selected]?;
         if !self.creative {
             let s = self.slots[self.selected].as_mut().unwrap();
@@ -364,7 +377,11 @@ impl Inventory {
                 self.slots[self.selected] = None;
             }
         }
-        stack.block()
+        Some(ItemStack {
+            item: stack.item,
+            count: 1,
+            durability: stack.durability,
+        })
     }
 
     /// Empty every slot (and the cursor), returning the stacks — for the death drop.
@@ -440,7 +457,7 @@ mod tests {
     fn drop_one_decrements_in_survival() {
         let mut inv = Inventory::new(false);
         inv.slots[0] = Some(ItemStack::new(item_of_block(block::STONE), 3));
-        assert_eq!(inv.drop_one_selected(), Some(block::STONE));
+        assert_eq!(inv.drop_one_selected().unwrap().item, item_of_block(block::STONE));
         assert_eq!(inv.slots[0].unwrap().count, 2);
         inv.slots[0] = Some(ItemStack::new(item_of_block(block::STONE), 1));
         inv.drop_one_selected();

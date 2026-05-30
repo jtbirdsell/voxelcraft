@@ -7,7 +7,8 @@ use std::f32::consts::TAU;
 
 use glam::{IVec3, Vec3};
 
-use crate::block::{self, BlockId};
+use crate::block;
+use crate::item::{self, ItemStack};
 use crate::mesher::{Geometry, MeshData, Vertex};
 
 const GRAVITY: f32 = 28.0;
@@ -55,7 +56,7 @@ fn randf(state: &mut u64) -> f32 {
 
 enum Kind {
     Mob,
-    Item(BlockId),
+    Item(ItemStack),
 }
 
 struct Entity {
@@ -111,13 +112,13 @@ impl Entities {
         });
     }
 
-    pub fn spawn_item(&mut self, pos: Vec3, block: BlockId) {
+    pub fn spawn_item(&mut self, pos: Vec3, stack: ItemStack) {
         let mut rng = self.next_seed();
         // Pop out with a little random horizontal velocity and an upward kick.
         let a = randf(&mut rng) * TAU;
         let vel = Vec3::new(a.cos() * 1.5, 3.0, a.sin() * 1.5);
         self.list.push(Entity {
-            kind: Kind::Item(block),
+            kind: Kind::Item(stack),
             pos,
             vel,
             on_ground: false,
@@ -132,7 +133,7 @@ impl Entities {
 
     /// Advance AI + physics for all entities and drop the dead/collected ones. Returns the blocks
     /// of any item drops the player walked over this frame (to add to their inventory).
-    pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Vec<BlockId> {
+    pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Vec<ItemStack> {
         let mut collected = Vec::new();
         for e in &mut self.list {
             e.age += dt;
@@ -161,7 +162,7 @@ impl Entities {
                         e.dead = true;
                     }
                 }
-                Kind::Item(b) => {
+                Kind::Item(stack) => {
                     e.vel.y -= GRAVITY * dt;
                     e.on_ground = collide_move(&mut e.pos, &mut e.vel, ITEM_SIZE, ITEM_SIZE, dt, &is_solid);
                     if e.on_ground {
@@ -171,7 +172,7 @@ impl Entities {
                     // Collect once it has settled a moment and the player is close.
                     if e.age > 0.4 && (player_pos - e.pos).length() < COLLECT_RADIUS {
                         e.dead = true;
-                        collected.push(b);
+                        collected.push(stack);
                     } else if e.age > ITEM_LIFETIME || e.pos.y < FALL_OUT_Y {
                         e.dead = true;
                     }
@@ -209,9 +210,9 @@ impl Entities {
                         0.0,
                     );
                 }
-                Kind::Item(b) => {
-                    let tile = block::face_tile(b, [0, 1, 0]);
-                    let em = block::emission(b);
+                Kind::Item(stack) => {
+                    let tile = item::item_tile(stack.item);
+                    let em = item::item_emission(stack.item);
                     let s = ITEM_SIZE * 0.5;
                     let bob = (e.age * 3.0).sin() * 0.06;
                     let center = e.pos + Vec3::new(0.0, ITEM_SIZE * 0.5 + 0.05 + bob, 0.0);

@@ -120,8 +120,9 @@ pub fn load_inventory(dir: &Path, creative_default: bool) -> Inventory {
         }
         let slot = d[o] as usize;
         let item = u16::from_le_bytes([d[o + 1], d[o + 2]]);
-        let cnt = d[o + 3];
-        if slot < SLOTS && cnt > 0 {
+        // Clamp the count to the item's max stack and reject unknown ids (corrupt/edited saves).
+        let cnt = d[o + 3].min(crate::item::max_stack(item));
+        if slot < SLOTS && cnt > 0 && crate::item::is_known(item) {
             let mut stack = ItemStack::new(item, cnt); // durability defaults (max for tools)
             if version >= 2 {
                 stack.durability = u16::from_le_bytes([d[o + 4], d[o + 5]]);

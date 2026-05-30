@@ -268,12 +268,9 @@ impl App {
             log::info!("You died — respawning at spawn.");
             // Drop the whole inventory at the death site, then respawn empty.
             let death_pos = state.player.position + Vec3::new(0.0, 1.0, 0.0);
+            // One entity per stack (carries count + tool durability) — tools drop too, not vanish.
             for stack in state.inventory.drain_all() {
-                if let Some(b) = stack.block() {
-                    for _ in 0..stack.count {
-                        state.game.spawn_item(death_pos, b);
-                    }
-                }
+                state.game.spawn_item(death_pos, stack);
             }
             state.player.respawn();
             state.camera.position = state.player.eye();
@@ -284,19 +281,19 @@ impl App {
             state
                 .game
                 .update(&state.gpu, &state.renderer, state.player.position, dt);
-        for b in collected {
-            if !state.inventory.add_block(b) {
-                // Inventory full — drop it back so blocks aren't vacuum-deleted.
+        for stack in collected {
+            if let Some(leftover) = state.inventory.insert(stack) {
+                // Inventory full — drop the remainder back so items aren't vacuum-deleted.
                 state
                     .game
-                    .spawn_item(state.player.position + Vec3::new(0.0, 1.0, 0.0), b);
+                    .spawn_item(state.player.position + Vec3::new(0.0, 1.0, 0.0), leftover);
             }
         }
 
         // Block targeting.
         let eye = state.camera.position;
         let fwd = state.camera.forward();
-        let target = raycast::cast(eye, fwd, REACH, |p| state.game.is_solid_at(p));
+        let mut target = raycast::cast(eye, fwd, REACH, |p| state.game.is_solid_at(p));
 
         // Mining: hold LMB to break the targeted block, timed by hardness (instant in creative).
         if state.screen == Screen::None && state.input.break_held {
@@ -337,13 +334,15 @@ impl App {
                             if harvest_ok {
                                 if let Some(drop) = block::drops(id) {
                                     let center = hit.as_vec3() + Vec3::splat(0.5);
-                                    state.game.spawn_item(center, drop);
+                                    let stack = item::ItemStack::new(item::item_of_block(drop), 1);
+                                    state.game.spawn_item(center, stack);
                                 }
                             }
                             state.inventory.damage_selected(1);
                         }
                         state.mine_target = None;
                         state.mine_progress = 0.0;
+                        target = None; // don't flash a highlight on the now-air block this frame
                     }
                 } else {
                     state.mine_target = None;
@@ -377,9 +376,9 @@ impl App {
         // Q: drop one of the selected item ahead of the camera.
         if state.input.drop_pressed {
             state.input.drop_pressed = false;
-            if let Some(b) = state.inventory.drop_one_selected() {
+            if let Some(dropped) = state.inventory.drop_one_selected() {
                 let pos = state.camera.position + state.camera.forward() * 1.2;
-                state.game.spawn_item(pos, b);
+                state.game.spawn_item(pos, dropped);
             }
         }
 
@@ -482,12 +481,7 @@ fn maybe_select(state: &mut State, pressed: bool, index: usize) {
 /// rather than leaving it stranded on the (now hidden) cursor.
 fn drop_leftover(inventory: &mut Inventory, game: &mut Game, player_pos: Vec3) {
     if let Some(left) = inventory.return_held() {
-        if let Some(b) = left.block() {
-            let pos = player_pos + Vec3::new(0.0, 1.0, 0.0);
-            for _ in 0..left.count {
-                game.spawn_item(pos, b);
-            }
-        }
+        game.spawn_item(player_pos + Vec3::new(0.0, 1.0, 0.0), left);
     }
 }
 

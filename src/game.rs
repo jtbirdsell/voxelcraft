@@ -158,7 +158,7 @@ impl Game {
         renderer: &ChunkRenderer,
         camera_pos: Vec3,
         dt: f32,
-    ) -> Vec<BlockId> {
+    ) -> Vec<crate::item::ItemStack> {
         self.center = Self::center_of(camera_pos);
         let r = self.render_distance;
 
@@ -598,8 +598,8 @@ impl Game {
         self.entities.spawn_mob(pos);
     }
 
-    pub fn spawn_item(&mut self, pos: Vec3, block: BlockId) {
-        self.entities.spawn_item(pos, block);
+    pub fn spawn_item(&mut self, pos: Vec3, stack: crate::item::ItemStack) {
+        self.entities.spawn_item(pos, stack);
     }
 
     pub fn entity_count(&self) -> usize {
