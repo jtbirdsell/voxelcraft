@@ -79,6 +79,8 @@ struct State {
     /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
     mine_target: Option<IVec3>,
     mine_progress: f32,
+    /// Cooldown between melee swings (seconds).
+    melee_cd: f32,
 }
 
 pub struct App {
@@ -405,13 +407,43 @@ impl App {
             state.player.add_xp(collected.xp);
         }
 
+        // Mob contact damage accumulated by the entity tick this frame (reduced by armor).
+        if collected.player_damage > 0.0 {
+            state.player.take_hit(collected.player_damage);
+        }
+
         // Block targeting.
         let eye = state.camera.position;
         let fwd = state.camera.forward();
         let mut target = raycast::cast(eye, fwd, REACH, |p| state.game.is_solid_at(p));
 
+        // Melee: if a mob is nearer than the targeted block, the left-click hits it (not the block).
+        state.melee_cd = (state.melee_cd - dt).max(0.0);
+        let block_dist = target
+            .as_ref()
+            .map_or(REACH, |h| (h.block.as_vec3() + Vec3::splat(0.5) - eye).length());
+        let mob_in_way = state.screen == Screen::None
+            && state.input.break_held
+            && state
+                .game
+                .nearest_mob_hit(eye, fwd, REACH)
+                .is_some_and(|md| md <= block_dist);
+        if mob_in_way {
+            if state.melee_cd <= 0.0 {
+                let dmg = item::attack_damage(state.inventory.selected_item());
+                state.game.attack_nearest(eye, fwd, REACH, dmg);
+                state.melee_cd = 0.5; // ~2 swings/sec
+                if !state.inventory.creative {
+                    state.inventory.damage_selected(1); // weapons wear from hitting
+                }
+            }
+            state.mine_target = None;
+            state.mine_progress = 0.0;
+            target = None; // swinging at a mob, not mining — no block highlight
+        }
+
         // Mining: hold LMB to break the targeted block, timed by hardness (instant in creative).
-        if state.screen == Screen::None && state.input.break_held {
+        if state.screen == Screen::None && state.input.break_held && !mob_in_way {
             if let Some(hit) = target.as_ref().map(|h| h.block) {
                 let id = state.game.block_at(hit);
                 if block::breakable(id) {
@@ -910,6 +942,11 @@ impl ApplicationHandler for App {
                     let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0);
                 }
                 log::info!("M28 AI after settle: {}", game.mob_ai_summary());
+                // M29: swing toward the mob stage (logs the hit), then flash them all red for the shot.
+                let aim = (Vec3::new(10.0, 85.5, 24.0) - camera.position).normalize_or_zero();
+                let hit = game.attack_nearest(camera.position, aim, 40.0, 6.0);
+                log::info!("M29 melee: hit a mob = {hit}");
+                game.flash_mobs(0.45);
             }
 
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.
@@ -1091,6 +1128,7 @@ impl ApplicationHandler for App {
             pending_open: None,
             mine_target: None,
             mine_progress: 0.0,
+            melee_cd: 0.0,
         });
         self.set_grab(true);
     }

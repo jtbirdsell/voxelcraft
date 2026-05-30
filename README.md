@@ -108,6 +108,9 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   Flee / Chase / Attack** state machine drives them: passive species flee when you crowd them, hostile
   species **chase you on sight** (raycast line-of-sight) and close to attack range. Dropped items + XP
   orbs share the same entity physics.
+- **Combat**: left-click melees the nearest mob in your reach (ray-vs-AABB beats mining when a mob is
+  closer than the block) — damage scaled by your weapon, **knockback**, a red **hurt-flash**, and an
+  XP drop on kill; hostile mobs in range hit **back** for contact damage, reduced by your armor.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
 
 Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;

@@ -29,6 +29,8 @@ const FLEE_RADIUS: f32 = 5.0; // passive mobs bolt when the player gets this clo
 const ATTACK_RADIUS: f32 = 1.6; // hostile mobs lunge/attack when this close
 const CHASE_SPEED: f32 = 3.2;
 const FLEE_SPEED: f32 = 3.6;
+const KNOCKBACK: f32 = 6.0; // horizontal impulse imparted by a melee hit
+const MOB_ATTACK_COOLDOWN: f32 = 1.0; // seconds between a hostile mob's contact hits
 
 #[inline]
 fn comp(v: Vec3, axis: usize) -> f32 {
@@ -114,13 +116,33 @@ impl Species {
         }
     }
 
-    /// Hostile species hunt the player (wired up by combat/AI in M28-M29).
-    #[allow(dead_code)]
+    /// Hostile species hunt the player and deal contact damage.
     pub fn hostile(self) -> bool {
         matches!(
             self,
             Species::Zombie | Species::Skeleton | Species::Creeper | Species::Spider
         )
+    }
+
+    /// Contact damage a hostile mob deals to the player per hit (passives deal none).
+    fn contact_damage(self) -> f32 {
+        match self {
+            Species::Creeper => 4.0,
+            Species::Zombie => 3.0,
+            Species::Skeleton | Species::Spider => 2.0,
+            _ => 0.0,
+        }
+    }
+
+    /// Experience dropped when this mob is killed.
+    fn xp_drop(self) -> u32 {
+        if self.hostile() {
+            5
+        } else if matches!(self, Species::Chicken) {
+            1
+        } else {
+            2
+        }
     }
 }
 
@@ -225,6 +247,8 @@ struct MobData {
     health: f32,
     hurt: f32,
     ai: Ai,
+    /// Cooldown between contact attacks on the player (seconds).
+    atk_cd: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -235,11 +259,13 @@ enum Kind {
     Xp(u32),
 }
 
-/// What the player swept up this frame: item stacks (added to the inventory) and experience points.
+/// What the entity tick produced this frame: item stacks + XP the player swept up, and contact
+/// damage hostile mobs dealt to the player (applied through armor by the caller).
 #[derive(Default)]
 pub struct Collected {
     pub items: Vec<ItemStack>,
     pub xp: u32,
+    pub player_damage: f32,
 }
 
 struct Entity {
@@ -286,6 +312,69 @@ impl Entities {
         format!("mobs idle:{idle} wander:{wander} flee:{flee} chase:{chase} attack:{attack}")
     }
 
+    /// Distance to the nearest mob whose AABB the ray (origin,dir) enters within `reach`, else None.
+    /// Used to decide whether a left-click hits a mob (melee) or the block behind it (mining).
+    pub fn nearest_mob_hit(&self, origin: Vec3, dir: Vec3, reach: f32) -> Option<f32> {
+        let dir = dir.normalize_or_zero();
+        let mut best: Option<f32> = None;
+        for e in &self.list {
+            if let Kind::Mob(m) = e.kind {
+                let (w, h) = m.species.size();
+                let half = w * 0.5;
+                let min = e.pos - Vec3::new(half, 0.0, half);
+                let max = e.pos + Vec3::new(half, h, half);
+                if let Some(t) = ray_aabb(origin, dir, min, max) {
+                    if t <= reach && best.is_none_or(|b| t < b) {
+                        best = Some(t);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Melee: damage the nearest mob the ray hits within `reach`, with knockback + a hurt-flash.
+    /// Returns true if a mob was struck.
+    pub fn attack(&mut self, origin: Vec3, dir: Vec3, reach: f32, damage: f32) -> bool {
+        let dir = dir.normalize_or_zero();
+        let mut best: Option<(usize, f32)> = None;
+        for (i, e) in self.list.iter().enumerate() {
+            if let Kind::Mob(m) = e.kind {
+                let (w, h) = m.species.size();
+                let half = w * 0.5;
+                let min = e.pos - Vec3::new(half, 0.0, half);
+                let max = e.pos + Vec3::new(half, h, half);
+                if let Some(t) = ray_aabb(origin, dir, min, max) {
+                    if t <= reach && best.is_none_or(|(_, b)| t < b) {
+                        best = Some((i, t));
+                    }
+                }
+            }
+        }
+        let Some((i, _)) = best else { return false };
+        let e = &mut self.list[i];
+        if let Kind::Mob(m) = &mut e.kind {
+            m.health -= damage;
+            m.hurt = 0.35;
+        }
+        let mut kb = e.pos - origin;
+        kb.y = 0.0;
+        let kb = kb.normalize_or_zero();
+        e.vel.x += kb.x * KNOCKBACK;
+        e.vel.z += kb.z * KNOCKBACK;
+        e.vel.y = e.vel.y.max(0.0) + 3.0; // small pop-up
+        true
+    }
+
+    /// Debug: flash every mob red (headless hurt-flash verification screenshot).
+    pub fn flash_all(&mut self, amount: f32) {
+        for e in &mut self.list {
+            if let Kind::Mob(m) = &mut e.kind {
+                m.hurt = amount;
+            }
+        }
+    }
+
     fn next_seed(&mut self) -> u64 {
         self.spawn_counter = self.spawn_counter.wrapping_add(1);
         // Mix the counter so seeds are well-spread and never zero.
@@ -303,6 +392,7 @@ impl Entities {
                 health: species.max_health(),
                 hurt: 0.0,
                 ai: Ai::Wander,
+                atk_cd: 0.0,
             }),
             pos,
             vel: Vec3::ZERO,
@@ -358,11 +448,13 @@ impl Entities {
     /// of any item drops the player walked over this frame (to add to their inventory).
     pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Collected {
         let mut collected = Collected::default();
+        let mut deaths: Vec<(Vec3, Species)> = Vec::new();
         for e in &mut self.list {
             e.age += dt;
             match e.kind {
                 Kind::Mob(mut m) => {
-                    m.hurt = (m.hurt - dt).max(0.0); // hurt-flash decays (set by combat in M29)
+                    m.hurt = (m.hurt - dt).max(0.0); // hurt-flash decays after a hit
+                    m.atk_cd = (m.atk_cd - dt).max(0.0);
                     let (mw, mh) = m.species.size();
 
                     // Perception: distance to the player + (for hostiles) exact line-of-sight.
@@ -440,10 +532,24 @@ impl Entities {
 
                     e.vel.y -= GRAVITY * dt;
                     e.on_ground = collide_move(&mut e.pos, &mut e.vel, mw, mh, dt, &is_solid);
-                    if e.pos.y < FALL_OUT_Y || m.health <= 0.0 {
-                        e.dead = true;
+
+                    // Hostile in Attack range lands a contact hit on cooldown (caller applies it
+                    // through the player's armor).
+                    if m.ai == Ai::Attack && m.atk_cd <= 0.0 {
+                        let dmg = m.species.contact_damage();
+                        if dmg > 0.0 {
+                            collected.player_damage += dmg;
+                            m.atk_cd = MOB_ATTACK_COOLDOWN;
+                        }
                     }
-                    e.kind = Kind::Mob(m); // persist hurt decay + ai state
+
+                    if m.health <= 0.0 {
+                        e.dead = true;
+                        deaths.push((e.pos, m.species)); // killed → drops loot
+                    } else if e.pos.y < FALL_OUT_Y {
+                        e.dead = true; // fell out of the world → no loot
+                    }
+                    e.kind = Kind::Mob(m); // persist hurt/atk decay + ai state
                 }
                 Kind::Item(stack) => {
                     e.vel.y -= GRAVITY * dt;
@@ -489,6 +595,10 @@ impl Entities {
             }
         }
         self.list.retain(|e| !e.dead);
+        // Killed mobs drop experience (item loot waits on a food/material milestone).
+        for (pos, species) in deaths {
+            self.spawn_xp(pos + Vec3::new(0.0, 0.3, 0.0), species.xp_drop());
+        }
         collected
     }
 
@@ -601,6 +711,21 @@ fn line_of_sight(from: Vec3, to: Vec3, is_solid: &impl Fn(IVec3) -> bool) -> boo
         }
     }
     true
+}
+
+/// Slab-method ray vs AABB; returns the near intersection distance along `dir` (clamped to ≥0), or
+/// None if the ray misses. `dir` should be normalized so the result is in world units.
+fn ray_aabb(o: Vec3, d: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let inv = Vec3::new(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+    let t1 = (min - o) * inv;
+    let t2 = (max - o) * inv;
+    let tmin = t1.min(t2).max_element();
+    let tmax = t1.max(t2).min_element();
+    if tmax >= tmin.max(0.0) {
+        Some(tmin.max(0.0))
+    } else {
+        None
+    }
 }
 
 /// Move an AABB (width `w`, height `h`, feet at `pos`) by `vel*dt` with axis-separated voxel
@@ -799,5 +924,28 @@ mod tests {
         for s in [Species::Cow, Species::Pig, Species::Sheep, Species::Chicken] {
             assert!(!s.hostile());
         }
+    }
+
+    #[test]
+    fn ray_aabb_hit_and_miss() {
+        let (min, max) = (Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5));
+        // Straight at the box from 5 blocks away along +z.
+        let t = ray_aabb(Vec3::new(0.0, 0.5, -5.0), Vec3::new(0.0, 0.0, 1.0), min, max);
+        assert!(t.is_some_and(|t| (t - 4.5).abs() < 1e-3));
+        // Pointing away, and off to the side, both miss.
+        assert!(ray_aabb(Vec3::new(0.0, 0.5, -5.0), Vec3::new(0.0, 0.0, -1.0), min, max).is_none());
+        assert!(ray_aabb(Vec3::new(5.0, 0.5, -5.0), Vec3::new(0.0, 0.0, 1.0), min, max).is_none());
+    }
+
+    #[test]
+    fn attack_damages_then_kills_mob() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::ZERO, Species::Chicken); // 4 hp
+        let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
+        assert!(es.attack(o, d, 6.0, 2.0)); // 4 -> 2
+        assert!(es.attack(o, d, 6.0, 2.0)); // 2 -> 0
+        // The dead mob is culled on the next tick (and drops an XP orb in its place).
+        let _ = es.update(0.016, o, |_| false);
+        assert_eq!(es.ai_summary(), "mobs idle:0 wander:0 flee:0 chase:0 attack:0");
     }
 }

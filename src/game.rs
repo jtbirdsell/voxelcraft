@@ -786,6 +786,21 @@ impl Game {
         self.entities.ai_summary()
     }
 
+    /// Distance to the nearest mob the ray hits within `reach` (None = no mob in the way).
+    pub fn nearest_mob_hit(&self, origin: Vec3, dir: Vec3, reach: f32) -> Option<f32> {
+        self.entities.nearest_mob_hit(origin, dir, reach)
+    }
+
+    /// Melee the nearest mob the ray hits within `reach` (damage + knockback + hurt-flash).
+    pub fn attack_nearest(&mut self, origin: Vec3, dir: Vec3, reach: f32, damage: f32) -> bool {
+        self.entities.attack(origin, dir, reach, damage)
+    }
+
+    /// Debug: flash every mob (headless hurt-flash verification).
+    pub fn flash_mobs(&mut self, amount: f32) {
+        self.entities.flash_all(amount);
+    }
+
     /// Build one GPU mesh for all entities this frame (mobs + items), lit by the chunk pass.
     pub fn build_entity_mesh(&self, gpu: &Gpu, renderer: &ChunkRenderer) -> Option<GpuMesh> {
         let data = self.entities.build_mesh();

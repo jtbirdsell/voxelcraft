@@ -114,5 +114,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog = smoothstep(camera.params.x, camera.params.y, dist);
     rgb = mix(rgb, camera.fog_color.rgb, fog);
 
+    // Mob hurt-flash (M29): `shade.y` carries a small fractional hurt value (0..~0.35) on mob
+    // geometry. Terrain reuses `shade.y` as an integer tint_class (0/1/2), so only an in-between
+    // fractional value triggers the red flash — terrain is left byte-for-byte unchanged.
+    let flash = select(0.0, in.shade.y, in.shade.y > 0.0 && in.shade.y < 0.5);
+    rgb = mix(rgb, vec3<f32>(1.0, 0.18, 0.13), flash * 1.6);
+
     return vec4<f32>(rgb, 1.0);
 }

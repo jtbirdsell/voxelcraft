@@ -147,6 +147,12 @@ impl Player {
         self.health = (self.health - raw * (1.0 - reduction)).max(0.0);
     }
 
+    /// External hit (e.g. a mob's contact attack), reduced by the currently equipped armor.
+    pub fn take_hit(&mut self, raw: f32) {
+        let armor = self.armor_points;
+        self.apply_damage(raw, armor);
+    }
+
     /// Award experience points, rolling over into levels.
     pub fn add_xp(&mut self, amount: u32) {
         self.xp += amount as f32;
