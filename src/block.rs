@@ -220,8 +220,8 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         BROWN_MUSHROOM => [0.55, 0.40, 0.28],
         SUGAR_CANE => [0.55, 0.72, 0.40],
         PUMPKIN => {
-            if top {
-                [0.80, 0.52, 0.14]
+            if top || bottom {
+                [0.80, 0.52, 0.14] // mirror face_tile (top tile on both caps) for the GI invariant
             } else {
                 [0.78, 0.48, 0.12]
             }

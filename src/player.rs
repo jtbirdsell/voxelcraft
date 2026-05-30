@@ -432,7 +432,7 @@ impl Player {
             if landed && !self.on_ground && !in_water {
                 let fall = (self.air_max_y - self.position.y).max(0.0);
                 let dmg = (fall - SAFE_FALL).max(0.0);
-                self.apply_damage(dmg, self.armor_points);
+                self.apply_damage(dmg, 0); // base armor doesn't soften fall damage (matches Minecraft)
             }
             self.on_ground = landed;
             if self.on_ground || in_water {

@@ -238,8 +238,11 @@ impl Worldgen {
                             chunk.set(lx, ly, lz, id);
                         }
                     } else if wy < SEA_LEVEL {
-                        // Snowy biomes freeze the water surface into ice.
-                        let frozen = matches!(biome, Biome::Snowy) && wy == SEA_LEVEL - 1;
+                        // Cold columns freeze their water *surface* into ice. Keyed on temperature
+                        // directly — biome() classifies any water column as Ocean, never Snowy, so a
+                        // biome test here would be dead. Sampled only for the surface cell.
+                        let frozen = wy == SEA_LEVEL - 1
+                            && self.temperature.get_noise_2d(wx as f32, wz as f32) < -0.30;
                         let fluid = if frozen { block::ICE } else { block::WATER };
                         chunk.set(lx, ly, lz, fluid);
                     }
@@ -251,6 +254,7 @@ impl Worldgen {
         if cy1 > hmin && oy <= hmax + MAX_TREE_HEIGHT {
             self.place_trees(&mut chunk, origin);
             self.place_decoration(&mut chunk, origin);
+            self.place_sugar_cane(&mut chunk, origin);
         }
 
         chunk
@@ -258,6 +262,44 @@ impl Worldgen {
 
     /// Scatter cross-billboard plants (flowers, tall grass) on grass and cactus on sand. Deterministic
     /// and confined to each chunk's own columns (no cross-chunk writes), like `place_trees`.
+    /// Sugar cane: clumps of 1-2-tall stalks along water edges, stamped by world-y and clipped to
+    /// this chunk so a stalk crossing a vertical chunk boundary is completed by the chunk above
+    /// (each chunk writes only its own cells; fully world-derived, so it's seam-safe + deterministic).
+    fn place_sugar_cane(&self, chunk: &mut Chunk, origin: IVec3) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let wx = ox + lx as i32;
+                let wz = oz + lz as i32;
+                let ground = self.height(wx, wz);
+                if ground <= SEA_LEVEL || !self.near_water(wx, wz) {
+                    continue;
+                }
+                let surf = self.surface_top(self.biome(wx, wz, ground), ground);
+                if !matches!(surf, block::SAND | block::GRASS) {
+                    continue;
+                }
+                if (hash2(self.seed ^ 0x5A1A_CA4E, wx, wz) % 1000) as f32 / 1000.0 >= 0.22 {
+                    continue;
+                }
+                let tall = 1 + (hash2(self.seed ^ 0xCA4E, wx, wz) % 2) as i32; // 1 or 2
+                for k in 0..tall {
+                    let ly = ground + k - oy; // base sits in the air cell above the surface
+                    if ly < 0 {
+                        continue; // a lower segment belongs to the chunk below
+                    }
+                    if ly >= CHUNK_SIZE_I {
+                        break; // an upper segment belongs to the chunk above
+                    }
+                    if chunk.get(lx, ly as usize, lz) != block::AIR {
+                        break; // blocked by a tree/flower — stop the stalk here
+                    }
+                    chunk.set(lx, ly as usize, lz, block::SUGAR_CANE);
+                }
+            }
+        }
+    }
+
     /// True if any orthogonal neighbor column sits at/below sea level (i.e. holds water).
     fn near_water(&self, wx: i32, wz: i32) -> bool {
         self.height(wx + 1, wz) <= SEA_LEVEL
@@ -320,23 +362,6 @@ impl Worldgen {
                 };
                 if let Some(p) = plant {
                     chunk.set(lx, ly as usize, lz, p);
-                } else if matches!(below, block::SAND | block::GRASS | block::DIRT)
-                    && self.near_water(wx, wz)
-                {
-                    // Sugar cane grows in clumps along water edges, 1-2 tall.
-                    let rc = (hash2(self.seed ^ 0x5A1A_CA4E, wx, wz) % 1000) as f32 / 1000.0;
-                    if rc < 0.22 {
-                        chunk.set(lx, ly as usize, lz, block::SUGAR_CANE);
-                        let tall = 1 + (hash2(self.seed ^ 0xCA4E, wx, wz) % 2) as i32;
-                        for k in 1..tall {
-                            let yy = ly + k;
-                            if (0..CHUNK_SIZE_I).contains(&yy)
-                                && chunk.get(lx, yy as usize, lz) == block::AIR
-                            {
-                                chunk.set(lx, yy as usize, lz, block::SUGAR_CANE);
-                            }
-                        }
-                    }
                 }
             }
         }

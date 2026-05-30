@@ -130,7 +130,13 @@ impl App {
             };
             state.game.save(&level);
             let dir = persistence::save_dir();
-            if let Err(e) = persistence::save_state(&dir, &state.inventory, &state.game.furnaces_to_save()) {
+            // Fold any cursor-held stack back into slots so it isn't lost when saving mid-screen
+            // (P / window-close don't go through close_screen's return_held path).
+            let mut inv = state.inventory.clone();
+            if let Some(h) = inv.held.take() {
+                let _ = inv.insert(h);
+            }
+            if let Err(e) = persistence::save_state(&dir, &inv, &state.game.furnaces_to_save()) {
                 log::error!("failed to save state: {e}");
             }
         }

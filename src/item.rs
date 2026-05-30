@@ -393,6 +393,7 @@ const PALETTE: [BlockId; 9] = [
     block::WATER,
 ];
 
+#[derive(Clone)]
 pub struct Inventory {
     pub slots: [Option<ItemStack>; SLOTS],
     /// Cursor stack while an inventory screen is open (M15b).
@@ -635,6 +636,27 @@ mod tests {
     fn unknown_material_ids_rejected() {
         assert!(is_known(STICK) && is_known(IRON_INGOT) && is_known(GOLD_INGOT));
         assert!(!is_known(MATERIAL_BASE + 5), "undefined material id should be rejected");
+    }
+
+    #[test]
+    fn held_stack_folds_into_slots_on_save() {
+        // The save path clones the inventory and folds the cursor stack back into slots so it
+        // isn't lost when saving with a screen open.
+        let mut inv = Inventory::new(false);
+        inv.held = Some(ItemStack::new(item_of_block(block::STONE), 10));
+        let mut saved = inv.clone();
+        if let Some(h) = saved.held.take() {
+            let _ = saved.insert(h);
+        }
+        assert!(saved.held.is_none());
+        let total: u32 = saved
+            .slots
+            .iter()
+            .flatten()
+            .filter(|s| s.item == item_of_block(block::STONE))
+            .map(|s| s.count as u32)
+            .sum();
+        assert_eq!(total, 10, "held stack must survive into slots");
     }
 
     #[test]
