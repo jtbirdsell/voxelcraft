@@ -303,6 +303,13 @@ impl ApplicationHandler for App {
             );
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
             game.set_rtx_quality(64);
+            // Debug knob: VOXELCRAFT_WSMOOTH overrides the water depth-clarity smoothing radius
+            // in blocks (0 = single-tap, the pre-fix stepped look) for ad-hoc tuning/verification.
+            if let Ok(s) = std::env::var("VOXELCRAFT_WSMOOTH") {
+                if let Ok(r) = s.trim().parse::<f32>() {
+                    game.set_water_smooth(r);
+                }
+            }
             // A long, uniformly shallow pool that runs PAST the voxel volume's ~128-block edge, to
             // verify the volume-edge fade at a grazing angle (like the reported screenshot): near
             // water (inside the volume) shows the sandy bottom, and as the columns cross the volume
@@ -312,8 +319,21 @@ impl ApplicationHandler for App {
             // distance, the water's depth-driven clarity is consistent all the way out — no
             // rectangular seam where the old 256-block volume used to end.
             let environment = Environment::new(0.30);
-            let player = Player::new(Vec3::new(8.0, 96.0, 24.0), false);
-            let camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
+            // Default vista; VOXELCRAFT_CAM="x,y,z,yaw,pitch" overrides for ad-hoc view sweeps
+            // (water-seam debugging). Player is placed at the same spot so chunks load around it.
+            let (cam_xyz, cam_yaw, cam_pitch) = std::env::var("VOXELCRAFT_CAM")
+                .ok()
+                .and_then(|s| {
+                    let v: Vec<f32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                    if v.len() == 5 {
+                        Some((Vec3::new(v[0], v[1], v[2]), v[3], v[4]))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or((Vec3::new(8.0, 96.0, 24.0), -std::f32::consts::FRAC_PI_2, -0.30));
+            let player = Player::new(cam_xyz, false);
+            let camera = Camera::new(player.eye(), cam_yaw, cam_pitch);
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);

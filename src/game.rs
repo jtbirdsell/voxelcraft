@@ -633,6 +633,11 @@ impl Game {
         self.volume.set_gi_rays(rays);
     }
 
+    /// Water depth-clarity smoothing radius in blocks (debug knob; 0 disables smoothing).
+    pub fn set_water_smooth(&mut self, r: f32) {
+        self.volume.set_water_smooth(r);
+    }
+
     /// Write the edited chunks and the level header to disk.
     pub fn save(&self, level: &Level) {
         let dir = persistence::save_dir();

@@ -85,6 +85,44 @@ fn water_depth(p: vec3<f32>) -> f32 {
     return DEPTH_MAX; // no floor within range -> treat as deep
 }
 
+fn depth_to_clarity(depth: f32) -> f32 {
+    let t = exp(-WATER_EXTINCTION * depth);                 // per-channel surviving-floor fraction
+    return (t.r + t.g + t.b) / 3.0;
+}
+
+// Spatially low-pass the depth-driven clarity. The voxel floor is blocky, so a SINGLE straight-down
+// march gives a stepped depth field; Beer-Lambert is steepest in the first few blocks, so every
+// floor ledge becomes a visible clarity contour and a sudden underwater shelf snaps from clear
+// (shallow) to opaque (deep) — the hard "seam". Averaging a small disk of offset columns turns the
+// stepped depth into a smooth ramp, so shelves fade gradually while open water keeps its clarity.
+// Clarity (not raw depth) is averaged so the blend matches the nonlinear quantity actually shown.
+fn smoothed_clarity(p: vec3<f32>, side_face: bool, r: f32) -> f32 {
+    var center = water_depth(p);
+    if (side_face) {
+        center = max(center, 4.0); // thin vertical edges hold ~1 block; floor so they read as water
+    }
+    // Smoothing only reshapes the shallow->deep transition. Deep water is already saturated-opaque,
+    // and screen-filling deep water is the costly case (every tap marches the full DEPTH_MAX), so
+    // short-circuit it to a single march; the neighbour taps couldn't lift its clarity meaningfully.
+    if (r < 0.01 || center > 20.0) {
+        return depth_to_clarity(center);
+    }
+    let d = r * 0.707; // diagonal taps
+    var offs = array<vec2<f32>, 8>(
+        vec2<f32>(r, 0.0), vec2<f32>(-r, 0.0), vec2<f32>(0.0, r), vec2<f32>(0.0, -r),
+        vec2<f32>(d, d), vec2<f32>(-d, d), vec2<f32>(d, -d), vec2<f32>(-d, -d),
+    );
+    var sum = depth_to_clarity(center);
+    for (var i = 0; i < 8; i = i + 1) {
+        var depth = water_depth(p + vec3<f32>(offs[i].x, 0.0, offs[i].y));
+        if (side_face) {
+            depth = max(depth, 4.0);
+        }
+        sum = sum + depth_to_clarity(depth);
+    }
+    return sum / 9.0;
+}
+
 // 1 at/beyond the voxel volume's horizontal boundary, 0 well inside it. The downward depth march
 // only has floor data inside the 256-block volume, so out-of-volume water would hard-cut to opaque
 // along the volume's axis-aligned edge (a sharp right-angle seam). This drives a smooth fade.
@@ -122,12 +160,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // The same depth of water reads identically near and far, so the sheet is one coherent
     // surface. Top faces measure the column below them; thin vertical side faces would read ~1
     // block (too clear), so floor their depth so edges still read as water.
-    var depth = water_depth(in.world_pos);
-    if (base_n.y < 0.5) {
-        depth = max(depth, 4.0);
-    }
-    let transmit = exp(-WATER_EXTINCTION * depth);          // per-channel surviving-floor fraction
-    var clarity = (transmit.r + transmit.g + transmit.b) / 3.0;
+    var clarity = smoothed_clarity(in.world_pos, base_n.y < 0.5, volume.paramsf.w);
     // Out-of-volume water has no depth data and would hard-cut to opaque at the volume's edge; fade
     // it to deep/opaque approaching that edge so it reads as a smooth haze, not a right-angle seam.
     clarity = mix(clarity, 0.0, volume_edge_fade(in.world_pos));

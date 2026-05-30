@@ -54,6 +54,8 @@ pub struct VoxelVolume {
     gi_dist: f32,
     gi_strength: f32,
     sky_boost: f32,
+    /// Water depth-clarity smoothing kernel radius, in blocks (0 = single straight-down tap).
+    water_smooth: f32,
     upload_budget: usize,
     /// Reused padded scratch (row stride = 256 texels) for texture writes.
     scratch: Vec<u16>,
@@ -136,6 +138,7 @@ impl VoxelVolume {
             gi_dist: 22.0,
             gi_strength: 1.0,
             sky_boost: 0.55,
+            water_smooth: 3.0,
             upload_budget: 48,
             scratch: vec![0u16; SCRATCH_ROW * CHUNK_SIZE * CHUNK_SIZE],
         }
@@ -163,6 +166,11 @@ impl VoxelVolume {
     /// Set the hemisphere ray count used for GI (offscreen screenshots crank this up).
     pub fn set_gi_rays(&mut self, rays: u32) {
         self.gi_rays = rays;
+    }
+
+    /// Set the water depth-clarity smoothing radius in blocks (0 disables smoothing). Debug knob.
+    pub fn set_water_smooth(&mut self, r: f32) {
+        self.water_smooth = r;
     }
 
     /// Mark a chunk so it re-uploads (e.g. after an edit), if currently in the volume.
@@ -194,7 +202,7 @@ impl VoxelVolume {
                 self.gi_rays,
                 VOL_SIZE_Y as u32,
             ],
-            paramsf: [self.gi_dist, self.gi_strength, self.sky_boost, 0.0],
+            paramsf: [self.gi_dist, self.gi_strength, self.sky_boost, self.water_smooth],
         };
         gpu.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uni));
