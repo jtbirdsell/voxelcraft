@@ -166,6 +166,21 @@ impl Player {
         (self.air / MAX_AIR).clamp(0.0, 1.0)
     }
 
+    /// Hidden food saturation (for persistence).
+    pub fn saturation(&self) -> f32 {
+        self.saturation
+    }
+
+    /// Restore persisted survival state on load (M24); values are clamped to valid ranges.
+    pub fn restore_state(&mut self, health: f32, hunger: f32, air: f32, saturation: f32, xp: f32, level: u32) {
+        self.health = health.clamp(0.0, MAX_HEALTH);
+        self.hunger = hunger.clamp(0.0, MAX_HUNGER);
+        self.air = air.clamp(0.0, MAX_AIR);
+        self.saturation = saturation.clamp(0.0, MAX_SATURATION);
+        self.xp = xp.max(0.0);
+        self.level = level;
+    }
+
     pub fn is_dead(&self) -> bool {
         self.health <= 0.0
     }

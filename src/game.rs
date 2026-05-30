@@ -741,6 +741,42 @@ impl Game {
         self.furnaces.get(&pos)
     }
 
+    /// Snapshot non-empty furnaces for saving (M24 persistence).
+    pub fn furnaces_to_save(&self) -> Vec<persistence::FurnaceSave> {
+        self.furnaces
+            .iter()
+            .filter(|(_, f)| !f.is_empty())
+            .map(|(&pos, f)| persistence::FurnaceSave {
+                pos,
+                input: f.input,
+                fuel: f.fuel,
+                output: f.output,
+                burn_remaining: f.burn_remaining,
+                burn_max: f.burn_max,
+                cook_progress: f.cook_progress,
+                cook_item: f.cook_item,
+            })
+            .collect()
+    }
+
+    /// Restore furnaces loaded from disk into the live map (M24 persistence).
+    pub fn restore_furnaces(&mut self, saved: Vec<persistence::FurnaceSave>) {
+        for f in saved {
+            self.furnaces.insert(
+                f.pos,
+                FurnaceState {
+                    input: f.input,
+                    fuel: f.fuel,
+                    output: f.output,
+                    burn_remaining: f.burn_remaining,
+                    burn_max: f.burn_max,
+                    cook_progress: f.cook_progress,
+                    cook_item: f.cook_item,
+                },
+            );
+        }
+    }
+
     pub fn entity_count(&self) -> usize {
         self.entities.count()
     }

@@ -121,11 +121,17 @@ impl App {
                 pitch: state.camera.pitch,
                 time: state.environment.time,
                 flying: state.player.flying,
+                health: state.player.health,
+                hunger: state.player.hunger,
+                air: state.player.air,
+                saturation: state.player.saturation(),
+                xp: state.player.xp,
+                level: state.player.level,
             };
             state.game.save(&level);
             let dir = persistence::save_dir();
-            if let Err(e) = persistence::save_inventory(&dir, &state.inventory) {
-                log::error!("failed to save inventory: {e}");
+            if let Err(e) = persistence::save_state(&dir, &state.inventory, &state.game.furnaces_to_save()) {
+                log::error!("failed to save state: {e}");
             }
         }
     }
@@ -680,6 +686,64 @@ fn take_furnace_output(held: &mut Option<item::ItemStack>, output: &mut Option<i
     }
 }
 
+/// Headless self-test (`VOXELCRAFT_PERSIST_TEST=1`): round-trips a sample inventory + armor +
+/// furnace + survival state through the real on-disk save/load and logs whether it all survived.
+pub fn persist_selftest() {
+    let dir = std::env::temp_dir().join("voxelcraft_persist_selftest");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut inv = Inventory::new(false);
+    inv.slots[0] = Some(item::ItemStack::new(item::item_of_block(block::COBBLESTONE), 40));
+    let mut pick = item::ItemStack::new(item::DIAMOND_PICKAXE, 1);
+    pick.durability = 777;
+    inv.slots[5] = Some(pick);
+    inv.slots[36] = Some(item::ItemStack::new(item::armor_id(3, 0), 1)); // diamond helmet equipped
+    let furnaces = vec![persistence::FurnaceSave {
+        pos: IVec3::new(10, 64, -3),
+        input: Some(item::ItemStack::new(block::IRON_ORE, 4)),
+        fuel: Some(item::ItemStack::new(block::PLANKS, 2)),
+        output: Some(item::ItemStack::new(item::IRON_INGOT, 1)),
+        burn_remaining: 3.0,
+        burn_max: 9.0,
+        cook_progress: 2.0,
+        cook_item: block::IRON_ORE,
+    }];
+    let level = Level {
+        seed: 42,
+        spawn: [1.0, 2.0, 3.0],
+        yaw: 0.1,
+        pitch: 0.2,
+        time: 0.5,
+        flying: false,
+        health: 11.0,
+        hunger: 8.0,
+        air: 5.0,
+        saturation: 2.0,
+        xp: 7.0,
+        level: 3,
+    };
+    persistence::save_state(&dir, &inv, &furnaces).unwrap();
+    persistence::save_level(&dir, &level).unwrap();
+
+    let (linv, lf) = persistence::load_state(&dir, true);
+    let ll = persistence::load_level(&dir).unwrap();
+    let ok = linv.slots[5].map(|s| s.durability) == Some(777)
+        && linv.slots[36].map(|s| s.item) == Some(item::armor_id(3, 0))
+        && lf.len() == 1
+        && lf[0].output.map(|s| s.item) == Some(item::IRON_INGOT)
+        && (lf[0].cook_progress - 2.0).abs() < 1e-6
+        && lf[0].cook_item == block::IRON_ORE
+        && (ll.health - 11.0).abs() < 1e-6
+        && (ll.air - 5.0).abs() < 1e-6
+        && ll.level == 3;
+    let _ = std::fs::remove_dir_all(&dir);
+    if ok {
+        log::info!("PERSIST_TEST: PASS — inventory + armor + furnace + survival all round-tripped on disk");
+    } else {
+        log::error!("PERSIST_TEST: FAIL — state did not survive save/load");
+    }
+}
+
 /// On screen close, return any items left in the craft grid to the inventory (or drop them).
 fn return_craft_to_inventory(state: &mut State) {
     let pos = state.player.position + Vec3::new(0.0, 1.0, 0.0);
@@ -956,14 +1020,19 @@ impl ApplicationHandler for App {
             ),
         };
         let saved = persistence::load_chunks(&dir);
-        let inventory = persistence::load_inventory(&dir, flying);
+        let (inventory, saved_furnaces) = persistence::load_state(&dir, flying);
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
+        game.restore_furnaces(saved_furnaces);
         // A few mobs near spawn; they fall onto terrain as it streams in.
         for (dx, dz) in [(-3, -5), (3, -6), (6, 2), (-5, 3), (1, 7), (7, -2)] {
             game.spawn_mob(Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32));
         }
         let environment = Environment::new(time);
-        let player = Player::new(spawn, flying);
+        let mut player = Player::new(spawn, flying);
+        // Restore persisted survival state (from a loaded level; a new world keeps fresh defaults).
+        if let Some(l) = &level {
+            player.restore_state(l.health, l.hunger, l.air, l.saturation, l.xp, l.level);
+        }
         let camera = Camera::new(player.eye(), yaw, pitch);
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update(&camera, gpu.aspect());

@@ -40,6 +40,12 @@ fn main() {
     )
     .init();
 
+    // Headless persistence round-trip check (no window needed).
+    if std::env::var("VOXELCRAFT_PERSIST_TEST").is_ok() {
+        app::persist_selftest();
+        return;
+    }
+
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = app::App::new();

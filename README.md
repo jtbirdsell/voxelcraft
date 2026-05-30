@@ -85,8 +85,10 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   gauge and smelt-progress arrow; a `step_furnaces` tick consumes fuel (planks/logs/sticks) to smelt
   ores into **iron / gold ingots** (and cobblestone back to stone). Breaking a lit furnace spills it.
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
-  screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities, and
-  persistence.
+  screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities.
+- **Persistence**: edited chunks (LZ4), the level header, the full inventory + armor + tool durability,
+  **furnace contents** (mid-smelt state), and **player survival** (health/hunger/air/saturation/XP/level)
+  all round-trip across save/reload; older saves load forward-compatibly.
 - **Survival depth**: health + hunger with saturation-fueled regen and starvation; fall damage;
   **swimming** (buoyancy + paddle up) with an **air/drowning** bubble meter; **lava contact damage**;
   **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.
@@ -143,15 +145,17 @@ ray-traced shadows, AO, and global illumination rather than idling.
 Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and exits — used to
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
 `VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft|furnace`,
-`VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP bars).
+`VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
+armor bars). `VOXELCRAFT_PERSIST_TEST=1` round-trips a sample inventory/armor/furnace/survival state
+through the real save/load and logs the result (no window).
 
 ## Roadmap
 
 Done: the full engine, world generation, lighting, rendering, the block/item library, inventory,
 **progressive mining, tools + durability, crafting, furnace smelting, survival depth** (swimming/air,
-lava damage, sneak, XP & levels), **and armor**. Next up: persistence consolidation; then typed mobs +
-combat, structures (dungeons/villages), an RTX temporal denoiser, particles + audio, redstone, and
-additional dimensions.
+lava damage, sneak, XP & levels), **armor, and full save/reload persistence**. Next up: billboard
+decoration + world content, typed mobs + combat, structures (dungeons/villages), an RTX temporal
+denoiser, particles + audio, redstone, and additional dimensions.
 
 ## License
 
