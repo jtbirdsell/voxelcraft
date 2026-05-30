@@ -96,8 +96,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (volume.params.y >= 2u) {
         indirect = gather_gi(in.world_pos, n, in.clip_pos.xy);
     }
+    // Block-light + skylight (M14): skylight gates the sky-driven indirect so caves go dark, while
+    // block light (torch/glowstone/lava grid) adds warm local light that survives underground.
+    let sky = in.light.x;
+    let blockl = in.light.y;
+    indirect = indirect * sky;
+    let warm = blockl * vec3<f32>(1.15, 0.92, 0.55);
     // Lit albedo plus self-emission (lava glows regardless of sun/ambient).
-    var rgb = albedo * (indirect + vec3<f32>(direct)) + albedo * (emission * 2.5);
+    var rgb = albedo * (indirect + vec3<f32>(direct) + warm) + albedo * (emission * 2.5);
 
     let dist = length(in.world_pos - camera.cam_pos.xyz);
     let fog = smoothstep(camera.params.x, camera.params.y, dist);

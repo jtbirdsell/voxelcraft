@@ -26,6 +26,9 @@ fn local_index(x: usize, y: usize, z: usize) -> usize {
 #[derive(Clone)]
 pub struct Chunk {
     pub blocks: Vec<BlockId>,
+    /// Packed sky/block light. Reserved for gameplay light queries (mob spawning, M31); rendering
+    /// light is recomputed fresh in the mesher (`light::compute`), so this stays zero for now.
+    #[allow(dead_code)]
     pub light: Vec<u8>,
     pub solid_count: u32,
 }
@@ -45,21 +48,20 @@ impl Chunk {
         self.blocks[local_index(x, y, z)]
     }
 
-    #[inline]
-    pub fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
-        self.light[local_index(x, y, z)]
-    }
-
+    // Light accessors — reserved for gameplay light queries (M31). Allowed dead for now.
+    #[allow(dead_code)]
     #[inline]
     pub fn sky_light(&self, x: usize, y: usize, z: usize) -> u8 {
         self.light[local_index(x, y, z)] >> 4
     }
 
+    #[allow(dead_code)]
     #[inline]
     pub fn block_light(&self, x: usize, y: usize, z: usize) -> u8 {
         self.light[local_index(x, y, z)] & 0x0F
     }
 
+    #[allow(dead_code)]
     #[inline]
     pub fn set_light(&mut self, x: usize, y: usize, z: usize, sky: u8, block_l: u8) {
         self.light[local_index(x, y, z)] = (sky << 4) | (block_l & 0x0F);
@@ -147,6 +149,37 @@ pub struct Neighborhood {
 }
 
 impl Neighborhood {
+    /// Panic-safe block lookup: returns AIR for any voxel more than one axis out of the center
+    /// (diagonal/corner chunks aren't in the 6-face view). Single-axis-out uses the face neighbor.
+    #[inline]
+    pub fn block_or_air(&self, x: i32, y: i32, z: i32) -> BlockId {
+        const S: i32 = CHUNK_SIZE_I;
+        let oob = (x < 0 || x >= S) as i32 + (y < 0 || y >= S) as i32 + (z < 0 || z >= S) as i32;
+        if oob == 0 {
+            return self.center.get(x as usize, y as usize, z as usize);
+        }
+        if oob > 1 {
+            return block::AIR;
+        }
+        self.block_at(x, y, z)
+    }
+
+    /// True if the center or any of the 6 face neighbors contains a light-emitting block — the
+    /// cheap gate that lets the block-light flood skip the vast majority of (sourceless) chunks.
+    pub fn any_emitter(&self) -> bool {
+        let has = |c: &Option<Arc<Chunk>>| {
+            c.as_ref()
+                .is_some_and(|c| c.blocks.iter().any(|&b| block::light_emission(b) > 0))
+        };
+        self.center.blocks.iter().any(|&b| block::light_emission(b) > 0)
+            || has(&self.neg_x)
+            || has(&self.pos_x)
+            || has(&self.neg_y)
+            || has(&self.pos_y)
+            || has(&self.neg_z)
+            || has(&self.pos_z)
+    }
+
     #[inline]
     pub fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
         const S: i32 = CHUNK_SIZE_I;

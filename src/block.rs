@@ -122,6 +122,8 @@ pub fn light_emission(id: BlockId) -> u8 {
 
 /// Light lost when entering this block (1 for air/transparent; 15 fully blocks). Opaque solids stop
 /// light; fluids and (later) glass/foliage let it pass with light attenuation.
+/// Reserved for graduated light propagation (the BFS currently uses a uniform step).
+#[allow(dead_code)]
 pub fn light_attenuation(id: BlockId) -> u8 {
     match id {
         AIR => 1,
@@ -131,10 +133,18 @@ pub fn light_attenuation(id: BlockId) -> u8 {
     }
 }
 
-/// Whether light can pass through this block at all (used as the skylight vertical-stop test).
+/// Whether light can pass through this block at all. Reserved for the graduated light pass.
+#[allow(dead_code)]
 #[inline]
 pub fn transmits_light(id: BlockId) -> bool {
     !is_opaque(id)
+}
+
+/// Whether this block stops skylight descending. Solid terrain and roofs do; foliage (leaves) lets
+/// it through so tree canopies don't cast pitch-black ground shadows (binary skylight, M14).
+#[inline]
+pub fn blocks_skylight(id: BlockId) -> bool {
+    is_opaque(id) && id != LEAVES
 }
 
 /// Atlas tile ids (M13). Index = `row*ATLAS_COLS + col` into the procedural texture atlas. Kept

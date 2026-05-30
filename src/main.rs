@@ -15,6 +15,7 @@ mod font;
 mod frustum;
 mod game;
 mod gpu;
+mod light;
 mod mesher;
 mod overlay;
 mod persistence;
@@ -420,6 +421,23 @@ impl ApplicationHandler for App {
                     if v.len() == 4 {
                         game.set_block(&gpu, &renderer, IVec3::new(v[0], v[1], v[2]), v[3] as u16);
                     }
+                }
+            }
+
+            // Debug: VOXELCRAFT_ROOM carves a sealed underground room lit by one glowstone — the
+            // M14 "dark cave" verification (pair with VOXELCRAFT_CAM to look inside).
+            if let Ok(room) = std::env::var("VOXELCRAFT_ROOM") {
+                let (cx, cy, cz) = (8, 70, 24);
+                for y in cy - 2..=cy + 2 {
+                    for z in cz - 3..=cz + 3 {
+                        for x in cx - 1..=cx + 6 {
+                            game.set_block(&gpu, &renderer, IVec3::new(x, y, z), block::AIR);
+                        }
+                    }
+                }
+                // ROOM=2 leaves it unlit (sealed + sky=0 => pitch black); else light it.
+                if room != "2" {
+                    game.set_block(&gpu, &renderer, IVec3::new(cx + 5, cy, cz), block::GLOWSTONE);
                 }
             }
 

@@ -62,8 +62,10 @@ impl MeshData {
     }
 }
 
-/// A merged face: which block, and whether the face normal points toward +axis.
-type Mask = Option<(u16, bool)>;
+/// A merged face: which block, whether the face normal points toward +axis, and the packed light
+/// (sky<<4|block) of the air voxel just outside the face. Light is part of the key so greedy merge
+/// only fuses faces with identical lighting.
+type Mask = Option<(u16, bool, u8)>;
 
 fn normal_vec(axis: usize, positive: bool) -> [f32; 3] {
     let s = if positive { 1.0 } else { -1.0 };
@@ -87,6 +89,8 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
         return mesh;
     }
     const S: i32 = CHUNK_SIZE_I;
+    // Per-face light (sky + block) for this chunk, sampled at the air voxel just outside each face.
+    let lightgrid = crate::light::compute(neigh);
 
     for d in 0..3usize {
         let u = (d + 1) % 3;
@@ -109,9 +113,11 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     let a = neigh.block_at(x[0], x[1], x[2]);
                     let b = neigh.block_at(xb[0], xb[1], xb[2]);
                     mask[n] = if block::renders(a) && !block::occludes(a, b) {
-                        Some((a, true))
+                        // a's +face: lit by the air voxel on b's side.
+                        Some((a, true, crate::light::at(&lightgrid, xb[0], xb[1], xb[2])))
                     } else if block::renders(b) && !block::occludes(b, a) {
-                        Some((b, false))
+                        // b's -face: lit by the air voxel on a's side.
+                        Some((b, false, crate::light::at(&lightgrid, x[0], x[1], x[2])))
                     } else {
                         None
                     };
@@ -145,13 +151,13 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                         h += 1;
                     }
 
-                    let (blk, positive) = cell.unwrap();
+                    let (blk, positive, face_light) = cell.unwrap();
                     let geom = if block::is_water(blk) {
                         &mut mesh.water
                     } else {
                         &mut mesh.opaque
                     };
-                    emit_quad(geom, origin, d, u, v, i + 1, k, j, w, h, blk, positive);
+                    emit_quad(geom, origin, d, u, v, i + 1, k, j, w, h, blk, positive, face_light);
 
                     // Clear the consumed region.
                     for jj in 0..h {
@@ -184,6 +190,7 @@ fn emit_quad(
     h: i32,
     block_id: u16,
     positive: bool,
+    face_light: u8,
 ) {
     let mut base = [0i32; 3];
     base[d] = d_plane;
@@ -221,6 +228,10 @@ fn emit_quad(
         [w as f32, h as f32],
         [0.0, h as f32],
     ];
+    let light = [
+        (face_light >> 4) as f32 / 15.0,
+        (face_light & 0x0F) as f32 / 15.0,
+    ];
     let v = geom.vertices.len() as u32;
     for (p, uv) in [p0, p1, p2, p3].iter().zip(uvs.iter()) {
         geom.vertices.push(Vertex {
@@ -228,7 +239,7 @@ fn emit_quad(
             normal,
             uv: *uv,
             tile,
-            light: [1.0, 1.0],
+            light,
             shade,
         });
     }
