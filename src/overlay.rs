@@ -58,6 +58,7 @@ impl Hotbar {
                 block::LEAVES,
                 block::SNOW,
                 block::WATER,
+                block::LAVA,
                 block::COAL_ORE,
             ],
             selected: 0,

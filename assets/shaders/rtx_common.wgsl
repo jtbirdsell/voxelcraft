@@ -24,12 +24,12 @@ struct Volume {
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(2) color: vec4<f32>, // rgb albedo, a = self-emission strength
 };
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) color: vec4<f32>,
     @location(2) world_pos: vec3<f32>,
 };
 
@@ -76,8 +76,18 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 8u:  { return vec3<f32>(0.92, 0.94, 0.97); } // snow
         case 9u:  { return vec3<f32>(0.28, 0.28, 0.30); } // coal ore
         case 10u: { return vec3<f32>(0.60, 0.52, 0.45); } // iron ore
+        case 11u: { return vec3<f32>(1.0, 0.42, 0.06); }  // lava
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
+}
+
+// Emissive radiance leaving a voxel (0 for ordinary blocks). Lava glows; GI and reflection rays
+// that hit it pick up this light, so a lava pool illuminates and is mirrored by its surroundings.
+fn voxel_emission(id: u32) -> vec3<f32> {
+    if (id == 11u) {
+        return vec3<f32>(1.5, 0.5, 0.1); // warm lava glow
+    }
+    return vec3<f32>(0.0);
 }
 
 fn boundary(o: f32, d: f32, v: i32) -> f32 {

@@ -2,9 +2,10 @@
 
 A Minecraft-equivalent voxel sandbox written from scratch in **Rust + wgpu**, tuned for an
 RTX 4090 / i9-14900K. Infinite procedurally-generated world, multithreaded chunk streaming,
-break/place building, day/night, transparent water, world save/load, and **ray-traced lighting**
-— sun shadows, ambient occlusion, one-bounce colored global illumination, and water reflections —
-computed against the actual voxel geometry on the GPU.
+break/place building, day/night, transparent water, **flowing fluids**, world save/load, and
+**ray-traced lighting** — sun shadows, ambient occlusion, one-bounce colored global illumination,
+water reflections, and **emissive lava** that lights the scene — computed against the actual voxel
+geometry on the GPU.
 
 ## Run
 
@@ -60,6 +61,11 @@ The world saves automatically on quit to `saves/world/`.
   same voxel volume (lit material on a hit, sky + a sun glint on a miss) and blends it in by a
   Schlick-Fresnel term, so water mirrors the shoreline and sky at grazing angles and shows its own
   tint head-on. The DDA tracer now lives in one shared `rtx_common.wgsl` used by both shaders.
+- **M9** — **flowing fluids + emissive lava**: placed water/lava are simulated by a cellular tick
+  (a bounded frontier flood that falls, then spreads with diminishing reach, and cascades over
+  ledges). Lava is **emissive** — the per-vertex color carries an emission channel, and GI /
+  reflection rays treat a lava hit as a light source, so a lava lake glows and washes nearby blocks
+  in orange indirect light (and reflects in water).
 
 Performance: **~144 fps (vsync-capped)** at render distance 12 with shadows on — the GPU has
 large headroom, which GI and reflections spend on per-pixel ray tracing.
@@ -75,7 +81,7 @@ src/
   worldgen.rs       noise terrain, biomes, caves, ores, trees (Arc-shared across workers)
   mesher.rs         binary greedy mesher → opaque + translucent geometry
   worker.rs         crossbeam worker pool (generate + mesh off the main thread)
-  game.rs           streaming manager: gen/mesh budgets, frustum cull, edits, saves
+  game.rs           streaming manager: gen/mesh budgets, frustum cull, edits, fluid tick, saves
   voxel_volume.rs   GPU voxel material volume (block ids) for ray-traced shadows + AO/GI
   raycast.rs        Amanatides–Woo voxel DDA (block targeting)
   player.rs         AABB collision, gravity/jump/fly, input
@@ -93,7 +99,6 @@ GPU is spent on ray-traced shadows, ambient occlusion and global illumination ra
 
 ## Possible next steps
 
-Flowing fluids (with emissive lava lighting the scene through the GI volume), survival
-(health/hunger, mobs, crafting), texture atlas, GPU-driven indirect rendering for much larger
-render distances, and a temporal/spatial denoiser so interactive GI can use fewer rays per pixel
-without noise.
+Survival (health/hunger/fall damage), mobs, crafting; a texture atlas; GPU-driven indirect
+rendering for much larger render distances; and a temporal/spatial denoiser so interactive GI can
+use fewer rays per pixel without noise.

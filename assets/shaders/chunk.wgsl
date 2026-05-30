@@ -60,8 +60,9 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
             if (ndl_h > 0.0) {
                 vis = sun_visibility(h.pos, h.normal, gi_dist);
             }
-            // Bounced radiance leaving the hit surface: its own ambient + direct sun term.
-            accum += alb * (ambient + sun_intensity * ndl_h * vis);
+            // Bounced radiance leaving the hit surface: its own ambient + direct sun term, plus any
+            // self-emission (lava) so emissive blocks cast colored indirect light.
+            accum += alb * (ambient + sun_intensity * ndl_h * vis) + voxel_emission(h.id);
         } else {
             accum += sky;
         }
@@ -72,6 +73,8 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
+    let albedo = in.color.rgb;
+    let emission = in.color.a;
     let sun = normalize(camera.sun_dir.xyz);
     let ambient = camera.params.z;
     let sun_intensity = camera.params.w;
@@ -87,7 +90,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (volume.params.y >= 2u) {
         indirect = gather_gi(in.world_pos, n, in.clip_pos.xy);
     }
-    var rgb = in.color * (indirect + vec3<f32>(direct));
+    // Lit albedo plus self-emission (lava glows regardless of sun/ambient).
+    var rgb = albedo * (indirect + vec3<f32>(direct)) + albedo * (emission * 2.5);
 
     let dist = length(in.world_pos - camera.cam_pos.xyz);
     let fog = smoothstep(camera.params.x, camera.params.y, dist);

@@ -14,11 +14,24 @@ pub const WATER: BlockId = 7;
 pub const SNOW: BlockId = 8;
 pub const COAL_ORE: BlockId = 9;
 pub const IRON_ORE: BlockId = 10;
+pub const LAVA: BlockId = 11;
 
-/// A block participates in collision (water is passable).
+/// A block participates in collision (fluids are passable).
 #[inline]
 pub fn is_solid(id: BlockId) -> bool {
-    id != AIR && id != WATER
+    id != AIR && id != WATER && id != LAVA
+}
+
+/// Water or lava — simulated by the flowing-fluid tick and passable to the player.
+#[inline]
+pub fn is_fluid(id: BlockId) -> bool {
+    id == WATER || id == LAVA
+}
+
+/// A fluid can flow into this cell (only empty air, so floods are monotonic and terminate).
+#[inline]
+pub fn is_replaceable(id: BlockId) -> bool {
+    id == AIR
 }
 
 /// A block fully hides the touching face of an adjacent opaque block.
@@ -83,6 +96,16 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         SNOW => [0.92, 0.94, 0.97],
         COAL_ORE => [0.28, 0.28, 0.30],
         IRON_ORE => [0.60, 0.52, 0.45],
+        LAVA => [1.0, 0.42, 0.06],
         _ => [1.0, 0.0, 1.0],
+    }
+}
+
+/// Self-emission strength per block (0 = unlit material). Lava glows; the lit shaders add this as
+/// extra outgoing radiance, and GI/reflection rays treat an emissive hit as a light source.
+pub fn emission(id: BlockId) -> f32 {
+    match id {
+        LAVA => 1.0,
+        _ => 0.0,
     }
 }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use glam::{IVec3, Vec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::block::{self, BlockId};
 use crate::frustum::Frustum;
 use crate::gpu::Gpu;
 use crate::mesher::{self, MeshData};
@@ -19,6 +20,13 @@ use crate::voxel_volume::VoxelVolume;
 use crate::worker::{Job, JobResult, WorkerPool};
 use crate::worldgen::Worldgen;
 use crate::world::{self, Chunk, World, CHUNK_SIZE_I, WORLD_HEIGHT_CHUNKS};
+
+/// Fluid simulation cadence and per-tick work cap, plus how far each fluid spreads horizontally
+/// from where it last fell (water reaches further than the more sluggish lava).
+const FLUID_INTERVAL: f32 = 0.18;
+const FLUID_BUDGET: usize = 96;
+const WATER_SPREAD: u8 = 7;
+const LAVA_SPREAD: u8 = 3;
 
 pub struct Game {
     world: World,
@@ -45,6 +53,12 @@ pub struct Game {
     max_inflight_gen: usize,
     max_inflight_mesh: usize,
     upload_budget: usize,
+
+    /// Active fluid cells (kind + remaining horizontal reach) and a frontier of cells still to
+    /// evaluate for spreading. Flood is monotonic (fluids only enter air), so it terminates.
+    fluid: FxHashMap<IVec3, (BlockId, u8)>,
+    fluid_frontier: VecDeque<IVec3>,
+    fluid_timer: f32,
 }
 
 impl Game {
@@ -99,6 +113,9 @@ impl Game {
             max_inflight_gen: 1024,
             max_inflight_mesh: 512,
             upload_budget: 64,
+            fluid: FxHashMap::default(),
+            fluid_frontier: VecDeque::new(),
+            fluid_timer: 0.0,
         }
     }
 
@@ -130,7 +147,7 @@ impl Game {
         true
     }
 
-    pub fn update(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, camera_pos: Vec3) {
+    pub fn update(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, camera_pos: Vec3, dt: f32) {
         self.center = Self::center_of(camera_pos);
         let r = self.render_distance;
 
@@ -248,7 +265,27 @@ impl Game {
         self.pending_gen
             .retain(|pos| (pos.x - center.x).abs() <= keep + 1 && (pos.z - center.z).abs() <= keep + 1);
 
-        // Feed the GPU voxel volume (ray-traced shadows) around the player.
+        // Drop fluid cells whose chunk just unloaded, so the fluid map and frontier can't grow
+        // without bound as the player roams (unsimulated fluid blocks are already persisted).
+        let loaded = &self.world.chunks;
+        self.fluid
+            .retain(|pos, _| loaded.contains_key(&world::chunk_of(*pos)));
+        self.fluid_frontier
+            .retain(|pos| loaded.contains_key(&world::chunk_of(*pos)));
+
+        // Advance flowing fluids at a fixed cadence (bounded steps per frame).
+        self.fluid_timer += dt;
+        let mut steps = 0;
+        while self.fluid_timer >= FLUID_INTERVAL && steps < 4 {
+            self.fluid_timer -= FLUID_INTERVAL;
+            steps += 1;
+            if !self.step_fluids(gpu, renderer) {
+                self.fluid_timer = 0.0;
+                break;
+            }
+        }
+
+        // Feed the GPU voxel volume (ray-traced lighting) around the player.
         self.volume.update(gpu, &self.world, self.center);
     }
 
@@ -347,6 +384,11 @@ impl Game {
         }
         self.volume.invalidate(cpos);
 
+        // A non-fluid placement (including breaking to air) clears any fluid record here.
+        if !block::is_fluid(id) {
+            self.fluid.remove(&wp);
+        }
+
         // Edited chunk plus any neighbor sharing the touched boundary must re-mesh.
         let mut affected = vec![cpos];
         if lx == 0 {
@@ -383,6 +425,150 @@ impl Game {
                 Some(renderer.upload_mesh(gpu, &data))
             };
             self.meshes.insert(pos, gpu_mesh);
+        }
+    }
+
+    /// Register a player-placed fluid block as a flow source (the block itself is already set).
+    pub fn add_fluid_source(&mut self, pos: IVec3, kind: BlockId) {
+        self.fluid.insert(pos, (kind, 0));
+        self.fluid_frontier.push_back(pos);
+    }
+
+    /// Run the fluid sim to (near) a resting state — used for headless screenshots.
+    pub fn settle_fluids(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, max_steps: usize) {
+        for _ in 0..max_steps {
+            if !self.step_fluids(gpu, renderer) {
+                break;
+            }
+        }
+    }
+
+    /// True if `p` is in a loaded chunk and currently empty air (so a fluid may flow into it).
+    fn is_air_loaded(&self, p: IVec3) -> bool {
+        let cpos = world::chunk_of(p);
+        match self.world.get(cpos) {
+            Some(chunk) => {
+                let o = world::chunk_origin(cpos);
+                chunk.get((p.x - o.x) as usize, (p.y - o.y) as usize, (p.z - o.z) as usize)
+                    == block::AIR
+            }
+            None => false,
+        }
+    }
+
+    /// One fluid step: drain a budget of frontier cells, flowing each straight down, or — if
+    /// blocked below — outward to air neighbors with reduced reach. The flood only enters air, so
+    /// it is monotonic and terminates. Returns true while frontier work remains.
+    fn step_fluids(&mut self, gpu: &Gpu, renderer: &ChunkRenderer) -> bool {
+        if self.fluid_frontier.is_empty() {
+            return false;
+        }
+        let mut changes: Vec<(IVec3, BlockId)> = Vec::new();
+        let mut created: Vec<IVec3> = Vec::new();
+        let mut budget = FLUID_BUDGET;
+        while budget > 0 {
+            let Some(pos) = self.fluid_frontier.pop_front() else {
+                break;
+            };
+            let Some(&(kind, level)) = self.fluid.get(&pos) else {
+                continue;
+            };
+            budget -= 1;
+            // The player may have removed this fluid since it was queued.
+            if self.block_at(pos) != kind {
+                self.fluid.remove(&pos);
+                continue;
+            }
+            let below = pos - IVec3::Y;
+            if self.is_air_loaded(below) {
+                // Fall straight down; landing resets horizontal reach to full.
+                self.fluid.insert(below, (kind, 0));
+                changes.push((below, kind));
+                created.push(below);
+            } else {
+                let max_spread = if kind == block::LAVA { LAVA_SPREAD } else { WATER_SPREAD };
+                if level < max_spread {
+                    for d in [IVec3::X, -IVec3::X, IVec3::Z, -IVec3::Z] {
+                        let n = pos + d;
+                        if !self.fluid.contains_key(&n) && self.is_air_loaded(n) {
+                            self.fluid.insert(n, (kind, level + 1));
+                            changes.push((n, kind));
+                            created.push(n);
+                        }
+                    }
+                }
+            }
+        }
+        for p in created {
+            self.fluid_frontier.push_back(p);
+        }
+        if !changes.is_empty() {
+            self.apply_fluid_changes(gpu, renderer, &changes);
+        }
+        !self.fluid_frontier.is_empty()
+    }
+
+    /// Apply a batch of fluid block writes, then re-mesh each touched chunk exactly once (far
+    /// cheaper than routing every cell through `set_block`, which re-meshes per call).
+    fn apply_fluid_changes(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        changes: &[(IVec3, BlockId)],
+    ) {
+        let mut mutated: FxHashSet<IVec3> = FxHashSet::default();
+        let mut affected: FxHashSet<IVec3> = FxHashSet::default();
+        for &(wp, id) in changes {
+            let cpos = world::chunk_of(wp);
+            let origin = world::chunk_origin(cpos);
+            let (lx, ly, lz) = (
+                (wp.x - origin.x) as usize,
+                (wp.y - origin.y) as usize,
+                (wp.z - origin.z) as usize,
+            );
+            let Some(arc) = self.world.chunks.get_mut(&cpos) else {
+                continue;
+            };
+            let chunk = Arc::make_mut(arc);
+            if chunk.get(lx, ly, lz) == id {
+                continue;
+            }
+            chunk.set(lx, ly, lz, id);
+            mutated.insert(cpos);
+            affected.insert(cpos);
+            if lx == 0 {
+                affected.insert(cpos - IVec3::X);
+            } else if lx == 31 {
+                affected.insert(cpos + IVec3::X);
+            }
+            if ly == 0 {
+                affected.insert(cpos - IVec3::Y);
+            } else if ly == 31 {
+                affected.insert(cpos + IVec3::Y);
+            }
+            if lz == 0 {
+                affected.insert(cpos - IVec3::Z);
+            } else if lz == 31 {
+                affected.insert(cpos + IVec3::Z);
+            }
+        }
+        for &cpos in &mutated {
+            if let Some(arc) = self.world.chunks.get(&cpos) {
+                self.saved.insert(cpos, arc.clone());
+            }
+            self.volume.invalidate(cpos);
+        }
+        if !mutated.is_empty() {
+            self.dirty = true;
+        }
+        for cpos in affected {
+            *self.versions.entry(cpos).or_insert(0) += 1;
+            self.pending_mesh.remove(&cpos);
+            // Only re-mesh chunks that are still loaded; an unloaded boundary neighbor re-meshes
+            // with correct neighbors when streaming brings it back.
+            if self.world.is_generated(cpos) {
+                self.remesh_sync(gpu, renderer, cpos);
+            }
         }
     }
 

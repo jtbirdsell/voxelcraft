@@ -24,7 +24,7 @@ fn reflection_color(world_pos: vec3<f32>, n: vec3<f32>, incident: vec3<f32>) -> 
         if (ndl > 0.0) {
             vis = sun_visibility(h.pos, h.normal, 64.0);
         }
-        return voxel_color(h.id) * (ambient + sun_intensity * ndl * vis);
+        return voxel_color(h.id) * (ambient + sun_intensity * ndl * vis) + voxel_emission(h.id);
     }
     return sky_radiance(refl, sun, sun_intensity);
 }
@@ -42,7 +42,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (volume.params.y >= 1u) {
         shadow = sun_visibility(in.world_pos, n, 96.0);
     }
-    let base = in.color * (ambient + sun_intensity * ndl * shadow);
+    let base = in.color.rgb * (ambient + sun_intensity * ndl * shadow);
 
     let view_dir = normalize(camera.cam_pos.xyz - in.world_pos); // surface -> camera
     var rgb = base;
