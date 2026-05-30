@@ -400,12 +400,15 @@ impl Game {
         self.volume.prime(gpu, &self.world, pc);
     }
 
-    pub fn toggle_rtx(&mut self) {
-        self.volume.toggle_rtx();
+    /// Cycle ray-traced lighting: off -> shadows -> shadows+GI. Returns the new mode name.
+    pub fn cycle_rtx(&mut self) -> &'static str {
+        self.volume.cycle_rtx();
+        self.volume.rtx_mode_name()
     }
 
-    pub fn rtx_enabled(&self) -> bool {
-        self.volume.rtx_enabled()
+    /// Raise the GI hemisphere ray count (offscreen screenshots want many more than interactive).
+    pub fn set_rtx_quality(&mut self, rays: u32) {
+        self.volume.set_gi_rays(rays);
     }
 
     pub fn edited_chunk_count(&self) -> usize {

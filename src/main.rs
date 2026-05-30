@@ -138,8 +138,8 @@ impl App {
                 state.player.velocity = Vec3::ZERO;
             }
             KeyCode::KeyR if pressed && !repeat => {
-                state.game.toggle_rtx();
-                log::info!("RTX shadows: {}", state.game.rtx_enabled());
+                let mode = state.game.cycle_rtx();
+                log::info!("RTX lighting: {mode}");
             }
             KeyCode::Digit1 => maybe_select(state, pressed, 0),
             KeyCode::Digit2 => maybe_select(state, pressed, 1),
@@ -270,24 +270,41 @@ impl ApplicationHandler for App {
                 RENDER_DISTANCE,
                 FxHashMap::default(),
             );
+            // Offscreen render is one-shot, so trace many more GI rays for a clean image.
+            game.set_rtx_quality(64);
             let environment = Environment::new(0.34);
-            let player = Player::new(Vec3::new(8.0, 96.0, 24.0), true);
-            let camera = Camera::new(player.eye(), -std::f32::consts::FRAC_PI_2, -0.30);
+            let player = Player::new(Vec3::new(21.0, 98.5, 19.5), true);
+            let camera = Camera::new(player.eye(), std::f32::consts::PI, -0.12);
             let mut camera_uniform = CameraUniform::new();
 
             game.load_all_blocking(&gpu, &renderer, player.position);
-            for y in 80..101 {
-                let id = if y % 2 == 0 { block::WOOD } else { block::STONE };
-                game.set_block(&gpu, &renderer, IVec3::new(4, y, 8), id);
-            }
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    game.set_block(&gpu, &renderer, IVec3::new(4 + dx, 101, 8 + dz), block::SNOW);
+
+            // A Cornell-box-style room to showcase ray-traced AO + colored global illumination.
+            // White (snow) floor and one white wall catch color bleeding from a sun-lit green
+            // (leaves) back wall and a warm (sand) side wall; the open top lets the sun pour in
+            // and the open front (+X) faces the camera. A white pillar shows contact AO and
+            // picks up tint from both coloured walls. Leaves are used for the green wall because
+            // their rendered face color and the GI bounce color both read green (grass sides are
+            // tan), keeping the rendered wall and the light it bleeds consistent.
+            for x in 9..=14 {
+                for z in 16..=22 {
+                    game.set_block(&gpu, &renderer, IVec3::new(x, 96, z), block::SNOW); // floor
                 }
             }
-            let highlight = Some(IVec3::new(4, 101, 8));
+            for y in 97..=101 {
+                for z in 16..=22 {
+                    game.set_block(&gpu, &renderer, IVec3::new(9, y, z), block::LEAVES); // back wall (green)
+                }
+                for x in 9..=14 {
+                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 16), block::SAND); // side wall (warm)
+                    game.set_block(&gpu, &renderer, IVec3::new(x, y, 22), block::SNOW); // side wall (white)
+                }
+            }
+            game.set_block(&gpu, &renderer, IVec3::new(12, 97, 19), block::SNOW); // pillar
+            game.set_block(&gpu, &renderer, IVec3::new(12, 98, 19), block::SNOW);
+            let highlight = Some(IVec3::new(12, 98, 19));
 
-            // Populate the voxel volume so ray-traced shadows appear in the screenshot.
+            // Populate the voxel volume so ray-traced lighting appears in the screenshot.
             game.prime_volume(&gpu, player.position);
 
             camera_uniform.update(&camera, gpu.aspect());

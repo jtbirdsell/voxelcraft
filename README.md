@@ -2,8 +2,9 @@
 
 A Minecraft-equivalent voxel sandbox written from scratch in **Rust + wgpu**, tuned for an
 RTX 4090 / i9-14900K. Infinite procedurally-generated world, multithreaded chunk streaming,
-break/place building, day/night, transparent water, world save/load, and **ray-traced sun
-shadows** computed against the actual voxel geometry on the GPU.
+break/place building, day/night, transparent water, world save/load, and **ray-traced lighting**
+— sun shadows, ambient occlusion, and one-bounce colored global illumination — computed against
+the actual voxel geometry on the GPU.
 
 ## Run
 
@@ -31,7 +32,7 @@ compiles faster but the worldgen/meshing run unoptimized, so use `--release` to 
 | **Left-click** | Break block |
 | **Right-click** | Place block |
 | **1–9 / scroll** | Select hotbar block |
-| **R** | Toggle ray-traced shadows |
+| **R** | Cycle ray-traced lighting: off → shadows → shadows + GI |
 | **P** | Save world |
 | **Esc** | Quit |
 
@@ -48,11 +49,16 @@ The world saves automatically on quit to `saves/world/`.
   **break/place** with incremental re-mesh, block highlight, hotbar + crosshair HUD.
 - **M5** — **day/night** cycle, dynamic sky + distance **fog**, translucent **water**, world
   **save/load** (LZ4-packed edited chunks; unedited chunks regenerate from the seed).
-- **M6** — **ray-traced sun shadows**: a GPU-resident 256³ toroidal voxel occupancy volume that
-  follows the player; the fragment shader DDA-marches a shadow ray toward the sun.
+- **M6** — **ray-traced sun shadows**: a GPU-resident 256³ toroidal voxel volume that follows the
+  player; the fragment shader DDA-marches a shadow ray toward the sun.
+- **M7** — **ray-traced ambient occlusion + one-bounce global illumination**: the volume now stores
+  block ids (not just occupancy), so cosine-weighted hemisphere rays gather sky radiance on a miss
+  and sun-lit *material color* on a hit — soft contact AO and colored light bleeding between blocks.
+  `R` cycles off → shadows → shadows + GI; interactive traces a few rays per pixel, the headless
+  screenshot path traces 64 for a clean image.
 
 Performance: **~144 fps (vsync-capped)** at render distance 12 with shadows on — the GPU has
-large headroom.
+large headroom, which GI spends on per-pixel hemisphere ray tracing.
 
 ## Architecture
 
@@ -66,7 +72,7 @@ src/
   mesher.rs         binary greedy mesher → opaque + translucent geometry
   worker.rs         crossbeam worker pool (generate + mesh off the main thread)
   game.rs           streaming manager: gen/mesh budgets, frustum cull, edits, saves
-  voxel_volume.rs   GPU voxel occupancy volume for ray-traced shadows
+  voxel_volume.rs   GPU voxel material volume (block ids) for ray-traced shadows + AO/GI
   raycast.rs        Amanatides–Woo voxel DDA (block targeting)
   player.rs         AABB collision, gravity/jump/fly, input
   frustum.rs        Gribb–Hartmann frustum culling
@@ -79,10 +85,10 @@ assets/shaders/     chunk / water / line / ui WGSL
 
 **Hardware-driven choices:** worker threads keep all cores busy on generation/meshing while the
 render thread stays light; greedy meshing + per-chunk draws keep geometry cheap; the over-powered
-GPU is spent on ray-traced shadows rather than sitting idle.
+GPU is spent on ray-traced shadows, ambient occlusion and global illumination rather than idling.
 
 ## Possible next steps
 
-Flowing fluids, survival (health/hunger, mobs, crafting), texture atlas, GPU-driven indirect
-rendering for much larger render distances, and extending the voxel ray tracer from shadows to
-full GI / reflections.
+Ray-traced water reflections, flowing fluids, survival (health/hunger, mobs, crafting), texture
+atlas, GPU-driven indirect rendering for much larger render distances, and a temporal/spatial
+denoiser so interactive GI can use fewer rays per pixel without noise.
