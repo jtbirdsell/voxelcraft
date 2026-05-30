@@ -14,9 +14,11 @@ use crate::block::{self, BlockId};
 use crate::entity::Entities;
 use crate::frustum::Frustum;
 use crate::gpu::Gpu;
+use crate::item::{self, ItemStack};
 use crate::mesher::{self, MeshData};
 use crate::renderer::{ChunkRenderer, GpuMesh};
 use crate::persistence::{self, Level};
+use crate::smelting;
 use crate::voxel_volume::VoxelVolume;
 use crate::worker::{Job, JobResult, WorkerPool};
 use crate::worldgen::Worldgen;
@@ -28,6 +30,85 @@ const FLUID_INTERVAL: f32 = 0.18;
 const FLUID_BUDGET: usize = 96;
 const WATER_SPREAD: u8 = 7;
 const LAVA_SPREAD: u8 = 3;
+
+/// One furnace's contents + burn state (M21). Lives in `Game::furnaces`, keyed by block position;
+/// the `step_furnaces` tick consumes fuel to smelt `input` into `output`. Persistence: deferred to
+/// M24 (save consolidation) — furnace contents are in-memory only for now.
+#[derive(Default, Clone)]
+pub struct FurnaceState {
+    pub input: Option<ItemStack>,
+    pub fuel: Option<ItemStack>,
+    pub output: Option<ItemStack>,
+    /// Seconds of fuel still burning, and the full burn time of that fuel unit (for the flame gauge).
+    pub burn_remaining: f32,
+    pub burn_max: f32,
+    /// Seconds cooked toward `SMELT_TIME` for the current input.
+    pub cook_progress: f32,
+}
+
+impl FurnaceState {
+    /// Whatever the furnace currently holds, for spilling when the block is broken.
+    fn contents(&self) -> impl Iterator<Item = ItemStack> {
+        [self.input, self.fuel, self.output].into_iter().flatten()
+    }
+}
+
+/// Advance one furnace by `dt`: keep any lit fuel burning, light fresh fuel when there's something
+/// to smelt and room for the result, cook the input, and emit one output item per `SMELT_TIME`.
+fn step_furnace(f: &mut FurnaceState, dt: f32) {
+    if f.burn_remaining > 0.0 {
+        f.burn_remaining = (f.burn_remaining - dt).max(0.0);
+    }
+
+    // What (if anything) the current input smelts to, and whether the output slot can take it.
+    let target = f.input.and_then(|s| smelting::smelt_output(s.item));
+    let can_output = match (target, f.output) {
+        (Some(out), None) => Some(out),
+        (Some(out), Some(o)) if o.item == out && o.count < item::max_stack(out) => Some(out),
+        _ => None,
+    };
+
+    // Light a fresh unit of fuel if we want to smelt and the fire has gone out.
+    if can_output.is_some() && f.burn_remaining <= 0.0 {
+        if let Some(fuel) = f.fuel.as_mut() {
+            if let Some(burn) = smelting::fuel_value(fuel.item) {
+                fuel.count -= 1;
+                f.burn_remaining = burn;
+                f.burn_max = burn;
+                if fuel.count == 0 {
+                    f.fuel = None;
+                }
+            }
+        }
+    }
+
+    if f.burn_remaining > 0.0 && can_output.is_some() {
+        f.cook_progress += dt;
+        if f.cook_progress >= smelting::SMELT_TIME {
+            f.cook_progress -= smelting::SMELT_TIME;
+            let out = can_output.unwrap();
+            if let Some(inp) = f.input.as_mut() {
+                inp.count -= 1;
+                if inp.count == 0 {
+                    f.input = None;
+                }
+            }
+            match f.output.as_mut() {
+                Some(o) => o.count += 1,
+                None => {
+                    f.output = Some(ItemStack {
+                        item: out,
+                        count: 1,
+                        durability: 0,
+                    })
+                }
+            }
+        }
+    } else {
+        // Not actively smelting (no input, output full, or fire out): the progress arrow relaxes.
+        f.cook_progress = (f.cook_progress - dt * 2.0).max(0.0);
+    }
+}
 
 pub struct Game {
     world: World,
@@ -63,6 +144,9 @@ pub struct Game {
 
     /// Mobs and dropped items.
     entities: Entities,
+
+    /// Furnaces the player has opened, keyed by block position; ticked by `step_furnaces`.
+    furnaces: FxHashMap<IVec3, FurnaceState>,
 }
 
 impl Game {
@@ -121,6 +205,7 @@ impl Game {
             fluid_frontier: VecDeque::new(),
             fluid_timer: 0.0,
             entities: Entities::new(),
+            furnaces: FxHashMap::default(),
         }
     }
 
@@ -296,6 +381,11 @@ impl Game {
             }
         }
 
+        // Advance any active furnaces (pure item-state tick; no world/GPU touch).
+        for f in self.furnaces.values_mut() {
+            step_furnace(f, dt);
+        }
+
         // Update mobs and dropped items (AI + physics). The collision closure borrows only the
         // chunk map, leaving `self.entities` free to mutate.
         let chunks = &self.world.chunks;
@@ -397,15 +487,27 @@ impl Game {
             (wp.z - origin.z) as usize,
         );
 
-        {
+        let old = {
             let Some(arc) = self.world.chunks.get_mut(&cpos) else {
                 return false;
             };
             let chunk = Arc::make_mut(arc);
-            if chunk.get(lx, ly, lz) == id {
+            let old = chunk.get(lx, ly, lz);
+            if old == id {
                 return false;
             }
             chunk.set(lx, ly, lz, id);
+            old
+        };
+
+        // Breaking/replacing a furnace spills its contents so smelted goods and fuel aren't lost.
+        if old == block::FURNACE && id != block::FURNACE {
+            if let Some(state) = self.furnaces.remove(&wp) {
+                let center = wp.as_vec3() + Vec3::splat(0.5);
+                for stack in state.contents() {
+                    self.entities.spawn_item(center, stack);
+                }
+            }
         }
 
         // Persist the edited chunk (kept resident in `saved`) and refresh its volume voxels.
@@ -602,6 +704,16 @@ impl Game {
         self.entities.spawn_item(pos, stack);
     }
 
+    /// Furnace state at `pos`, creating an empty one (the player just opened it).
+    pub fn furnace_mut(&mut self, pos: IVec3) -> &mut FurnaceState {
+        self.furnaces.entry(pos).or_default()
+    }
+
+    /// Read-only furnace state at `pos` (None if never opened / already empty).
+    pub fn furnace(&self, pos: IVec3) -> Option<&FurnaceState> {
+        self.furnaces.get(&pos)
+    }
+
     pub fn entity_count(&self) -> usize {
         self.entities.count()
     }
@@ -690,5 +802,44 @@ impl Game {
 
     pub fn mesh_count(&self) -> usize {
         self.meshes.values().filter(|m| m.is_some()).count()
+    }
+}
+
+#[cfg(test)]
+mod furnace_tests {
+    use super::*;
+    use crate::item::ItemStack;
+
+    /// One full smelt cycle: ore + fuel → an ingot, the input drops by one, fuel keeps burning.
+    #[test]
+    fn smelts_one_item_and_consumes_fuel() {
+        let mut f = FurnaceState {
+            input: Some(ItemStack::new(block::IRON_ORE, 2)),
+            fuel: Some(ItemStack::new(block::PLANKS, 1)),
+            ..Default::default()
+        };
+        let dt = 0.1;
+        let mut t = 0.0;
+        while t < smelting::SMELT_TIME + 0.5 {
+            step_furnace(&mut f, dt);
+            t += dt;
+        }
+        assert_eq!(f.output.map(|s| (s.item, s.count)), Some((item::IRON_INGOT, 1)));
+        assert_eq!(f.input.map(|s| s.count), Some(1));
+        assert!(f.burn_remaining > 0.0); // a plank (9s) still has burn left after one 6s smelt
+    }
+
+    /// No fuel → nothing smelts, and the input is untouched.
+    #[test]
+    fn idle_without_fuel_does_not_smelt() {
+        let mut f = FurnaceState {
+            input: Some(ItemStack::new(block::IRON_ORE, 1)),
+            ..Default::default()
+        };
+        for _ in 0..200 {
+            step_furnace(&mut f, 0.1);
+        }
+        assert!(f.output.is_none());
+        assert_eq!(f.input.map(|s| s.count), Some(1));
     }
 }

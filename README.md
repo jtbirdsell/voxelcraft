@@ -39,7 +39,7 @@ The world auto-saves to `saves/world/` on quit.
 | **Left-Ctrl** | Sprint / fly boost |
 | **F** | Toggle fly / walk |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
-| **Right-click** | Place block, or open a crafting table |
+| **Right-click** | Place block, or open a crafting table / furnace |
 | **Q** | Drop one of the selected item |
 | **1–9 / scroll** | Select hotbar slot |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
@@ -81,6 +81,9 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   harvest level, and wear down with **durability**.
 - **Crafting**: a data-driven shaped + shapeless recipe registry; a 2×2 grid in the inventory and a
   3×3 grid at a crafting table, with a live result preview (planks, sticks, tools, furnace, chest, …).
+- **Smelting**: right-click a furnace for an input/fuel/output screen with a live burning-fuel flame
+  gauge and smelt-progress arrow; a `step_furnaces` tick consumes fuel (planks/logs/sticks) to smelt
+  ores into **iron / gold ingots** (and cobblestone back to stone). Breaking a lit furnace spills it.
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
   screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities, and
   persistence. Survival basics: health + hunger, fall damage, regen/starvation, death drops + respawn.
@@ -114,6 +117,7 @@ src/
   entity.rs         mobs + dropped items: AABB physics, wander AI, GI-lit box geometry
   item.rs           item + tool registry, ItemStack (durability), Inventory, slot-click logic
   crafting.rs       data-driven shaped/shapeless recipe registry + grid matching
+  smelting.rs       furnace smelt-recipe + fuel tables (drives the furnace tick in game.rs)
   overlay.rs        HUD, hotbar, inventory/crafting screens, block + crack highlight (UI geometry)
   frustum.rs        Gribb–Hartmann frustum culling
   renderer.rs       pipelines (chunk/water/highlight/UI) + atlas/font bind groups, frame recording
@@ -130,13 +134,13 @@ ray-traced shadows, AO, and global illumination rather than idling.
 
 Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and exits — used to
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
-`VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft`,
+`VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft|furnace`,
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`.
 
 ## Roadmap
 
 Done: the full engine, world generation, lighting, rendering, the block/item library, inventory,
-**progressive mining, tools + durability, and crafting**. Next up: furnace smelting, food & deeper
+**progressive mining, tools + durability, crafting, and furnace smelting**. Next up: food & deeper
 survival, armor; then typed mobs + combat, structures (dungeons/villages), an RTX temporal denoiser,
 particles + audio, redstone, and additional dimensions.
 

@@ -24,7 +24,7 @@ use crate::item::Inventory;
 use crate::persistence::Level;
 use crate::player::{Input, Player};
 use crate::renderer::ChunkRenderer;
-use crate::{block, capture, crafting, item, overlay, persistence, raycast};
+use crate::{block, capture, crafting, item, overlay, persistence, raycast, smelting};
 
 const SEED: u64 = 0x5EED_C0FFEE;
 const RENDER_DISTANCE: i32 = 12;
@@ -39,6 +39,8 @@ enum Screen {
     None,
     Inventory,
     Crafting,
+    /// A furnace's GUI, tagged with the furnace block position (its contents live in `Game`).
+    Furnace(IVec3),
 }
 
 impl Screen {
@@ -161,6 +163,19 @@ impl App {
         self.set_grab(false);
     }
 
+    fn open_furnace(&mut self, pos: IVec3) {
+        if let Some(state) = &mut self.state {
+            state.game.furnace_mut(pos); // ensure a state exists to render/tick
+            state.screen = Screen::Furnace(pos);
+            state.input = Input::default();
+            state.cursor = (
+                state.gpu.config.width as f32 * 0.5,
+                state.gpu.config.height as f32 * 0.5,
+            );
+        }
+        self.set_grab(false);
+    }
+
     fn close_screen(&mut self) {
         if let Some(state) = &mut self.state {
             if state.screen != Screen::None {
@@ -189,6 +204,31 @@ impl App {
                 state.inventory.click_slot(slot_i, right);
                 return;
             }
+        }
+        // Furnace screen: move items between held and the input/fuel slots; output is take-only.
+        if let Screen::Furnace(pos) = state.screen {
+            let f = state.game.furnace_mut(pos);
+            for (kind, x, y) in overlay::furnace_slot_rects(w, h) {
+                if hit(x, y) {
+                    let mut held = state.inventory.held;
+                    match kind {
+                        overlay::FurnaceSlot::Input => {
+                            let mut s = f.input;
+                            item::slot_click(&mut held, &mut s, right);
+                            f.input = s;
+                        }
+                        overlay::FurnaceSlot::Fuel => {
+                            let mut s = f.fuel;
+                            item::slot_click(&mut held, &mut s, right);
+                            f.fuel = s;
+                        }
+                        overlay::FurnaceSlot::Output => take_furnace_output(&mut held, &mut f.output),
+                    }
+                    state.inventory.held = held;
+                    return;
+                }
+            }
+            return;
         }
         let size = state.screen.craft_size();
         for (cell, x, y) in overlay::craft_cell_rects(w, h, size) {
@@ -378,9 +418,13 @@ impl App {
         if state.input.place_pressed {
             state.input.place_pressed = false;
             if let Some(hit) = &target {
-                if state.game.block_at(hit.block) == block::CRAFTING_TABLE {
+                let targeted = state.game.block_at(hit.block);
+                if targeted == block::CRAFTING_TABLE {
                     // Right-clicking a crafting table opens the 3x3 crafting screen instead.
                     state.pending_open = Some(Screen::Crafting);
+                } else if targeted == block::FURNACE {
+                    // Right-clicking a furnace opens its smelting screen.
+                    state.pending_open = Some(Screen::Furnace(hit.block));
                 } else {
                     let place = hit.block + hit.normal;
                     let id = state.inventory.selected_block();
@@ -465,7 +509,22 @@ impl App {
             !state.player.flying,
             debug_lines.as_deref(),
         );
-        if state.screen != Screen::None {
+        if let Screen::Furnace(pos) = state.screen {
+            let f = state.game.furnace(pos);
+            let burn_frac = f.map_or(0.0, |f| if f.burn_max > 0.0 { f.burn_remaining / f.burn_max } else { 0.0 });
+            let cook_frac = f.map_or(0.0, |f| f.cook_progress / smelting::SMELT_TIME);
+            ui.extend(overlay::build_furnace_screen(
+                state.gpu.config.width,
+                state.gpu.config.height,
+                &state.inventory,
+                f.and_then(|f| f.input),
+                f.and_then(|f| f.fuel),
+                f.and_then(|f| f.output),
+                burn_frac,
+                cook_frac,
+                state.cursor,
+            ));
+        } else if state.screen != Screen::None {
             ui.extend(overlay::build_inventory_screen(
                 state.gpu.config.width,
                 state.gpu.config.height,
@@ -546,6 +605,30 @@ fn craft_take_output(state: &mut State) {
         }
         None => item::ItemStack::new(out_item, out_count),
     });
+}
+
+/// Take a furnace's output into the held cursor stack (output is take-only): pick it up if the hand
+/// is empty, or merge if holding the same item with room; holding a different item does nothing.
+fn take_furnace_output(held: &mut Option<item::ItemStack>, output: &mut Option<item::ItemStack>) {
+    let Some(out) = *output else { return };
+    match held {
+        None => {
+            *held = Some(out);
+            *output = None;
+        }
+        Some(h) if h.item == out.item && !item::is_tool(out.item) => {
+            let space = item::max_stack(h.item).saturating_sub(h.count);
+            let take = space.min(out.count);
+            h.count += take;
+            let rem = out.count - take;
+            *output = if rem > 0 {
+                Some(item::ItemStack::new(out.item, rem))
+            } else {
+                None
+            };
+        }
+        Some(_) => {}
+    }
 }
 
 /// On screen close, return any items left in the craft grid to the inventory (or drop them).
@@ -767,6 +850,19 @@ impl ApplicationHandler for App {
                     size,
                     cursor,
                 ));
+            } else if screen_env == "furnace" {
+                // A mid-smelt furnace: iron ore cooking over planks into iron ingots.
+                ui.extend(overlay::build_furnace_screen(
+                    gpu.config.width,
+                    gpu.config.height,
+                    &shot_inv,
+                    Some(item::ItemStack::new(item::item_of_block(block::IRON_ORE), 5)),
+                    Some(item::ItemStack::new(item::item_of_block(block::PLANKS), 8)),
+                    Some(item::ItemStack::new(item::IRON_INGOT, 3)),
+                    0.6,
+                    0.45,
+                    (700.0, 360.0),
+                ));
             }
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",
@@ -904,8 +1000,10 @@ impl ApplicationHandler for App {
                 self.frame();
                 // Process a screen-open requested during the frame (after the state borrow ends).
                 if let Some(sc) = self.state.as_mut().and_then(|s| s.pending_open.take()) {
-                    if sc == Screen::Crafting {
-                        self.open_crafting();
+                    match sc {
+                        Screen::Crafting => self.open_crafting(),
+                        Screen::Furnace(pos) => self.open_furnace(pos),
+                        _ => {}
                     }
                 }
             }

@@ -313,6 +313,158 @@ pub fn build_inventory_screen(
     v
 }
 
+/// The three furnace slots (M21), used by both rendering and click hit-testing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FurnaceSlot {
+    Input,
+    Fuel,
+    Output,
+}
+
+/// Furnace slot layout: input (top-left), fuel (below it, past the flame gauge), and output (right,
+/// past the progress arrow). Returns (kind, x_px, y_px), centered above the inventory grid.
+pub fn furnace_slot_rects(width: u32, height: u32) -> [(FurnaceSlot, f32, f32); 3] {
+    let step = INV_SLOT + 4.0;
+    let gap = 30.0; // vertical flame gap between input and fuel
+    let group_w = 3.0 * step + INV_SLOT;
+    let left_x = width as f32 * 0.5 - group_w * 0.5;
+    let inv_top = inventory_slot_rects(width, height)[0].2;
+    let top_y = inv_top - (2.0 * INV_SLOT + gap) - 56.0;
+    let out_x = left_x + 3.0 * step;
+    let out_y = top_y + (INV_SLOT + gap) * 0.5;
+    [
+        (FurnaceSlot::Input, left_x, top_y),
+        (FurnaceSlot::Fuel, left_x, top_y + INV_SLOT + gap),
+        (FurnaceSlot::Output, out_x, out_y),
+    ]
+}
+
+/// Draw a stack's swatch + count + durability inside a slot (the slot background is drawn already).
+fn draw_stack(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, stack: item::ItemStack) {
+    let c = item::item_color(stack.item);
+    push_px_rect(out, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
+    if stack.count > 1 {
+        let label = format!("{}", stack.count);
+        let tw = text_width(&label, 2.0);
+        push_text(out, sw, sh, x + INV_SLOT - tw - 3.0, y + INV_SLOT - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+    }
+    durability_bar(out, sw, sh, x, y, INV_SLOT, stack);
+}
+
+/// Build the furnace screen: input/fuel/output slots with a burning-fuel flame gauge and a smelt
+/// progress arrow, over the usual inventory grid. `burn_frac`/`cook_frac` are 0..1.
+#[allow(clippy::too_many_arguments)]
+pub fn build_furnace_screen(
+    width: u32,
+    height: u32,
+    inv: &item::Inventory,
+    input: Option<item::ItemStack>,
+    fuel: Option<item::ItemStack>,
+    output: Option<item::ItemStack>,
+    burn_frac: f32,
+    cook_frac: f32,
+    cursor: (f32, f32),
+) -> Vec<UiVertex> {
+    let sw = width as f32;
+    let sh = height as f32;
+    let mut v = Vec::new();
+    push_px_rect(&mut v, sw, sh, 0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.55]);
+
+    // Inventory grid (hover-highlighted), on its panel.
+    let rects = inventory_slot_rects(width, height);
+    let step = INV_SLOT + 4.0;
+    let (minx, miny) = (rects[0].1, rects[0].2);
+    let panel_w = 9.0 * step - 4.0;
+    let pad = 14.0;
+    let panel_h = rects[35].2 + INV_SLOT - miny;
+    push_px_rect(&mut v, sw, sh, minx - pad, miny - pad - 24.0, panel_w + 2.0 * pad, panel_h + 2.0 * pad + 24.0, [0.12, 0.12, 0.14, 0.97]);
+    push_text(&mut v, sw, sh, minx, miny - pad - 18.0, 2.0, "Furnace", [0.95, 0.95, 0.95, 1.0]);
+
+    let mut hovered: Option<usize> = None;
+    for &(slot_i, x, y) in &rects {
+        let hover = cursor.0 >= x && cursor.0 < x + INV_SLOT && cursor.1 >= y && cursor.1 < y + INV_SLOT;
+        if hover {
+            hovered = Some(slot_i);
+        }
+        let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.28, 0.28, 0.32, 1.0] };
+        push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
+        if let Some(stack) = inv.slots[slot_i] {
+            draw_stack(&mut v, sw, sh, x, y, stack);
+        }
+    }
+
+    // Furnace slots + gauges on their own backing panel above the inventory.
+    let slots = furnace_slot_rects(width, height);
+    let p_x = slots[0].1 - 16.0;
+    let p_y = slots[0].2 - 34.0;
+    let p_w = (slots[2].1 + INV_SLOT) - slots[0].1 + 32.0;
+    let p_h = (slots[1].2 + INV_SLOT) - slots[0].2 + 50.0;
+    push_px_rect(&mut v, sw, sh, p_x, p_y, p_w, p_h, [0.12, 0.12, 0.14, 0.97]);
+    push_text(&mut v, sw, sh, p_x + 8.0, p_y + 8.0, 2.0, "Smelting", [0.8, 0.8, 0.85, 1.0]);
+
+    let mut furn_hover: Option<&str> = None;
+    for &(kind, x, y) in &slots {
+        let st = match kind {
+            FurnaceSlot::Input => input,
+            FurnaceSlot::Fuel => fuel,
+            FurnaceSlot::Output => output,
+        };
+        let hover = cursor.0 >= x && cursor.0 < x + INV_SLOT && cursor.1 >= y && cursor.1 < y + INV_SLOT;
+        let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.28, 0.28, 0.32, 1.0] };
+        push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
+        if let Some(stack) = st {
+            draw_stack(&mut v, sw, sh, x, y, stack);
+            if hover {
+                furn_hover = Some(item::item_name(stack.item));
+            }
+        }
+    }
+
+    // Flame gauge in the gap between input (top) and fuel (bottom), filling upward as fuel burns.
+    let (ix, iy) = (slots[0].1, slots[0].2);
+    let (flame_w, flame_h) = (20.0, 24.0);
+    let fx = ix + INV_SLOT * 0.5 - flame_w * 0.5;
+    let fy = iy + INV_SLOT + 3.0;
+    push_px_rect(&mut v, sw, sh, fx, fy, flame_w, flame_h, [0.16, 0.11, 0.05, 1.0]);
+    let fh = flame_h * burn_frac.clamp(0.0, 1.0);
+    if fh > 0.0 {
+        push_px_rect(&mut v, sw, sh, fx, fy + (flame_h - fh), flame_w, fh, [1.0, 0.55, 0.12, 1.0]);
+    }
+
+    // Progress arrow from input toward output, filling left→right with the smelt progress.
+    let arrow_x = ix + INV_SLOT + 12.0;
+    let arrow_y = slots[2].2 + INV_SLOT * 0.5 - 3.0;
+    let arrow_len = slots[2].1 - arrow_x - 14.0;
+    push_px_rect(&mut v, sw, sh, arrow_x, arrow_y, arrow_len, 6.0, [0.22, 0.22, 0.25, 1.0]);
+    let prog = arrow_len * cook_frac.clamp(0.0, 1.0);
+    if prog > 0.0 {
+        push_px_rect(&mut v, sw, sh, arrow_x, arrow_y, prog, 6.0, [0.95, 0.92, 0.55, 1.0]);
+    }
+    push_px_rect(&mut v, sw, sh, arrow_x + arrow_len, arrow_y - 4.0, 5.0, 14.0, [0.5, 0.5, 0.55, 1.0]);
+
+    // Held stack follows the cursor; otherwise a hover tooltip (furnace slot beats inventory slot).
+    if let Some(held) = inv.held {
+        let c = item::item_color(held.item);
+        let sz = INV_SLOT - 6.0;
+        let (hx, hy) = (cursor.0 - sz * 0.5, cursor.1 - sz * 0.5);
+        push_px_rect(&mut v, sw, sh, hx, hy, sz, sz, [c[0], c[1], c[2], 1.0]);
+        if held.count > 1 {
+            let label = format!("{}", held.count);
+            let tw = text_width(&label, 2.0);
+            push_text(&mut v, sw, sh, hx + sz - tw - 2.0, hy + sz - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+        }
+        durability_bar(&mut v, sw, sh, hx - 4.0, hy, sz + 8.0, held);
+    } else {
+        let name = furn_hover.or_else(|| hovered.and_then(|i| inv.slots[i]).map(|s| item::item_name(s.item)));
+        if let Some(name) = name {
+            let tw = text_width(name, 2.0);
+            push_px_rect(&mut v, sw, sh, cursor.0 + 12.0, cursor.1 - 4.0, tw + 8.0, 22.0, [0.05, 0.05, 0.07, 0.92]);
+            push_text(&mut v, sw, sh, cursor.0 + 16.0, cursor.1, 2.0, name, [0.95, 0.95, 0.8, 1.0]);
+        }
+    }
+    v
+}
+
 /// A small wear bar at the bottom of a slot for a damaged tool (green → red); hidden when full.
 fn durability_bar(out: &mut Vec<UiVertex>, sw: f32, sh: f32, sx: f32, y: f32, slot: f32, stack: item::ItemStack) {
     if !item::is_tool(stack.item) {

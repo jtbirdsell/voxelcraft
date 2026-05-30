@@ -50,6 +50,17 @@ pub const DIAMOND_SWORD: ItemId = tool_id(Tier::Diamond, 3);
 /// Crafting materials (non-block, non-tool items) occupy `[MATERIAL_BASE, MATERIAL_BASE+16)`.
 pub const MATERIAL_BASE: ItemId = 512;
 pub const STICK: ItemId = MATERIAL_BASE;
+pub const IRON_INGOT: ItemId = MATERIAL_BASE + 1;
+pub const GOLD_INGOT: ItemId = MATERIAL_BASE + 2;
+
+fn material_name(item: ItemId) -> &'static str {
+    match item {
+        STICK => "Stick",
+        IRON_INGOT => "Iron Ingot",
+        GOLD_INGOT => "Gold Ingot",
+        _ => "Material",
+    }
+}
 
 #[inline]
 pub fn is_tool(item: ItemId) -> bool {
@@ -157,8 +168,8 @@ pub fn item_name(item: ItemId) -> &'static str {
     if let Some(b) = block_of_item(item) {
         return block::display_name(b);
     }
-    if item == STICK {
-        return "Stick";
+    if is_material(item) {
+        return material_name(item);
     }
     if !is_tool(item) {
         return "Unknown";
@@ -205,8 +216,12 @@ pub fn item_color(item: ItemId) -> [f32; 3] {
     if let Some(b) = block_of_item(item) {
         return block::face_color(b, [0, 1, 0]);
     }
-    if item == STICK {
-        return [0.55, 0.40, 0.22];
+    if is_material(item) {
+        return match item {
+            IRON_INGOT => [0.80, 0.78, 0.74],
+            GOLD_INGOT => [0.95, 0.80, 0.22],
+            _ => [0.55, 0.40, 0.22], // stick / generic wooden
+        };
     }
     if is_tool(item) {
         return match tool_tier(item) {
