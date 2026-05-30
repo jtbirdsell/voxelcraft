@@ -93,12 +93,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sun_intensity = camera.params.w;
     let rtx = volume.params.y >= 1u;
 
-    // Calm static ripple breaks the flat mirror; only applied to up-facing (top) water.
-    var n = base_n;
-    if (rtx) {
-        n = ripple_normal(in.world_pos, base_n);
-    }
-    let ndl = max(dot(n, sun), 0.0);
+    // Lighting, Fresnel and opacity all use the TRUE flat normal, so clarity stays smooth and
+    // consistent. The ripple is applied ONLY to the reflection ray (below) to dither the mirror —
+    // feeding it into Fresnel here made opacity patchy (Fresnel is very sensitive near grazing).
+    let ndl = max(dot(base_n, sun), 0.0);
 
     // Shadow ray uses the TRUE flat normal/origin to avoid ripple-induced self-intersection acne.
     var shadow = 1.0;
@@ -124,20 +122,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let shallow_col = in.color.rgb * lit;
     let deep_col = WATER_TINT * lit;
     var rgb = mix(deep_col, shallow_col, clarity);
-    var alpha = clamp(1.0 - clarity, 0.18, 0.95);           // shallow -> floor shows, deep -> opaque
+    var alpha = clamp(1.0 - clarity, 0.12, 0.95);           // shallow -> floor shows, deep -> opaque
 
     if (rtx) {
-        // Fresnel drives REFLECTION AMOUNT only. Capped so far/grazing water is a strong-but-not-
-        // pure mirror, which (with the ripple + distance fade) keeps reflections from reading as
-        // binary blotches.
-        let cos_t = max(dot(n, view_dir), 0.0);
-        var fres = clamp(0.02 + 0.98 * pow(1.0 - cos_t, 5.0), 0.0, 1.0);
-        fres = min(fres, 0.6);
-        let refl = reflection_color(in.world_pos, n, -view_dir);
+        // Fresnel from the FLAT normal (smooth across the surface) sets how much reflection is
+        // mixed into the color. The ripple perturbs ONLY the reflection ray, so the mirror edges
+        // dither without making the Fresnel — and therefore the opacity — patchy. Cap keeps far
+        // water a strong-but-not-pure mirror.
+        let cos_t = max(dot(base_n, view_dir), 0.0);
+        let fres = min(clamp(0.02 + 0.98 * pow(1.0 - cos_t, 5.0), 0.0, 1.0), 0.5);
+        let refl = reflection_color(in.world_pos, ripple_normal(in.world_pos, base_n), -view_dir);
         rgb = mix(rgb, refl, fres);
-        // A reflective surface also hides the floor: opacity is the max of depth-absorption and
-        // reflectance, so it can only rise, never drop below the depth-driven value.
-        alpha = clamp(max(alpha, fres), 0.18, 0.95);
+        // Opacity stays DEPTH-driven; a reflective grazing surface gets only a small, smooth bump,
+        // so view-angle opacity can't reintroduce the patchy clear/opaque inconsistency.
+        alpha = clamp(max(alpha, fres * 0.3), 0.12, 0.95);
     } else {
         let halfway = normalize(sun + view_dir);
         let spec = pow(max(dot(base_n, halfway), 0.0), 64.0) * sun_intensity * 0.6;
