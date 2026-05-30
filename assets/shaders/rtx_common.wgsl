@@ -1,7 +1,7 @@
-// Shared RTX scaffolding, prepended (at pipeline build time) to both chunk.wgsl and water.wgsl:
-// the camera + voxel-volume bindings, the standard lit-vertex stage, and the DDA voxel tracer
-// used for sun shadows, ambient occlusion / global illumination, and water reflections. Keeping
-// one copy means the tracer can't drift between the two shaders.
+// Shared RTX scaffolding, prepended (at pipeline build time) to chunk.wgsl, water.wgsl, and
+// glass.wgsl: the camera + voxel-volume bindings, the standard lit-vertex stage, and the DDA voxel
+// tracer used for sun shadows, ambient occlusion / global illumination, and water reflections.
+// Keeping one copy means the tracer can't drift between the shaders.
 
 struct Camera {
     view_proj: mat4x4<f32>,

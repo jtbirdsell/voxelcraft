@@ -308,11 +308,13 @@ pub fn transmits_light(id: BlockId) -> bool {
     !is_opaque(id)
 }
 
-/// Whether this block stops skylight descending. Solid terrain and roofs do; foliage (leaves) lets
-/// it through so tree canopies don't cast pitch-black ground shadows (binary skylight, M14).
+/// Whether this block stops skylight descending. Solid terrain, roofs, and partial blocks (slabs/
+/// stairs) do; glass and foliage (leaves) let it through so windows/tree canopies don't cast
+/// pitch-black ground shadows (binary skylight, M14). Uses `is_volume_solid` (= opaque cubes +
+/// partials) so slab/stair roofs still darken what's under them (M26 made `is_opaque` exclude them).
 #[inline]
 pub fn blocks_skylight(id: BlockId) -> bool {
-    is_opaque(id) && id != LEAVES
+    is_volume_solid(id) && id != LEAVES
 }
 
 /// The tool that mines a block fastest (for mining-speed + drop gating from M19).

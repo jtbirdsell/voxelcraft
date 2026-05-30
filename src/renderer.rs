@@ -288,8 +288,8 @@ impl ChunkRenderer {
             cache: None,
         });
 
-        // Glass pipeline: a translucent clone of the water pipeline, but depth-WRITE enabled (glass
-        // is a hard surface that should occlude what's behind it) and no UV animation (glass.wgsl).
+        // Glass pipeline: a translucent clone of the water pipeline (depth-tested, NO depth write so
+        // water + farther glass behind a pane still show through) with no UV animation (glass.wgsl).
         let glass_src = format!("{rtx_common}{}", include_str!("../assets/shaders/glass.wgsl"));
         let glass_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glass-shader"),
@@ -315,7 +315,7 @@ impl ChunkRenderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -603,8 +603,8 @@ impl ChunkRenderer {
             }
         }
 
-        // Glass pass (loads color + depth; alpha-blends over the opaque world, writes depth so it
-        // occludes the water drawn after it). Drawn before water since it's a hard surface.
+        // Glass pass (loads color + depth; alpha-blends over the opaque world, depth-tested but no
+        // depth write, so water + farther glass behind a pane still show through).
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glass-pass"),
@@ -695,7 +695,7 @@ impl ChunkRenderer {
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
     ) {
-        // Chunk + water passes (clears color + depth).
+        // Chunk passes: opaque (clears color + depth), then glass + water (load + blend).
         self.record(encoder, color_view, depth_view, meshes, volume_bg);
 
         // Build overlay buffers (kept alive until this function returns; wgpu retains the

@@ -365,7 +365,7 @@ impl Entities {
                     m.hurt = (m.hurt - dt).max(0.0); // hurt-flash decays (set by combat in M29)
                     let (mw, mh) = m.species.size();
 
-                    // Perception: distance to the player + (for hostiles) line-of-sight.
+                    // Perception: distance to the player + (for hostiles) exact line-of-sight.
                     let to_player = player_pos - e.pos;
                     let dist = to_player.length();
                     let eye = Vec3::new(0.0, mh * 0.5, 0.0);
@@ -373,18 +373,25 @@ impl Entities {
 
                     // State transition.
                     if m.species.hostile() {
-                        let sees = dist < DETECT_RADIUS
+                        // LOS only matters within the give-up range; skip the DDA for far mobs.
+                        let los = dist < CALM_RADIUS
                             && line_of_sight(e.pos + eye, target, &is_solid);
-                        m.ai = if dist <= ATTACK_RADIUS {
+                        let sees = dist < DETECT_RADIUS && los;
+                        // Hysteresis: stay in Attack a bit past ATTACK_RADIUS so it doesn't jitter.
+                        let attack_keep = m.ai == Ai::Attack && dist <= ATTACK_RADIUS * 1.5;
+                        m.ai = if (dist <= ATTACK_RADIUS || attack_keep) && los {
                             Ai::Attack
-                        } else if sees || (matches!(m.ai, Ai::Chase | Ai::Attack) && dist < CALM_RADIUS) {
-                            Ai::Chase
+                        } else if sees || (matches!(m.ai, Ai::Chase | Ai::Attack) && los) {
+                            Ai::Chase // keeps chasing only while it can still SEE the player
                         } else if matches!(m.ai, Ai::Chase | Ai::Attack) {
-                            Ai::Wander // lost the player
+                            Ai::Wander // lost sight / out of range
                         } else {
                             m.ai
                         };
                     } else if dist < FLEE_RADIUS || m.hurt > 0.0 {
+                        if m.ai != Ai::Flee {
+                            e.wander = 1.5 + randf(&mut e.rng); // sidestep timer (escape corners)
+                        }
                         m.ai = Ai::Flee;
                     } else if m.ai == Ai::Flee && dist > FLEE_RADIUS * 1.8 {
                         m.ai = Ai::Wander;
@@ -394,7 +401,16 @@ impl Entities {
                     let heading_to = |v: Vec3| v.z.atan2(v.x);
                     let speed = match m.ai {
                         Ai::Flee => {
-                            e.heading = heading_to(-to_player);
+                            e.wander -= dt;
+                            let away = heading_to(-to_player);
+                            // Periodically deflect so a cornered mob sidesteps instead of running
+                            // straight into the wall it's trapped against forever.
+                            e.heading = if e.wander <= 0.0 {
+                                e.wander = 1.5 + randf(&mut e.rng);
+                                away + (randf(&mut e.rng) - 0.5) * 2.2
+                            } else {
+                                away
+                            };
                             FLEE_SPEED
                         }
                         Ai::Chase => {
@@ -522,18 +538,64 @@ impl Entities {
     }
 }
 
-/// Coarse voxel line-of-sight: true if no solid block lies between `from` and `to` (sampled ~twice
-/// per block). Used so hostile mobs only chase a player they can actually see.
+/// Exact voxel line-of-sight via an Amanatides–Woo DDA: walks every voxel the segment crosses and
+/// returns false on the first solid one (the mob's own start cell and the player's end cell are not
+/// tested). Used so hostile mobs only chase a player they can actually see — no thin-wall leaks.
 fn line_of_sight(from: Vec3, to: Vec3, is_solid: &impl Fn(IVec3) -> bool) -> bool {
     let d = to - from;
     let dist = d.length();
     if dist < 1e-3 {
         return true;
     }
-    let steps = (dist * 2.0).ceil() as i32;
-    for i in 1..steps {
-        let p = from + d * (i as f32 / steps as f32);
-        let cell = IVec3::new(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+    let dir = d / dist;
+    let (mut vx, mut vy, mut vz) = (
+        from.x.floor() as i32,
+        from.y.floor() as i32,
+        from.z.floor() as i32,
+    );
+    let end = IVec3::new(to.x.floor() as i32, to.y.floor() as i32, to.z.floor() as i32);
+    let step = |c: f32| if c >= 0.0 { 1 } else { -1 };
+    let (sx, sy, sz) = (step(dir.x), step(dir.y), step(dir.z));
+    let boundary = |o: f32, c: f32, v: i32, s: i32| -> f32 {
+        if c == 0.0 {
+            f32::INFINITY
+        } else {
+            let b = if s > 0 { (v + 1) as f32 } else { v as f32 };
+            (b - o) / c
+        }
+    };
+    let (mut tx, mut ty, mut tz) = (
+        boundary(from.x, dir.x, vx, sx),
+        boundary(from.y, dir.y, vy, sy),
+        boundary(from.z, dir.z, vz, sz),
+    );
+    let inv = |c: f32| if c == 0.0 { f32::INFINITY } else { (1.0 / c).abs() };
+    let (dx, dy, dz) = (inv(dir.x), inv(dir.y), inv(dir.z));
+    loop {
+        // Advance into the next voxel along the nearest axis boundary.
+        if tx <= ty && tx <= tz {
+            if tx > dist {
+                break;
+            }
+            vx += sx;
+            tx += dx;
+        } else if ty <= tz {
+            if ty > dist {
+                break;
+            }
+            vy += sy;
+            ty += dy;
+        } else {
+            if tz > dist {
+                break;
+            }
+            vz += sz;
+            tz += dz;
+        }
+        let cell = IVec3::new(vx, vy, vz);
+        if cell == end {
+            break; // reached the player's cell; don't test it
+        }
         if is_solid(cell) {
             return false;
         }
@@ -604,8 +666,9 @@ fn collide_move(
 }
 
 /// Emit one mob model part: a box given in LOCAL space (feet at origin, +x forward), rotated by
-/// `yaw` around the mob's vertical axis and placed at `feet`. `hurt` (0..1) goes in `shade.y` for
-/// the M29 hurt-flash. Faces are never culled (mobs are small and self-contained).
+/// `yaw` around the mob's vertical axis and placed at `feet`. `hurt` (0..1) is stashed in `shade.y`;
+/// the chunk shader doesn't read it yet — M29 combat will both set it and add the red-flash tint.
+/// Faces are never culled (mobs are small and self-contained).
 fn push_part(geom: &mut Geometry, feet: Vec3, yaw: f32, p: &Part, hurt: f32) {
     let (s, co) = yaw.sin_cos();
     let rot = |lx: f32, ly: f32, lz: f32| -> [f32; 3] {
@@ -716,6 +779,16 @@ mod tests {
         assert!(!line_of_sight(Vec3::new(0.5, 1.0, 0.5), Vec3::new(4.5, 1.0, 0.5), &wall));
         let air = |_: IVec3| false;
         assert!(line_of_sight(Vec3::new(0.5, 1.0, 0.5), Vec3::new(4.5, 1.0, 0.5), &air));
+    }
+
+    #[test]
+    fn los_dda_catches_single_cell_on_diagonal() {
+        // A lone solid voxel the diagonal segment passes through — the DDA must visit it.
+        let wall = |p: IVec3| p == IVec3::new(2, 1, 2);
+        assert!(!line_of_sight(Vec3::new(0.5, 1.0, 0.5), Vec3::new(4.5, 1.0, 4.5), &wall));
+        // Start and end cells are not tested (mob/player stand in solid-feeling cells freely).
+        let at_end = |p: IVec3| p == IVec3::new(4, 1, 4);
+        assert!(line_of_sight(Vec3::new(0.5, 1.0, 0.5), Vec3::new(4.5, 1.0, 4.5), &at_end));
     }
 
     #[test]

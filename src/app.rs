@@ -894,7 +894,9 @@ impl ApplicationHandler for App {
             }
 
             // Debug: VOXELCRAFT_MOBS=1 spawns one of each species on a flat stage and ticks them a
-            // moment so they settle onto it (M27 typed-mob verification; pair with VOXELCRAFT_CAM).
+            // moment to settle (M27 mob verification). Note: with the player within ~14 blocks and
+            // line-of-sight, hostile species will already be in Chase/Attack in the logged tally —
+            // that exercises the M28 AI rather than showing a neutral idle state.
             if std::env::var("VOXELCRAFT_MOBS").is_ok() {
                 for z in 20..=28 {
                     for x in 2..=20 {

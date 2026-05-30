@@ -106,7 +106,10 @@ pub fn compute(neigh: &Neighborhood) -> Vec<u8> {
                 if nx < -BP || nx >= s + BP || ny < -BP || ny >= s + BP || nz < -BP || nz >= s + BP {
                     continue;
                 }
-                if block::is_opaque(neigh.block_or_air(nx, ny, nz)) {
+                // Partial blocks (slabs/stairs) are full-collision solids and block light like a
+                // cube; glass + plants let it pass. `is_volume_solid` = opaque cubes + partials,
+                // which also matches what the RTX volume treats as an occluder (no raster/RTX split).
+                if block::is_volume_solid(neigh.block_or_air(nx, ny, nz)) {
                     continue;
                 }
                 let nl = l - 1;
