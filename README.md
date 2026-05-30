@@ -38,17 +38,18 @@ The world auto-saves to `saves/world/` on quit.
 | **Left-Shift** | Descend (fly) |
 | **Left-Ctrl** | Sprint / fly boost |
 | **F** | Toggle fly / walk |
-| **Left-click** | Break block |
-| **Right-click** | Place selected block |
+| **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
+| **Right-click** | Place block, or open a crafting table |
+| **Q** | Drop one of the selected item |
 | **1–9 / scroll** | Select hotbar slot |
-| **E** | Open / close inventory |
+| **E** | Open / close inventory (with a 2×2 craft grid) |
 | **R** | Cycle ray-traced lighting: off → shadows → shadows + GI |
 | **F3** | Toggle debug overlay (fps, position, biome, facing) |
 | **P** | Save world |
 | **Esc** | Close menu, or quit |
 
-Breaking a block drops a collectible item that falls into your inventory; the hotbar shows stack
-counts and the selected item's name.
+Mining yields drops (stone → cobblestone, ores need the right pickaxe tier) that fall into your
+inventory; the hotbar shows stack counts, durability bars, and the selected item's name.
 
 ## Features
 
@@ -75,9 +76,14 @@ counts and the selected item's name.
 **Gameplay & UI**
 - Swept-AABB **player physics** (walk/fly, gravity, jump, sprint), 3D-DDA block targeting, break/place
   with incremental re-meshing, and a block highlight.
-- **Survival basics**: health + hunger, fall damage, hunger drain/regen/starvation, death → respawn.
+- **Progressive mining**: hold to break, timed by per-block hardness, with a crack overlay; bedrock is
+  unbreakable. **Tools** (5 tiers × pickaxe/axe/shovel/sword/hoe) speed up mining, gate ore drops by
+  harvest level, and wear down with **durability**.
+- **Crafting**: a data-driven shaped + shapeless recipe registry; a 2×2 grid in the inventory and a
+  3×3 grid at a crafting table, with a live result preview (planks, sticks, tools, furnace, chest, …).
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
-  screen with drag/drop and tooltips, and persistence.
+  screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities, and
+  persistence. Survival basics: health + hunger, fall damage, regen/starvation, death drops + respawn.
 - **Mobs + item drops**: AABB entities that wander and drop collectible items, lit by the same
   ray-traced pipeline as the world.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
@@ -104,8 +110,9 @@ src/
   raycast.rs        Amanatides–Woo voxel DDA (block targeting)
   player.rs         AABB collision, gravity/jump/fly, input, survival
   entity.rs         mobs + dropped items: AABB physics, wander AI, GI-lit box geometry
-  item.rs           item registry, ItemStack, Inventory (hotbar/main/armor/cursor)
-  overlay.rs        HUD, hotbar, inventory screen, block highlight (UI geometry)
+  item.rs           item + tool registry, ItemStack (durability), Inventory, slot-click logic
+  crafting.rs       data-driven shaped/shapeless recipe registry + grid matching
+  overlay.rs        HUD, hotbar, inventory/crafting screens, block + crack highlight (UI geometry)
   frustum.rs        Gribb–Hartmann frustum culling
   renderer.rs       pipelines (chunk/water/highlight/UI) + atlas/font bind groups, frame recording
   persistence.rs    LZ4 chunk save/load, level header, inventory save_state
@@ -121,14 +128,15 @@ ray-traced shadows, AO, and global illumination rather than idling.
 
 Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and exits — used to
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
-`VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv`, `VOXELCRAFT_ROOM`.
+`VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft`,
+`VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`.
 
 ## Roadmap
 
-Done: the full engine, world generation, lighting, rendering, inventory, and block library. In
-progress / planned: progressive mining with tool tiers, crafting + smelting, food & deeper survival,
-typed mobs + combat, structures (dungeons/villages), an RTX temporal denoiser, particles + audio,
-redstone, and additional dimensions.
+Done: the full engine, world generation, lighting, rendering, the block/item library, inventory,
+**progressive mining, tools + durability, and crafting**. Next up: furnace smelting, food & deeper
+survival, armor; then typed mobs + combat, structures (dungeons/villages), an RTX temporal denoiser,
+particles + audio, redstone, and additional dimensions.
 
 ## License
 
