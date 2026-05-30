@@ -412,6 +412,17 @@ impl ApplicationHandler for App {
             game.load_all_blocking(&gpu, &renderer, player.position);
             let highlight: Option<IVec3> = None;
 
+            // Debug knob: VOXELCRAFT_PLACE="x,y,z,id;x,y,z,id" places blocks before the shot
+            // (milestone verification — e.g. a glowstone to check emissive lighting).
+            if let Ok(s) = std::env::var("VOXELCRAFT_PLACE") {
+                for spec in s.split(';') {
+                    let v: Vec<i32> = spec.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                    if v.len() == 4 {
+                        game.set_block(&gpu, &renderer, IVec3::new(v[0], v[1], v[2]), v[3] as u16);
+                    }
+                }
+            }
+
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.
             game.prime_volume(&gpu, player.position);
 

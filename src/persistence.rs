@@ -94,7 +94,8 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
                     .map(|b| u16::from_le_bytes([b[0], b[1]]))
                     .collect();
                 let solid_count = blocks.iter().filter(|&&b| b != 0).count() as u32;
-                map.insert(pos, Chunk { blocks, solid_count });
+                let light = vec![0u8; CHUNK_VOLUME];
+                map.insert(pos, Chunk { blocks, light, solid_count });
             }
         }
         o += clen;
@@ -141,6 +142,7 @@ mod tests {
         blocks[CHUNK_VOLUME - 1] = 7;
         let chunk = Chunk {
             blocks: blocks.clone(),
+            light: vec![0u8; CHUNK_VOLUME],
             solid_count: 3,
         };
         let pos = IVec3::new(-3, 2, 7);

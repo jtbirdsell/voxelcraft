@@ -85,6 +85,8 @@ fn tile_average(tile: u32) -> vec3<f32> {
         case 12u: { return vec3<f32>(1.0, 0.42, 0.06); }  // lava
         case 13u: { return vec3<f32>(0.86, 0.55, 0.58); } // mob body
         case 14u: { return vec3<f32>(0.80, 0.50, 0.52); } // mob head
+        case 15u: { return vec3<f32>(0.85, 0.62, 0.28); } // torch
+        case 16u: { return vec3<f32>(0.95, 0.82, 0.45); } // glowstone
         default:  { return vec3<f32>(1.0, 0.0, 1.0); }
     }
 }
@@ -136,9 +138,9 @@ fn voxel_color(id: u32) -> vec3<f32> {
 // Emissive radiance leaving a voxel (0 for ordinary blocks). Lava glows; GI and reflection rays
 // that hit it pick up this light, so a lava pool illuminates and is mirrored by its surroundings.
 fn voxel_emission(id: u32) -> vec3<f32> {
-    if (id == 11u) {
-        return vec3<f32>(1.5, 0.5, 0.1); // warm lava glow
-    }
+    if (id == 11u) { return vec3<f32>(1.5, 0.5, 0.1); }  // lava
+    if (id == 12u) { return vec3<f32>(1.6, 0.9, 0.35); } // torch
+    if (id == 13u) { return vec3<f32>(1.8, 1.4, 0.7); }  // glowstone
     return vec3<f32>(0.0);
 }
 

@@ -15,6 +15,8 @@ pub const SNOW: BlockId = 8;
 pub const COAL_ORE: BlockId = 9;
 pub const IRON_ORE: BlockId = 10;
 pub const LAVA: BlockId = 11;
+pub const TORCH: BlockId = 12;
+pub const GLOWSTONE: BlockId = 13;
 
 /// A block participates in collision (fluids are passable).
 #[inline]
@@ -91,6 +93,8 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         COAL_ORE => [0.28, 0.28, 0.30],
         IRON_ORE => [0.60, 0.52, 0.45],
         LAVA => [1.0, 0.42, 0.06],
+        TORCH => [0.85, 0.62, 0.28],
+        GLOWSTONE => [0.95, 0.82, 0.45],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -100,8 +104,37 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
 pub fn emission(id: BlockId) -> f32 {
     match id {
         LAVA => 1.0,
+        TORCH => 0.9,
+        GLOWSTONE => 1.0,
         _ => 0.0,
     }
+}
+
+/// Block-light emitted (0..15), for the light flood (M14b). Torch/glowstone/lava are sources.
+pub fn light_emission(id: BlockId) -> u8 {
+    match id {
+        GLOWSTONE => 15,
+        TORCH => 14,
+        LAVA => 11,
+        _ => 0,
+    }
+}
+
+/// Light lost when entering this block (1 for air/transparent; 15 fully blocks). Opaque solids stop
+/// light; fluids and (later) glass/foliage let it pass with light attenuation.
+pub fn light_attenuation(id: BlockId) -> u8 {
+    match id {
+        AIR => 1,
+        WATER => 2,
+        _ if is_opaque(id) => 15,
+        _ => 1,
+    }
+}
+
+/// Whether light can pass through this block at all (used as the skylight vertical-stop test).
+#[inline]
+pub fn transmits_light(id: BlockId) -> bool {
+    !is_opaque(id)
 }
 
 /// Atlas tile ids (M13). Index = `row*ATLAS_COLS + col` into the procedural texture atlas. Kept
@@ -123,6 +156,8 @@ pub mod tile {
     pub const LAVA: u32 = 12;
     pub const MOB: u32 = 13;
     pub const MOB_HEAD: u32 = 14;
+    pub const TORCH: u32 = 15;
+    pub const GLOWSTONE: u32 = 16;
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 
@@ -167,6 +202,8 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         COAL_ORE => tile::COAL,
         IRON_ORE => tile::IRON,
         LAVA => tile::LAVA,
+        TORCH => tile::TORCH,
+        GLOWSTONE => tile::GLOWSTONE,
         _ => tile::MAGENTA,
     }
 }

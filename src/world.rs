@@ -21,10 +21,12 @@ fn local_index(x: usize, y: usize, z: usize) -> usize {
     x + CHUNK_SIZE * (z + CHUNK_SIZE * y)
 }
 
-/// One cubic section of blocks.
+/// One cubic section of blocks. `light` packs sky (hi nibble) + block (lo nibble) light per voxel;
+/// it is derived (recomputed on load, never serialized) and filled by the light flood (M14).
 #[derive(Clone)]
 pub struct Chunk {
     pub blocks: Vec<BlockId>,
+    pub light: Vec<u8>,
     pub solid_count: u32,
 }
 
@@ -33,6 +35,7 @@ impl Chunk {
         let solid_count = if id == block::AIR { 0 } else { CHUNK_VOLUME as u32 };
         Self {
             blocks: vec![id; CHUNK_VOLUME],
+            light: vec![0; CHUNK_VOLUME],
             solid_count,
         }
     }
@@ -40,6 +43,26 @@ impl Chunk {
     #[inline]
     pub fn get(&self, x: usize, y: usize, z: usize) -> BlockId {
         self.blocks[local_index(x, y, z)]
+    }
+
+    #[inline]
+    pub fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.light[local_index(x, y, z)]
+    }
+
+    #[inline]
+    pub fn sky_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.light[local_index(x, y, z)] >> 4
+    }
+
+    #[inline]
+    pub fn block_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.light[local_index(x, y, z)] & 0x0F
+    }
+
+    #[inline]
+    pub fn set_light(&mut self, x: usize, y: usize, z: usize, sky: u8, block_l: u8) {
+        self.light[local_index(x, y, z)] = (sky << 4) | (block_l & 0x0F);
     }
 
     #[inline]

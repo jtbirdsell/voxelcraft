@@ -49,6 +49,8 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::LAVA => [1.0, 0.42, 0.06],
         T::MOB => [0.86, 0.55, 0.58],
         T::MOB_HEAD => [0.80, 0.50, 0.52],
+        T::TORCH => [0.85, 0.62, 0.28],
+        T::GLOWSTONE => [0.95, 0.82, 0.45],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -146,6 +148,23 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 3] {
         }
         T::MOB | T::MOB_HEAD => {
             c = shade(base, (n - 0.5) * 0.10);
+        }
+        T::GLOWSTONE => {
+            // Lumpy yellow rock with bright nodules.
+            c = shade(base, (m - 0.5) * 0.20);
+            if blob(x, y, 4) {
+                c = [1.0, 0.95, 0.7];
+            }
+        }
+        T::TORCH => {
+            // Brown stick lower, bright flame near the top.
+            if y < 5 {
+                let flame = [1.0, 0.85, 0.35];
+                c = shade(flame, (n - 0.5) * 0.10);
+            } else {
+                let stick = [0.45, 0.32, 0.16];
+                c = shade(stick, (m - 0.5) * 0.18);
+            }
         }
         _ => {}
     }

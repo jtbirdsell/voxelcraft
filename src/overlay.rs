@@ -60,10 +60,10 @@ impl Hotbar {
                 block::SAND,
                 block::WOOD,
                 block::LEAVES,
-                block::SNOW,
+                block::GLOWSTONE,
+                block::TORCH,
                 block::WATER,
                 block::LAVA,
-                block::COAL_ORE,
             ],
             selected: 0,
         }
