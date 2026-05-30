@@ -150,14 +150,14 @@ impl ChunkRenderer {
         self.sky_color
     }
 
-    /// Record the chunk pass into an existing encoder against arbitrary color/depth targets.
-    /// Shared by the on-screen present path and the offscreen screenshot path.
+    /// Record the chunk pass into an existing encoder against arbitrary color/depth targets,
+    /// drawing every mesh in `meshes`. Shared by the present and screenshot paths.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
-        mesh: &GpuMesh,
+        meshes: &[&GpuMesh],
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("chunk-pass"),
@@ -183,16 +183,18 @@ impl ChunkRenderer {
             multiview_mask: None,
         });
 
-        if mesh.index_count > 0 {
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        for mesh in meshes {
+            if mesh.index_count > 0 {
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
         }
     }
 
-    pub fn render(&self, gpu: &Gpu, mesh: &GpuMesh) {
+    pub fn render_world(&self, gpu: &Gpu, meshes: &[&GpuMesh]) {
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -210,7 +212,7 @@ impl ChunkRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame-encoder"),
             });
-        self.record(&mut encoder, &view, &gpu.depth_view, mesh);
+        self.record(&mut encoder, &view, &gpu.depth_view, meshes);
         gpu.queue.submit(Some(encoder.finish()));
         frame.present();
     }

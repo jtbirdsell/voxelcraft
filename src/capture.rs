@@ -7,7 +7,7 @@ use crate::renderer::{ChunkRenderer, GpuMesh};
 pub fn screenshot(
     gpu: &Gpu,
     renderer: &ChunkRenderer,
-    mesh: &GpuMesh,
+    meshes: &[&GpuMesh],
     width: u32,
     height: u32,
     path: &str,
@@ -62,7 +62,7 @@ pub fn screenshot(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("shot-encoder"),
     });
-    renderer.record(&mut encoder, &color_view, &depth_view, mesh);
+    renderer.record(&mut encoder, &color_view, &depth_view, meshes);
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: &color,
