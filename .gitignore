@@ -1,4 +1,5 @@
 /target
+/.claude
 
 # Verification / scratch artifacts
 /*.png
