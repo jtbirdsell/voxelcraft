@@ -1055,6 +1055,12 @@ impl Game {
         out
     }
 
+    /// Every loaded non-empty mesh (no frustum cull). Used for the hardware-RT TLAS, since
+    /// off-screen geometry still casts shadows and is hit by GI rays. (M33-G5)
+    pub fn all_meshes(&self) -> Vec<&GpuMesh> {
+        self.meshes.values().filter_map(|m| m.as_ref()).collect()
+    }
+
     pub fn loaded_chunk_count(&self) -> usize {
         self.world.chunks.len()
     }

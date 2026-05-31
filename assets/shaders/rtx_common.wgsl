@@ -226,8 +226,9 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -> Hi
     return h;
 }
 
-// Sun visibility (1 lit, 0 shadowed) from a surface point, via a short DDA shadow ray.
-fn sun_visibility(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {
+// Sun visibility (1 lit, 0 shadowed) from a surface point, via a short DDA shadow ray. The active
+// `sun_visibility()` (DDA wrapper or hardware ray query) is appended by the renderer per VOXELCRAFT_TRACER.
+fn sun_visibility_dda(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {
     let sun = normalize(camera.sun_dir.xyz);
     if (sun.y <= 0.02) {
         return 1.0;

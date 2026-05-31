@@ -54,6 +54,9 @@ pub struct GpuMesh {
     pub opaque: Option<GpuPart>,
     pub water: Option<GpuPart>,
     pub translucent: Option<GpuPart>,
+    /// Hardware-RT bottom-level acceleration structure built from the opaque geometry (M33-G5),
+    /// referenced by the per-frame TLAS. `None` when RT is unavailable or the chunk is empty.
+    pub blas: Option<wgpu::Blas>,
 }
 
 pub struct ChunkRenderer {
@@ -70,6 +73,8 @@ pub struct ChunkRenderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     volume_bgl: wgpu::BindGroupLayout,
+    as_bgl: Option<wgpu::BindGroupLayout>,
+    use_hw_rt: bool,
     sky_color: Cell<wgpu::Color>,
 }
 
@@ -79,8 +84,28 @@ impl ChunkRenderer {
 
         // Both the chunk and water shaders are prefixed with the shared RTX scaffolding
         // (camera/volume bindings, vertex stage, the DDA voxel tracer) so there is one copy.
+        // M33-G5: select the shadow tracer at build time. Hardware ray query when the backend
+        // exposes it and VOXELCRAFT_TRACER != "dda"; else the software DDA. Re-run with
+        // VOXELCRAFT_TRACER=dda to A/B against the DDA golden. The renderer appends the active
+        // `sun_visibility()` (+ the TLAS binding at group 3 in the hardware case).
+        let use_hw_rt =
+            gpu.rt_enabled && std::env::var("VOXELCRAFT_TRACER").map_or(true, |v| v != "dda");
+        log::info!("tracer: {}", if use_hw_rt { "hardware ray query (shadows)" } else { "software DDA" });
         let rtx_common = include_str!("../../assets/shaders/rtx_common.wgsl");
-        let chunk_src = format!("{rtx_common}{}", include_str!("../../assets/shaders/chunk.wgsl"));
+        let rt_prefix = if use_hw_rt {
+            "enable wgpu_ray_query;\n@group(3) @binding(0) var rt_acc: acceleration_structure;\n"
+        } else {
+            ""
+        };
+        let sun_vis = if use_hw_rt {
+            include_str!("../../assets/shaders/sun_vis_hw.wgsl")
+        } else {
+            "fn sun_visibility(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {\n    return sun_visibility_dda(world_pos, n, max_dist);\n}\n"
+        };
+        let chunk_src = format!(
+            "{rt_prefix}{rtx_common}{sun_vis}{}",
+            include_str!("../../assets/shaders/chunk.wgsl")
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk-shader"),
             source: wgpu::ShaderSource::Wgsl(chunk_src.into()),
@@ -203,9 +228,28 @@ impl ChunkRenderer {
             ],
         });
 
+        // Optional group(3): the world TLAS, for hardware shadow rays (M33-G5).
+        let as_bgl = if use_hw_rt {
+            Some(device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("rt-as-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
+                    count: None,
+                }],
+            }))
+        } else {
+            None
+        };
+        let mut chunk_bgls: Vec<Option<&wgpu::BindGroupLayout>> =
+            vec![Some(&camera_bgl), Some(&volume_bgl), Some(&atlas_bgl)];
+        if let Some(b) = &as_bgl {
+            chunk_bgls.push(Some(b));
+        }
         let chunk_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("chunk-pipeline-layout"),
-            bind_group_layouts: &[Some(&camera_bgl), Some(&volume_bgl), Some(&atlas_bgl)],
+            bind_group_layouts: &chunk_bgls,
             immediate_size: 0,
         });
 
@@ -268,7 +312,10 @@ impl ChunkRenderer {
         });
 
         // Translucent water pipeline: same vertex format, alpha blend, depth test but no write.
-        let water_src = format!("{rtx_common}{}", include_str!("../../assets/shaders/water.wgsl"));
+        let water_src = format!(
+            "{rt_prefix}{rtx_common}{sun_vis}{}",
+            include_str!("../../assets/shaders/water.wgsl")
+        );
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("water-shader"),
             source: wgpu::ShaderSource::Wgsl(water_src.into()),
@@ -319,7 +366,10 @@ impl ChunkRenderer {
 
         // Glass pipeline: a translucent clone of the water pipeline (depth-tested, NO depth write so
         // water + farther glass behind a pane still show through) with no UV animation (glass.wgsl).
-        let glass_src = format!("{rtx_common}{}", include_str!("../../assets/shaders/glass.wgsl"));
+        let glass_src = format!(
+            "{rt_prefix}{rtx_common}{sun_vis}{}",
+            include_str!("../../assets/shaders/glass.wgsl")
+        );
         let glass_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glass-shader"),
             source: wgpu::ShaderSource::Wgsl(glass_src.into()),
@@ -637,6 +687,8 @@ impl ChunkRenderer {
             camera_buffer,
             camera_bind_group,
             volume_bgl,
+            as_bgl,
+            use_hw_rt,
             sky_color: Cell::new(wgpu::Color {
                 r: 0.46,
                 g: 0.64,
@@ -654,12 +706,38 @@ impl ChunkRenderer {
         &self.volume_bgl
     }
 
+    /// Whether hardware ray query is active (backend supports it and VOXELCRAFT_TRACER != dda). When
+    /// true the render path must rebuild + bind the world TLAS each frame (group 3).
+    pub fn use_hw_rt(&self) -> bool {
+        self.use_hw_rt
+    }
+
+    /// Build the group(3) bind group binding the world TLAS for hardware shadow rays. Only valid
+    /// when `use_hw_rt`; rebuilt each frame from the freshly-built TLAS.
+    pub fn make_as_bind_group(&self, device: &wgpu::Device, tlas: &wgpu::Tlas) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rt-as-bg"),
+            layout: self.as_bgl.as_ref().expect("as_bgl exists when use_hw_rt"),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::AccelerationStructure(tlas),
+            }],
+        })
+    }
+
     pub fn upload_mesh(&self, gpu: &Gpu, mesh: &MeshData) -> GpuMesh {
         let rt = gpu.rt_enabled;
+        let opaque = upload_geometry(&gpu.device, &mesh.opaque, rt);
+        let blas = if rt {
+            opaque.as_ref().map(|p| crate::gfx::rt::build_chunk_blas(gpu, p))
+        } else {
+            None
+        };
         GpuMesh {
-            opaque: upload_geometry(&gpu.device, &mesh.opaque, rt),
+            opaque,
             water: upload_geometry(&gpu.device, &mesh.water, rt),
             translucent: upload_geometry(&gpu.device, &mesh.translucent, rt),
+            blas,
         }
     }
 
@@ -725,6 +803,7 @@ impl ChunkRenderer {
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
+        as_bg: Option<&wgpu::BindGroup>,
     ) {
         // Opaque pass: clears the HDR color + G-buffer (normal, motion) + depth, then draws.
         {
@@ -775,6 +854,9 @@ impl ChunkRenderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, volume_bg, &[]);
             pass.set_bind_group(2, &self.atlas_bind_group, &[]);
+            if let Some(b) = as_bg {
+                pass.set_bind_group(3, b, &[]);
+            }
             for mesh in meshes {
                 if let Some(part) = &mesh.opaque {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
@@ -814,6 +896,9 @@ impl ChunkRenderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, volume_bg, &[]);
             pass.set_bind_group(2, &self.atlas_bind_group, &[]);
+            if let Some(b) = as_bg {
+                pass.set_bind_group(3, b, &[]);
+            }
             for mesh in meshes {
                 if let Some(part) = &mesh.translucent {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
@@ -852,6 +937,9 @@ impl ChunkRenderer {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, volume_bg, &[]);
             pass.set_bind_group(2, &self.atlas_bind_group, &[]);
+            if let Some(b) = as_bg {
+                pass.set_bind_group(3, b, &[]);
+            }
             for mesh in meshes {
                 if let Some(part) = &mesh.water {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
@@ -875,11 +963,12 @@ impl ChunkRenderer {
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
+        as_bg: Option<&wgpu::BindGroup>,
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
     ) {
         // Scene passes render into the HDR buffer + G-buffer: opaque (clears), then glass + water.
-        self.record(encoder, targets, depth_view, meshes, volume_bg);
+        self.record(encoder, targets, depth_view, meshes, volume_bg, as_bg);
 
         // Build overlay buffers (kept alive until this function returns; wgpu retains the
         // underlying resources in the command buffer until execution).
@@ -992,6 +1081,7 @@ impl ChunkRenderer {
         targets: &RenderTargets,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
+        as_bg: Option<&wgpu::BindGroup>,
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
     ) {
@@ -1020,6 +1110,7 @@ impl ChunkRenderer {
             &gpu.depth_view,
             meshes,
             volume_bg,
+            as_bg,
             highlight,
             ui_verts,
         );

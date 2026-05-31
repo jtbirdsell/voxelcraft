@@ -67,6 +67,14 @@ pub fn screenshot(
     });
 
     let targets = renderer.make_targets(device, width, height);
+    // Build a one-shot world TLAS for hardware shadow rays (M33-G5), bound at group 3.
+    let mut rt_scene = crate::gfx::rt::RtScene::new();
+    let world_tlas = if renderer.use_hw_rt() {
+        rt_scene.rebuild(gpu, meshes)
+    } else {
+        None
+    };
+    let as_bg = world_tlas.map(|t| renderer.make_as_bind_group(device, t));
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("shot-encoder"),
     });
@@ -78,6 +86,7 @@ pub fn screenshot(
         &depth_view,
         meshes,
         volume_bg,
+        as_bg.as_ref(),
         highlight,
         ui_verts,
     );

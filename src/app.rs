@@ -24,6 +24,7 @@ use crate::item::Inventory;
 use crate::persistence::Level;
 use crate::player::{Input, Player};
 use crate::gfx::graph::RenderTargets;
+use crate::gfx::rt::RtScene;
 use crate::renderer::ChunkRenderer;
 use crate::{block, capture, crafting, item, overlay, persistence, raycast, smelting};
 
@@ -59,6 +60,7 @@ struct State {
     gpu: Gpu,
     renderer: ChunkRenderer,
     targets: RenderTargets,
+    rt_scene: RtScene,
     game: Game,
     camera: Camera,
     player: Player,
@@ -644,9 +646,24 @@ impl App {
             ));
         }
         let volume_bg = state.game.volume_bind_group();
-        state
-            .renderer
-            .render_frame(&state.gpu, &state.targets, &visible, volume_bg, highlight, &ui);
+        let as_bg = if state.renderer.use_hw_rt() {
+            let all = state.game.all_meshes();
+            state
+                .rt_scene
+                .rebuild(&state.gpu, &all)
+                .map(|t| state.renderer.make_as_bind_group(&state.gpu.device, t))
+        } else {
+            None
+        };
+        state.renderer.render_frame(
+            &state.gpu,
+            &state.targets,
+            &visible,
+            volume_bg,
+            as_bg.as_ref(),
+            highlight,
+            &ui,
+        );
 
         // Stats.
         state.fps_accum += dt;
@@ -1132,10 +1149,11 @@ impl ApplicationHandler for App {
             if std::env::var("VOXELCRAFT_AS_STATS").is_ok() {
                 crate::gfx::rt::log_as_stats(&gpu, &visible);
             }
+            let all = game.all_meshes();
             capture::screenshot(
                 &gpu,
                 &renderer,
-                &visible,
+                &all,
                 volume_bg,
                 highlight,
                 &ui,
@@ -1187,10 +1205,12 @@ impl ApplicationHandler for App {
         renderer.set_sky(environment.wgpu_clear());
 
         let targets = renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height);
+        let rt_scene = RtScene::new();
         self.state = Some(State {
             gpu,
             renderer,
             targets,
+            rt_scene,
             game,
             camera,
             player,
