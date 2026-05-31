@@ -30,15 +30,16 @@ The world auto-saves to `saves/world/` on quit.
 
 ## GPU backend
 
-Defaults to the **Vulkan** backend — the only one wgpu exposes hardware ray tracing (the RTX 4090's
-RT cores) and DLSS on today. Override with `VOXELCRAFT_BACKEND=vulkan|dx12|gl`.
+Defaults to the **DX12** backend with hardware ray tracing via the **DXC** shader compiler (the
+default FXC cannot compile ray-tracing shaders). The build script stages `dxcompiler.dll` +
+`dxil.dll` next to the executable — from a vendored `dll/` directory if present, else your installed
+Windows SDK; if neither is found, DX12 falls back to FXC and the software DDA tracer. (`dxil.dll` is a
+Microsoft redistributable and is **not** committed to this repo — it is copied from your local
+Windows SDK at build time.)
 
-The **DX12** backend is also hardware-RT-capable, but only through the **DXC** shader compiler (the
-default FXC cannot compile ray-tracing shaders). The build script stages `dxcompiler.dll` + `dxil.dll`
-next to the executable — from a vendored `dll/` directory if present, else your installed Windows SDK;
-if neither is found, DX12 falls back to FXC and the software DDA tracer. DX12 does **not** get DLSS
-(that wrapper is Vulkan-only). Note: `dxil.dll` is a Microsoft redistributable and is **not** committed
-to this repo — it is copied from your local Windows SDK at build time.
+Override with `VOXELCRAFT_BACKEND=dx12|vulkan|gl`. **Vulkan** is the fallback: it also has hardware RT
+and is the only backend wgpu exposes **DLSS** on, but DX12 renders better here so it's the default.
+GL has no hardware RT (software DDA tracer only).
 
 ## Controls
 

@@ -1,9 +1,9 @@
 //! GPU context: instance/surface/device/queue, swapchain config, and a depth buffer.
-//! Adapter selection defaults to **Vulkan** — the only wgpu backend that exposes hardware ray
-//! queries (`EXPERIMENTAL_RAY_QUERY`) **and** DLSS today. Override with `VOXELCRAFT_BACKEND=
-//! vulkan|dx12|gl`. DX12 also gets hardware RT via the bundled DXC compiler (but no DLSS — that's
-//! Vulkan-only); GL has neither and uses the software DDA tracer. The device opts into hardware ray
-//! tracing whenever the chosen adapter advertises it.
+//! Adapter selection defaults to **DX12** — better visual parity and Windows windowing on this box,
+//! with hardware RT via the DXC compiler (staged next to the exe by build.rs). Vulkan is the
+//! fallback: it also has hardware RT and is the only backend wgpu exposes DLSS on, but DX12 renders
+//! better here so it leads. Override with `VOXELCRAFT_BACKEND=dx12|vulkan|gl`. GL has no hardware RT
+//! (software DDA tracer). The device opts into hardware ray tracing whenever the adapter advertises it.
 
 use std::sync::Arc;
 use winit::window::Window;
@@ -86,6 +86,12 @@ impl Gpu {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        log::info!(
+            "Surface format: {:?} (sRGB={}); available: {:?}",
+            format,
+            format.is_srgb(),
+            caps.formats
+        );
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -152,9 +158,9 @@ async fn init_adapter(
     for backends in backend_order() {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = backends;
-        // Use DXC on DX12 (bundled via the static-dxc feature) — FXC cannot compile ray-tracing
-        // shaders, so without this DX12 never advertises EXPERIMENTAL_RAY_QUERY. Ignored by the
-        // Vulkan/GL backends. WGPU_DX12_COMPILER overrides it.
+        // Use DXC on DX12 (dxcompiler.dll staged next to the exe by build.rs) — FXC cannot compile
+        // ray-tracing shaders, so without DXC the DX12 backend never advertises
+        // EXPERIMENTAL_RAY_QUERY. Ignored by the Vulkan/GL backends. WGPU_DX12_COMPILER overrides.
         desc.backend_options.dx12.shader_compiler =
             wgpu::Dx12Compiler::from_env().unwrap_or(wgpu::Dx12Compiler::Auto);
         let instance = wgpu::Instance::new(desc);
@@ -176,17 +182,17 @@ async fn init_adapter(
     panic!("No compatible GPU adapter found (tried, in order: {:?})", backend_order());
 }
 
-/// Backend preference order, defaulting to Vulkan (hardware RT + DLSS) with the others as
-/// fallbacks. Override with `VOXELCRAFT_BACKEND=vulkan|dx12|gl`.
+/// Backend preference order, defaulting to **DX12** (hardware RT via DXC; best visual parity here)
+/// with Vulkan/GL as fallbacks. Override with `VOXELCRAFT_BACKEND=dx12|vulkan|gl`.
 fn backend_order() -> [wgpu::Backends; 3] {
     use wgpu::Backends as B;
     match std::env::var("VOXELCRAFT_BACKEND").ok().as_deref() {
-        Some("dx12") | Some("d3d12") => [B::DX12, B::VULKAN, B::GL],
-        Some("gl") | Some("opengl") => [B::GL, B::VULKAN, B::DX12],
-        Some("vulkan") | Some("vk") | None => [B::VULKAN, B::DX12, B::GL],
+        Some("vulkan") | Some("vk") => [B::VULKAN, B::DX12, B::GL],
+        Some("gl") | Some("opengl") => [B::GL, B::DX12, B::VULKAN],
+        Some("dx12") | Some("d3d12") | None => [B::DX12, B::VULKAN, B::GL],
         Some(other) => {
-            log::warn!("unknown VOXELCRAFT_BACKEND={other:?}; defaulting to vulkan");
-            [B::VULKAN, B::DX12, B::GL]
+            log::warn!("unknown VOXELCRAFT_BACKEND={other:?}; defaulting to dx12");
+            [B::DX12, B::VULKAN, B::GL]
         }
     }
 }

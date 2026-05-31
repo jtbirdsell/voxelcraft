@@ -29,12 +29,24 @@ rustc-hash = "2.1.2"
 wgpu = "=29.0.3"
 winit = "0.30.13"
 
+# `cargo run --release` is the day-to-day build. LTO off + many codegen units + incremental keeps
+# relinks short on the 32-thread CPU; opt-level 3 keeps worldgen/mesher/gameplay fast. The 4090 is
+# vsync-bound, so the small runtime cost vs fat-LTO is invisible in play. (One-time: switching this
+# profile recompiles deps once; subsequent incremental rebuilds are much faster than the old ~50s.)
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = false
+codegen-units = 256
+incremental = true
 panic = "abort"
 strip = "debuginfo"
+
+# Maximum-optimization build for shipping / benchmarking: `cargo build --profile dist`.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+incremental = false
 
 # Optimize dependencies even in dev builds so the engine runs smoothly while iterating.
 [profile.dev.package."*"]
