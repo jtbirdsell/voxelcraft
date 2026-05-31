@@ -13,21 +13,32 @@ use crate::gfx::graph::{RenderTargets, GMOTION_FORMAT, GNORMAL_FORMAT, HDR_FORMA
 use crate::overlay::{self, LineVertex, UiVertex};
 use crate::voxel_volume::VoxelVolume;
 
-fn upload_geometry(device: &wgpu::Device, geom: &Geometry) -> Option<GpuPart> {
+fn upload_geometry(device: &wgpu::Device, geom: &Geometry, blas_input: bool) -> Option<GpuPart> {
     if geom.is_empty() {
         return None;
     }
+    // When hardware RT is available, the buffers double as BLAS inputs (M33-G4). Gated because the
+    // BLAS_INPUT usage is only valid on a device created with the ray-query feature.
+    let (vusage, iusage) = if blas_input {
+        (
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::BLAS_INPUT,
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT,
+        )
+    } else {
+        (wgpu::BufferUsages::VERTEX, wgpu::BufferUsages::INDEX)
+    };
     Some(GpuPart {
         vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chunk-vbuf"),
             contents: bytemuck::cast_slice(&geom.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: vusage,
         }),
         index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chunk-ibuf"),
             contents: bytemuck::cast_slice(&geom.indices),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: iusage,
         }),
+        vertex_count: geom.vertices.len() as u32,
         index_count: geom.indices.len() as u32,
     })
 }
@@ -35,6 +46,7 @@ fn upload_geometry(device: &wgpu::Device, geom: &Geometry) -> Option<GpuPart> {
 pub struct GpuPart {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
+    pub vertex_count: u32,
     pub index_count: u32,
 }
 
@@ -643,10 +655,11 @@ impl ChunkRenderer {
     }
 
     pub fn upload_mesh(&self, gpu: &Gpu, mesh: &MeshData) -> GpuMesh {
+        let rt = gpu.rt_enabled;
         GpuMesh {
-            opaque: upload_geometry(&gpu.device, &mesh.opaque),
-            water: upload_geometry(&gpu.device, &mesh.water),
-            translucent: upload_geometry(&gpu.device, &mesh.translucent),
+            opaque: upload_geometry(&gpu.device, &mesh.opaque, rt),
+            water: upload_geometry(&gpu.device, &mesh.water, rt),
+            translucent: upload_geometry(&gpu.device, &mesh.translucent, rt),
         }
     }
 

@@ -1129,6 +1129,9 @@ impl ApplicationHandler for App {
                 game.mesh_count(),
                 visible.len()
             );
+            if std::env::var("VOXELCRAFT_AS_STATS").is_ok() {
+                crate::gfx::rt::log_as_stats(&gpu, &visible);
+            }
             capture::screenshot(
                 &gpu,
                 &renderer,

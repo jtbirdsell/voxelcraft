@@ -8,6 +8,7 @@ pub(crate) mod environment;
 pub(crate) mod frustum;
 pub(crate) mod graph;
 pub(crate) mod renderer;
+pub(crate) mod rt;
 pub(crate) mod rt_probe;
 pub(crate) mod rt_spike;
 pub(crate) mod texture;
