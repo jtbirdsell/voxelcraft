@@ -292,18 +292,22 @@ impl Player {
         IVec3::new(e.x.floor() as i32, e.y.floor() as i32, e.z.floor() as i32)
     }
 
-    /// True if a solid block sits directly beneath the AABB footprint (sneak ledge test).
-    fn ground_below(&self, is_solid: &impl Fn(IVec3) -> bool) -> bool {
+    /// True if a solid surface (full or partial) sits directly beneath the AABB footprint (sneak
+    /// ledge test) — a sub-box whose top reaches the player's feet counts as support.
+    fn ground_below(&self, block_at: &impl Fn(IVec3) -> BlockId) -> bool {
         let (min, max) = self.aabb();
-        let y = (min.y - 0.06).floor() as i32;
+        let foot = min.y - 0.06;
+        let y = foot.floor() as i32;
         let x0 = min.x.floor() as i32;
         let x1 = (max.x - 1e-4).floor() as i32;
         let z0 = min.z.floor() as i32;
         let z1 = (max.z - 1e-4).floor() as i32;
         for vx in x0..=x1 {
             for vz in z0..=z1 {
-                if is_solid(IVec3::new(vx, y, vz)) {
-                    return true;
+                for b in block::solid_boxes(block_at(IVec3::new(vx, y, vz))) {
+                    if y as f32 + b[4] >= foot {
+                        return true;
+                    }
                 }
             }
         }
@@ -346,7 +350,6 @@ impl Player {
         dt: f32,
         yaw: f32,
         input: &Input,
-        is_solid: impl Fn(IVec3) -> bool,
         block_at: impl Fn(IVec3) -> BlockId,
         armor_points: u32,
     ) {
@@ -420,22 +423,22 @@ impl Player {
         let sneak_edge = input.sneak && self.on_ground && !self.flying && !in_water;
         if sneak_edge {
             let bx = self.position.x;
-            self.move_axis(0, delta.x, &is_solid);
-            if !self.ground_below(&is_solid) {
+            self.move_axis(0, delta.x, &block_at);
+            if !self.ground_below(&block_at) {
                 self.position.x = bx;
                 self.velocity.x = 0.0;
             }
             let bz = self.position.z;
-            self.move_axis(2, delta.z, &is_solid);
-            if !self.ground_below(&is_solid) {
+            self.move_axis(2, delta.z, &block_at);
+            if !self.ground_below(&block_at) {
                 self.position.z = bz;
                 self.velocity.z = 0.0;
             }
         } else {
-            self.move_axis(0, delta.x, &is_solid);
-            self.move_axis(2, delta.z, &is_solid);
+            self.move_axis(0, delta.x, &block_at);
+            self.move_axis(2, delta.z, &block_at);
         }
-        let hit_y = self.move_axis(1, delta.y, &is_solid);
+        let hit_y = self.move_axis(1, delta.y, &block_at);
 
         if self.flying {
             self.on_ground = false;
@@ -460,39 +463,48 @@ impl Player {
         }
     }
 
-    /// Move along one axis, then resolve any voxel overlap by clamping to the contact face.
-    /// Returns true if a collision was resolved.
-    fn move_axis(&mut self, axis: usize, amount: f32, is_solid: &impl Fn(IVec3) -> bool) -> bool {
+    /// Move along one axis, then resolve overlap by clamping the player AABB to the nearest face of
+    /// any block sub-box it penetrates (full cubes, but also slab/stair half-boxes). Returns true if
+    /// a collision was resolved.
+    fn move_axis(&mut self, axis: usize, amount: f32, block_at: &impl Fn(IVec3) -> BlockId) -> bool {
         if amount == 0.0 {
             return false;
         }
         let moved = comp(self.position, axis) + amount;
         set_comp(&mut self.position, axis, moved);
 
-        let (min, max) = self.aabb();
-        let x0 = min.x.floor() as i32;
-        let x1 = (max.x - 1e-4).floor() as i32;
-        let y0 = min.y.floor() as i32;
-        let y1 = (max.y - 1e-4).floor() as i32;
-        let z0 = min.z.floor() as i32;
-        let z1 = (max.z - 1e-4).floor() as i32;
+        let (pmin, pmax) = self.aabb();
+        let cmin = [pmin.x, pmin.y, pmin.z];
+        let cmax = [pmax.x, pmax.y, pmax.z];
+        let lo = [cmin[0].floor() as i32, cmin[1].floor() as i32, cmin[2].floor() as i32];
+        let hi = [
+            (cmax[0] - 1e-4).floor() as i32,
+            (cmax[1] - 1e-4).floor() as i32,
+            (cmax[2] - 1e-4).floor() as i32,
+        ];
 
-        let (lo, hi) = Self::offsets(axis);
+        let (off_lo, off_hi) = Self::offsets(axis);
         let mut clamp: Option<f32> = None;
-        for vx in x0..=x1 {
-            for vy in y0..=y1 {
-                for vz in z0..=z1 {
-                    if is_solid(IVec3::new(vx, vy, vz)) {
-                        let vcoord = match axis {
-                            0 => vx,
-                            1 => vy,
-                            _ => vz,
-                        } as f32;
+        for vx in lo[0]..=hi[0] {
+            for vy in lo[1]..=hi[1] {
+                for vz in lo[2]..=hi[2] {
+                    let base = [vx as f32, vy as f32, vz as f32];
+                    for b in block::solid_boxes(block_at(IVec3::new(vx, vy, vz))) {
+                        // World-space sub-box.
+                        let bmin = [base[0] + b[0], base[1] + b[1], base[2] + b[2]];
+                        let bmax = [base[0] + b[3], base[1] + b[4], base[2] + b[5]];
+                        // Only blocks the player overlaps on the two perpendicular axes can stop it.
+                        let perp = (0..3).filter(|&a| a != axis).all(|a| {
+                            cmin[a] < bmax[a] - 1e-4 && cmax[a] > bmin[a] + 1e-4
+                        });
+                        if !perp {
+                            continue;
+                        }
                         if amount > 0.0 {
-                            let p = vcoord - hi;
+                            let p = bmin[axis] - off_hi; // stop the leading face at the box near face
                             clamp = Some(clamp.map_or(p, |c| c.min(p)));
                         } else {
-                            let p = (vcoord + 1.0) - lo;
+                            let p = bmax[axis] - off_lo;
                             clamp = Some(clamp.map_or(p, |c| c.max(p)));
                         }
                     }
@@ -519,11 +531,11 @@ mod tests {
     #[test]
     fn player_falls_and_lands_on_floor() {
         // Solid floor occupying y in 0..10; air above.
-        let is_solid = |p: IVec3| p.y >= 0 && p.y < 10;
+        let blocks = |p: IVec3| if (0..10).contains(&p.y) { block::STONE } else { block::AIR };
         let mut player = Player::new(Vec3::new(0.5, 20.0, 0.5), false);
         let input = Input::default();
         for _ in 0..600 {
-            player.update(1.0 / 60.0, 0.0, &input, is_solid, ALL_AIR, 0);
+            player.update(1.0 / 60.0, 0.0, &input, blocks, 0);
         }
         assert!(player.on_ground, "player should be grounded");
         // Feet rest on the top face of the floor (y = 10).
@@ -535,14 +547,32 @@ mod tests {
     }
 
     #[test]
+    fn player_rests_at_half_height_on_a_slab() {
+        // A floor of stone slabs at y=0 (solid only in y 0..0.5); the player must rest at y=0.5,
+        // not y=1.0 — proves slabs collide as their true half-box, not a full cube.
+        let blocks = |p: IVec3| if p.y == 0 { block::STONE_SLAB } else { block::AIR };
+        let mut p = Player::new(Vec3::new(0.5, 8.0, 0.5), false);
+        let input = Input::default();
+        for _ in 0..600 {
+            p.update(1.0 / 60.0, 0.0, &input, blocks, 0);
+        }
+        assert!(p.on_ground);
+        assert!(
+            (p.position.y - 0.5).abs() < 0.05,
+            "feet should rest on the slab top (y=0.5), got {}",
+            p.position.y
+        );
+    }
+
+    #[test]
     fn player_cannot_pass_through_wall() {
         // Wall at x >= 5.
-        let is_solid = |p: IVec3| p.x >= 5;
+        let blocks = |p: IVec3| if p.x >= 5 { block::STONE } else { block::AIR };
         let mut player = Player::new(Vec3::new(0.5, 50.0, 0.5), true); // fly, no gravity
         let mut input = Input::default();
         input.forward = true; // yaw 0 -> forward is +x
         for _ in 0..600 {
-            player.update(1.0 / 60.0, 0.0, &input, is_solid, ALL_AIR, 0);
+            player.update(1.0 / 60.0, 0.0, &input, blocks, 0);
         }
         // AABB half-width is 0.3, wall face at x = 5, so max feet x = 4.7.
         assert!(player.position.x <= 4.71, "x = {}", player.position.x);
@@ -551,19 +581,18 @@ mod tests {
 
     #[test]
     fn air_drains_underwater_and_refills_in_air() {
-        let solid = |_: IVec3| false;
         let water = |_: IVec3| block::WATER;
         let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
         // Fully submerged: air should fall below full.
         for _ in 0..120 {
-            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, water, 0);
+            p.update(1.0 / 60.0, 0.0, &Input::default(), water, 0);
         }
         assert!(p.submerged, "eye should read as underwater");
         assert!(p.air < MAX_AIR, "air should drain underwater (air = {})", p.air);
         let low = p.air;
         // Back in open air: it refills.
         for _ in 0..120 {
-            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, ALL_AIR, 0);
+            p.update(1.0 / 60.0, 0.0, &Input::default(), ALL_AIR, 0);
         }
         assert!(!p.submerged);
         assert!(p.air > low, "air should refill out of water");
@@ -571,11 +600,10 @@ mod tests {
 
     #[test]
     fn drowning_damages_when_out_of_air() {
-        let solid = |_: IVec3| false;
         let water = |_: IVec3| block::WATER;
         let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
         for _ in 0..1200 {
-            p.update(1.0 / 60.0, 0.0, &Input::default(), solid, water, 0);
+            p.update(1.0 / 60.0, 0.0, &Input::default(), water, 0);
         }
         assert_eq!(p.air, 0.0);
         assert!(p.health < MAX_HEALTH, "drowning should hurt (hp = {})", p.health);
@@ -595,13 +623,14 @@ mod tests {
 
     #[test]
     fn saturation_drains_before_hunger() {
-        let solid = |p: IVec3| p.y < 0; // ground at y<0 so the player rests at y=0
+        // Ground at y<0 (stone) so the player rests at y=0; air (not water) elsewhere.
+        let blocks = |p: IVec3| if p.y < 0 { block::STONE } else { block::AIR };
         let mut p = Player::new(Vec3::new(0.5, 0.0, 0.5), false);
         let full_hunger = p.hunger;
         let mut input = Input::default();
         input.forward = true;
         for _ in 0..120 {
-            p.update(1.0 / 60.0, 0.0, &input, solid, ALL_AIR, 0);
+            p.update(1.0 / 60.0, 0.0, &input, blocks, 0);
         }
         // While saturation lasts, hunger is untouched.
         assert_eq!(p.hunger, full_hunger, "hunger should hold while saturation remains");

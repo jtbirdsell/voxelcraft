@@ -110,6 +110,31 @@ pub fn is_solid(id: BlockId) -> bool {
     id != AIR && id != WATER && id != LAVA && !is_plant(id)
 }
 
+/// A solid sub-box in a block's local 0..1 space: `[minx, miny, minz, maxx, maxy, maxz]`.
+pub type Aabb = [f32; 6];
+const BOX_FULL: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+const BOX_SLAB: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
+// Stairs: a bottom slab plus the upper-back quarter (fixed orientation, stepping toward +z).
+const BOX_STAIRS: [Aabb; 2] = [
+    [0.0, 0.0, 0.0, 1.0, 0.5, 1.0],
+    [0.0, 0.5, 0.5, 1.0, 1.0, 1.0],
+];
+const BOX_NONE: [Aabb; 0] = [];
+
+/// The solid collision boxes of a block (empty if passable). Full cubes are a single unit box;
+/// slabs/stairs return their true partial shape so the player can stand at half-height / step up.
+#[inline]
+pub fn solid_boxes(id: BlockId) -> &'static [Aabb] {
+    if !is_solid(id) {
+        return &BOX_NONE;
+    }
+    match render_kind(id) {
+        RenderKind::Slab => &BOX_SLAB,
+        RenderKind::Stairs => &BOX_STAIRS,
+        _ => &BOX_FULL,
+    }
+}
+
 /// Water or lava — simulated by the flowing-fluid tick and passable to the player.
 #[inline]
 pub fn is_fluid(id: BlockId) -> bool {

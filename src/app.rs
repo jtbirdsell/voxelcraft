@@ -358,7 +358,6 @@ impl App {
             dt,
             yaw,
             &state.input,
-            |p| game_ref.is_solid_at(p),
             |p| game_ref.block_at(p),
             armor,
         );
