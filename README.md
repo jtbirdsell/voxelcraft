@@ -92,9 +92,12 @@ position, albedo + skylight) and an ACES tonemap.
 - **Sun shadows** against the real voxel geometry.
 - **Ambient occlusion + one-bounce colored global illumination** (cosine-weighted hemisphere rays
   gather sky on a miss and sun-lit material color on a hit), gathered in a **deferred compute pass**
-  that writes a noisy demodulated irradiance buffer and composites it back — the input a denoiser /
-  DLSS Ray Reconstruction resolves. `VOXELCRAFT_GI=fragment` restores the in-shader gather as a
-  bit-for-bit parity oracle.
+  that writes a noisy demodulated irradiance buffer and composites it back. `VOXELCRAFT_GI=fragment`
+  restores the in-shader gather as a bit-for-bit parity oracle.
+- **DLSS Ray Reconstruction** (`VOXELCRAFT_DLSS=rr`, NVIDIA RTX): the scene renders at a reduced
+  resolution and DLSS denoises that noisy GI **and** upscales to the output resolution on the Tensor
+  cores. Quality presets via `VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance`; degrades
+  gracefully to native resolution when unavailable.
 - **Water reflections** via a Schlick-Fresnel mirror ray, with depth-based clarity (Beer–Lambert).
 - **Emissive blocks** (lava, glowstone, torches) that cast colored light into the scene and reflect.
 
@@ -188,8 +191,10 @@ verify each change without a human in the loop. Companion debug knobs: `VOXELCRA
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
 armor bars). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
 (software DDA vs hardware ray query), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
-`VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer). `VOXELCRAFT_PERSIST_TEST=1` round-trips a
-sample inventory/armor/furnace/survival state through the real save/load and logs the result (no window).
+`VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_DLSS=off|rr` +
+`VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance` (DLSS Ray Reconstruction). DLSS needs
+`DLSS_SDK` + `LIBCLANG_PATH` set at build time (see the dlss section). `VOXELCRAFT_PERSIST_TEST=1`
+round-trips a sample inventory/armor/furnace/survival state through the real save/load (no window).
 
 ## Roadmap
 

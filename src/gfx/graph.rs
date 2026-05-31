@@ -19,11 +19,16 @@ pub const GALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// later, the denoiser / DLSS Ray Reconstruction). 16-bit float since indirect light exceeds 1.0
 /// (sky, emissive bounces). Used as both a write storage texture (compute) and a sampled texture. (M33-G6)
 pub const IRRADIANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// G-buffer: LINEAR view-space depth (clip.w), as a plain R32Float color target. DLSS Ray
+/// Reconstruction needs a shader-readable linear depth; a wgpu Depth32Float attachment isn't created
+/// typeless so NGX can't SRV it, hence this dedicated color target (DepthType::Linear). (M33-G8)
+pub const GDEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 /// Per-resolution render targets, owned by each render path (the live present loop and the offscreen
-/// screenshot) and rebuilt on resize. Built by `ChunkRenderer::make_targets`.
+/// screenshot) and rebuilt on resize. Built by `ChunkRenderer::make_targets`. When DLSS is active
+/// these are sized to the DLSS *render* resolution (below output); DLSS upscales to output res.
 pub struct RenderTargets {
-    /// HDR scene color the world renders into (then sampled by the tonemap pass).
+    /// HDR scene color the world renders into (then sampled by the tonemap pass / fed to DLSS).
     pub hdr_view: wgpu::TextureView,
     /// G-buffer normal+emission (written by the opaque pass; read by the GI / denoiser passes later).
     pub gnormal_view: wgpu::TextureView,
@@ -33,6 +38,16 @@ pub struct RenderTargets {
     pub gpos_view: wgpu::TextureView,
     /// G-buffer albedo (.rgb) + skylight (.a) — the GI composite multiplies irradiance by these.
     pub galbedo_view: wgpu::TextureView,
+    /// The backing textures for the four G8-DLSS Ray Reconstruction guide inputs (color, normals,
+    /// motion, diffuse albedo). `rr.render()` needs `&wgpu::Texture`, not just a view. Unused on the
+    /// native (DLSS-off) path. (M33-G8)
+    pub hdr_tex: wgpu::Texture,
+    pub gnormal_tex: wgpu::Texture,
+    pub gmotion_tex: wgpu::Texture,
+    pub galbedo_tex: wgpu::Texture,
+    /// G-buffer linear view depth (R32Float) — the DLSS RR depth guide. (M33-G8)
+    pub gdepth_view: wgpu::TextureView,
+    pub gdepth_tex: wgpu::Texture,
     /// Target dimensions — the GI compute dispatch covers width×height. (M33-G6)
     pub width: u32,
     pub height: u32,

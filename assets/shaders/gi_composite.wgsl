@@ -16,6 +16,7 @@
 struct Camera {
     view_proj: mat4x4<f32>,
     prev_view_proj: mat4x4<f32>,
+    view_proj_nojitter: mat4x4<f32>, // layout must match CameraUniform (M33-G8)
     cam_pos: vec4<f32>,
     sun_dir: vec4<f32>,
     sky_color: vec4<f32>,

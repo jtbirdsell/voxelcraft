@@ -4,8 +4,9 @@
 // Keeping one copy means the tracer can't drift between the shaders.
 
 struct Camera {
-    view_proj: mat4x4<f32>,
-    prev_view_proj: mat4x4<f32>,
+    view_proj: mat4x4<f32>,          // JITTERED render projection (under DLSS)
+    prev_view_proj: mat4x4<f32>,     // previous frame, UN-jittered (motion vectors)
+    view_proj_nojitter: mat4x4<f32>, // current frame, UN-jittered (motion vectors) — M33-G8
     cam_pos: vec4<f32>,
     sun_dir: vec4<f32>,
     sky_color: vec4<f32>,
@@ -55,7 +56,9 @@ fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     let wp = vec4<f32>(in.position, 1.0);
     out.clip_pos = camera.view_proj * wp;
-    out.cur_clip = out.clip_pos;
+    // Motion vectors use the UN-jittered projections (current + previous) so they carry only
+    // geometric motion; DLSS resolves the subpixel jitter itself. (M33-G8)
+    out.cur_clip = camera.view_proj_nojitter * wp;
     out.prev_clip = camera.prev_view_proj * wp;
     out.normal = in.normal;
     out.world_pos = in.position;

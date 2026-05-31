@@ -1,6 +1,6 @@
 //! First-person fly camera + a uniform buffer payload, plus an input-driven controller.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 
 pub struct Camera {
     pub position: Vec3,
@@ -40,10 +40,14 @@ impl Camera {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
+    /// The projection the world is rendered with — JITTERED under DLSS (subpixel Halton offset).
     pub view_proj: [[f32; 4]; 4],
-    /// Previous frame's `view_proj`, for screen-space motion vectors (the world is static, so motion
-    /// is camera-only). Rolled forward each `update`. (M33-G3)
+    /// Previous frame's UN-jittered view_proj, for screen-space motion vectors. (M33-G3)
     pub prev_view_proj: [[f32; 4]; 4],
+    /// Current frame's UN-jittered view_proj. Motion vectors are `nojitter_cur − nojitter_prev` so
+    /// they carry only geometric motion — DLSS resolves the jitter separately, and jitter-polluted
+    /// motion vectors otherwise make static geometry tremble at the jitter frequency. (M33-G8)
+    pub view_proj_nojitter: [[f32; 4]; 4],
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],
     pub sky_color: [f32; 4],
@@ -59,6 +63,7 @@ impl CameraUniform {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             prev_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            view_proj_nojitter: Mat4::IDENTITY.to_cols_array_2d(),
             cam_pos: [0.0; 4],
             sun_dir: [0.4, 0.8, 0.45, 0.0],
             sky_color: [0.46, 0.64, 0.92, 1.0],
@@ -74,9 +79,28 @@ impl CameraUniform {
     }
 
     pub fn update(&mut self, camera: &Camera, aspect: f32) {
-        self.prev_view_proj = self.view_proj;
-        self.view_proj = camera.view_proj(aspect).to_cols_array_2d();
+        let fresh = camera.view_proj(aspect).to_cols_array_2d();
+        // Roll the UN-jittered projections forward (prev <- last frame's nojitter); render proj
+        // starts unjittered and is offset by `apply_jitter` after this. Motion uses only nojitter.
+        self.prev_view_proj = self.view_proj_nojitter;
+        self.view_proj_nojitter = fresh;
+        self.view_proj = fresh;
         self.cam_pos = [camera.position.x, camera.position.y, camera.position.z, 1.0];
+    }
+
+    /// Offset the render projection by a subpixel jitter (in render-resolution pixels) for DLSS
+    /// temporal reconstruction. Apply AFTER `update` (jitters `view_proj` only, not the nojitter
+    /// copies). The same pixel jitter is handed to NGX.
+    ///
+    /// This is a CLIP-SPACE translation — `jittered = T · view_proj`, where T adds `j · clip.w` to
+    /// clip.xy so the perspective divide yields a constant NDC offset `j`. (Adding `j` to a single
+    /// `view_proj` element instead scales by world-space Z — a depth-dependent shear, not a subpixel
+    /// shift — which makes the whole scene tremble as the jitter changes each frame.) (M33-G8)
+    pub fn apply_jitter(&mut self, jitter_px: (f32, f32), render_w: u32, render_h: u32) {
+        let jx = 2.0 * jitter_px.0 / render_w.max(1) as f32;
+        let jy = 2.0 * jitter_px.1 / render_h.max(1) as f32;
+        let t = Mat4::from_cols(Vec4::X, Vec4::Y, Vec4::Z, Vec4::new(jx, jy, 0.0, 1.0));
+        self.view_proj = (t * Mat4::from_cols_array_2d(&self.view_proj)).to_cols_array_2d();
     }
 
     pub fn set_environment(&mut self, env: &crate::environment::Environment, fog_start: f32, fog_end: f32) {

@@ -21,6 +21,12 @@ log = "0.4.30"
 lz4_flex = "0.13.1"
 pollster = "0.4.0"
 rustc-hash = "2.1.2"
+# Stable project GUID for the DLSS/NGX init (M33-G8). Base crate only (Uuid::from_u128).
+uuid = "1"
+# dlss_wgpu_dx12's public API speaks glam 0.29 (our engine uses 0.33 — semver-incompatible). Alias
+# 0.29 so the DLSS boundary in gfx/dlss.rs can name its UVec2/Vec2; convert to plain tuples for the
+# rest of the engine. (M33-G8)
+glam029 = { package = "glam", version = "0.29" }
 # Pinned exact: wgpu's experimental hardware-RT API breaks ~every quarterly release, so a bump
 # is a deliberate mini-project (re-probe -> re-spike -> re-parity -> re-WSI), not a routine update.
 # Hardware RT on the DX12 fallback needs the DXC compiler (FXC can't compile RT shaders): shipped
@@ -28,6 +34,14 @@ rustc-hash = "2.1.2"
 # falls back to FXC). The static-dxc feature was avoided — it links the VS ATL lib (atls.lib).
 wgpu = "=29.0.3"
 winit = "0.30.13"
+
+# M33-G8: NVIDIA DLSS (Super Resolution + Ray Reconstruction) for the wgpu DX12 backend, via the
+# raw_command_list accessor from the patched wgpu above. Windows + RTX only; degrades gracefully to
+# off (native res + SVGF) when the NGX DLLs/adapter are absent. Build needs DLSS_SDK + LIBCLANG_PATH
+# in the environment (see README). Pinned to the pushed jtbirdsell/dlss_wgpu_dx12 fork (its wgpu pin
+# must match the [patch.crates-io] rev below). Rev-pinned for reproducibility; the fork's main also
+# carries in-progress Frame Generation (off by default, doesn't affect our ray-reconstruction build).
+dlss_wgpu_dx12 = { git = "https://github.com/jtbirdsell/dlss_wgpu_dx12", rev = "89e903f05129ce13b56ea7a8f057750464d8cb69", features = ["ray-reconstruction"] }
 
 # `cargo run --release` is the day-to-day build. LTO off + many codegen units + incremental keeps
 # relinks short on the 32-thread CPU; opt-level 3 keeps worldgen/mesher/gameplay fast. The 4090 is
@@ -57,3 +71,12 @@ opt-level = 3
 inherits = "release"
 strip = "none"
 debug = true
+
+# M33-G8 (DLSS): redirect wgpu + wgpu-hal to a pushed fork — stock v29.0.3 plus additive dx12
+# patches (the `CommandEncoder::raw_command_list`/raw_device/raw_queue accessors, wgpu PR #8888, +
+# a Streamline factory-upgrade for Frame Generation) that let dlss_wgpu_dx12 reach the open ID3D12
+# command list and record the DLSS evaluate on our queue. Same 29.0.3 ABI, so engine code is
+# unchanged. The rev MUST match dlss_wgpu_dx12's own wgpu pin so the two resolve to one wgpu.
+[patch.crates-io]
+wgpu = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38" }
+wgpu-hal = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38" }

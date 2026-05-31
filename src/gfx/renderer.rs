@@ -10,8 +10,8 @@ use crate::camera::CameraUniform;
 use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::mesher::{Geometry, MeshData, Vertex};
 use crate::gfx::graph::{
-    RenderTargets, GALBEDO_FORMAT, GMOTION_FORMAT, GNORMAL_FORMAT, GPOS_FORMAT, HDR_FORMAT,
-    IRRADIANCE_FORMAT,
+    RenderTargets, GALBEDO_FORMAT, GDEPTH_FORMAT, GMOTION_FORMAT, GNORMAL_FORMAT, GPOS_FORMAT,
+    HDR_FORMAT, IRRADIANCE_FORMAT,
 };
 use crate::overlay::{self, LineVertex, UiVertex};
 use crate::voxel_volume::VoxelVolume;
@@ -337,6 +337,11 @@ impl ChunkRenderer {
                     }),
                     Some(wgpu::ColorTargetState {
                         format: GALBEDO_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: GDEPTH_FORMAT,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -960,29 +965,34 @@ impl ChunkRenderer {
     pub fn make_targets(&self, device: &wgpu::Device, width: u32, height: u32) -> RenderTargets {
         let (width, height) = (width.max(1), height.max(1));
         let target = |label, format| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
         };
-        let hdr_view = target("hdr-scene-color", HDR_FORMAT);
-        let gnormal_view = target("gbuf-normal", GNORMAL_FORMAT);
-        let gmotion_view = target("gbuf-motion", GMOTION_FORMAT);
-        let gpos_view = target("gbuf-pos", GPOS_FORMAT);
-        let galbedo_view = target("gbuf-albedo", GALBEDO_FORMAT);
+        // Keep the textures for the four DLSS RR guides (rr.render needs &Texture); gpos is GI-only
+        // so a view suffices (the texture stays alive via the view).
+        let hdr_tex = target("hdr-scene-color", HDR_FORMAT);
+        let hdr_view = hdr_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let gnormal_tex = target("gbuf-normal", GNORMAL_FORMAT);
+        let gnormal_view = gnormal_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let gmotion_tex = target("gbuf-motion", GMOTION_FORMAT);
+        let gmotion_view = gmotion_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let gpos_view = target("gbuf-pos", GPOS_FORMAT).create_view(&wgpu::TextureViewDescriptor::default());
+        let galbedo_tex = target("gbuf-albedo", GALBEDO_FORMAT);
+        let galbedo_view = galbedo_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let gdepth_tex = target("gbuf-depth-linear", GDEPTH_FORMAT);
+        let gdepth_view = gdepth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // GI compute (group 2: gpos + gnormal in, irradiance out) + composite (group 1: albedo, pos,
         // normal, irradiance) bind groups — built only in deferred-GI mode (the layouts are `Some`).
@@ -1072,6 +1082,12 @@ impl ChunkRenderer {
             gmotion_view,
             gpos_view,
             galbedo_view,
+            hdr_tex,
+            gnormal_tex,
+            gmotion_tex,
+            galbedo_tex,
+            gdepth_view,
+            gdepth_tex,
             width,
             height,
             gi_compute_bg,
@@ -1079,6 +1095,27 @@ impl ChunkRenderer {
             tonemap_bg,
         }
     }
+
+    /// Build a tonemap bind group over an arbitrary HDR source view (e.g. the DLSS output texture),
+    /// reusing the tonemap layout + sampler. Lets the DLSS path resolve its upscaled output through
+    /// the same ACES pass. (M33-G8)
+    pub fn make_tonemap_bg(&self, device: &wgpu::Device, hdr: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tonemap-bg-dlss"),
+            layout: &self.tonemap_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(hdr),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.tonemap_sampler),
+                },
+            ],
+        })
+    }
+
 
     /// Record the chunk pass into an existing encoder against arbitrary color/depth targets,
     /// drawing every mesh in `meshes`. Shared by the present and screenshot paths.
@@ -1138,6 +1175,21 @@ impl ChunkRenderer {
                         depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.gdepth_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            // Far linear depth for sky / no-geometry pixels.
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 10000.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }),
                             store: wgpu::StoreOp::Store,
                         },
                     }),
@@ -1309,82 +1361,73 @@ impl ChunkRenderer {
         }
     }
 
-    /// Record a complete frame into `encoder`: the world renders into the HDR scene buffer
-    /// (`targets`), an ACES tonemap resolves it to `final_view`, then the HUD is drawn on top in
-    /// LDR. Shared by the on-screen present path and the offscreen screenshot path.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_full(
+    /// The block-highlight wireframe + crack overlay, drawn into the HDR scene buffer (over the
+    /// opaque world, depth-tested). Factored out of the frame so the native and DLSS paths share it.
+    fn record_highlight(
         &self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
-        targets: &RenderTargets,
-        final_view: &wgpu::TextureView,
+        hdr_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
-        meshes: &[&GpuMesh],
-        volume_bg: &wgpu::BindGroup,
-        as_bg: Option<&wgpu::BindGroup>,
         highlight: Option<(IVec3, f32)>,
+    ) {
+        let Some((block, progress)) = highlight else {
+            return;
+        };
+        let mut lines = overlay::highlight_lines(block);
+        if progress > 0.0 {
+            lines.extend(overlay::crack_lines(block, progress));
+        }
+        let count = lines.len() as u32;
+        if count == 0 {
+            return;
+        }
+        // The buffer is reference-counted into the command buffer, so it survives this scope until
+        // the encoder is submitted (matches the previous in-function lifetime).
+        let buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("highlight-vbuf"),
+            contents: bytemuck::cast_slice(&lines),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("highlight-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: hdr_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.highlight_pipeline);
+        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        pass.set_vertex_buffer(0, buf.slice(..));
+        pass.draw(0..count, 0..1);
+    }
+
+    /// Resolve an HDR source (`tonemap_bg`) to `final_view` via the fullscreen ACES pass, then draw
+    /// the LDR HUD on top. `tonemap_bg` is `targets.tonemap_bg` (native) or the DLSS output's.
+    fn record_resolve(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        tonemap_bg: &wgpu::BindGroup,
+        final_view: &wgpu::TextureView,
         ui_verts: &[UiVertex],
     ) {
-        // Scene passes render into the HDR buffer + G-buffer: opaque (clears), then glass + water.
-        self.record(encoder, targets, depth_view, meshes, volume_bg, as_bg);
-
-        // Build overlay buffers (kept alive until this function returns; wgpu retains the
-        // underlying resources in the command buffer until execution).
-        let highlight_buf = highlight.map(|(block, progress)| {
-            let mut lines = overlay::highlight_lines(block);
-            if progress > 0.0 {
-                lines.extend(overlay::crack_lines(block, progress));
-            }
-            let count = lines.len() as u32;
-            let buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("highlight-vbuf"),
-                contents: bytemuck::cast_slice(&lines),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            (buf, count)
-        });
-        let ui_buf = if ui_verts.is_empty() {
-            None
-        } else {
-            let buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("ui-vbuf"),
-                contents: bytemuck::cast_slice(ui_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            Some((buf, ui_verts.len() as u32))
-        };
-
-        if let Some((buf, count)) = &highlight_buf {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("highlight-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &targets.hdr_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.highlight_pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_vertex_buffer(0, buf.slice(..));
-            pass.draw(0..*count, 0..1);
-        }
-
         // Resolve HDR → LDR (fullscreen ACES). The triangle covers every pixel; clear is just for a
         // defined initial state on a fresh swapchain view.
         {
@@ -1405,11 +1448,16 @@ impl ChunkRenderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.tonemap_pipeline);
-            pass.set_bind_group(0, &targets.tonemap_bg, &[]);
+            pass.set_bind_group(0, tonemap_bg, &[]);
             pass.draw(0..3, 0..1);
         }
 
-        if let Some((buf, count)) = &ui_buf {
+        if !ui_verts.is_empty() {
+            let buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ui-vbuf"),
+                contents: bytemuck::cast_slice(ui_verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ui-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1429,11 +1477,93 @@ impl ChunkRenderer {
             pass.set_pipeline(&self.ui_pipeline);
             pass.set_bind_group(0, &self.ui_bind_group, &[]);
             pass.set_vertex_buffer(0, buf.slice(..));
-            pass.draw(0..*count, 0..1);
+            pass.draw(0..ui_verts.len() as u32, 0..1);
+        }
+    }
+
+    /// Record a complete frame into `encoder` (native, no DLSS): scene → HDR, ACES tonemap to
+    /// `final_view`, then the HUD. Shared by the present + screenshot paths via `render_into`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_full(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &RenderTargets,
+        final_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        meshes: &[&GpuMesh],
+        volume_bg: &wgpu::BindGroup,
+        as_bg: Option<&wgpu::BindGroup>,
+        highlight: Option<(IVec3, f32)>,
+        ui_verts: &[UiVertex],
+    ) {
+        self.record(encoder, targets, depth_view, meshes, volume_bg, as_bg);
+        self.record_highlight(gpu, encoder, &targets.hdr_view, depth_view, highlight);
+        self.record_resolve(gpu, encoder, &targets.tonemap_bg, final_view, ui_verts);
+    }
+
+    /// Render one full frame to `final_view`, managing its own encoders + submits. With `dlss`, the
+    /// scene renders at `targets`' (render) resolution, Ray Reconstruction denoises + upscales it,
+    /// and the upscaled output is tonemapped to `final_view`; otherwise the native single-encoder
+    /// path. Shared by the present + screenshot paths.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_into(
+        &self,
+        gpu: &Gpu,
+        targets: &RenderTargets,
+        final_view: &wgpu::TextureView,
+        scene_depth: &wgpu::TextureView,
+        meshes: &[&GpuMesh],
+        volume_bg: &wgpu::BindGroup,
+        as_bg: Option<&wgpu::BindGroup>,
+        highlight: Option<(IVec3, f32)>,
+        ui_verts: &[UiVertex],
+        dlss: Option<&mut crate::dlss::DlssRender>,
+    ) {
+        match dlss {
+            Some(dlss) => {
+                // Scene (+ GI + highlight) at render resolution into the G-buffer + HDR; submit so
+                // RR's resource transitions observe the finished scene (as the dlss example does).
+                let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("dlss-scene-encoder"),
+                });
+                self.record(&mut enc, targets, dlss.depth_view(), meshes, volume_bg, as_bg);
+                self.record_highlight(gpu, &mut enc, &targets.hdr_view, dlss.depth_view(), highlight);
+                gpu.queue.submit(Some(enc.finish()));
+
+                // Debug knob: VOXELCRAFT_DLSS_BYPASS tonemaps the render-res scene directly (sampler-
+                // upscaled), skipping RR — isolates "is the scene lit?" from "is RR producing output?".
+                let bypass = std::env::var("VOXELCRAFT_DLSS_BYPASS").is_ok();
+                let resolve_bg = if bypass {
+                    &targets.tonemap_bg
+                } else {
+                    // Ray Reconstruction: denoise + upscale into the DLSS output texture (own submits).
+                    dlss.evaluate(targets, &gpu.queue);
+                    dlss.output_tonemap_bg()
+                };
+
+                // Resolve → swapchain/readback + HUD at output resolution.
+                let mut enc2 = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("dlss-resolve-encoder"),
+                });
+                self.record_resolve(gpu, &mut enc2, resolve_bg, final_view, ui_verts);
+                gpu.queue.submit(Some(enc2.finish()));
+            }
+            None => {
+                let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame-encoder"),
+                });
+                self.record_full(
+                    gpu, &mut enc, targets, final_view, scene_depth, meshes, volume_bg, as_bg,
+                    highlight, ui_verts,
+                );
+                gpu.queue.submit(Some(enc.finish()));
+            }
         }
     }
 
     /// Present a full frame to the swapchain.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_frame(
         &self,
         gpu: &Gpu,
@@ -1443,6 +1573,7 @@ impl ChunkRenderer {
         as_bg: Option<&wgpu::BindGroup>,
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
+        dlss: Option<&mut crate::dlss::DlssRender>,
     ) {
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -1456,14 +1587,8 @@ impl ChunkRenderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame-encoder"),
-            });
-        self.record_full(
+        self.render_into(
             gpu,
-            &mut encoder,
             targets,
             &view,
             &gpu.depth_view,
@@ -1472,8 +1597,8 @@ impl ChunkRenderer {
             as_bg,
             highlight,
             ui_verts,
+            dlss,
         );
-        gpu.queue.submit(Some(encoder.finish()));
         frame.present();
     }
 }

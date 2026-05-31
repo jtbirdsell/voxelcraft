@@ -43,19 +43,28 @@ impl Gpu {
         let rt_enabled = adapter
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-        let (required_features, required_limits, experimental_features) = if rt_enabled {
-            (
-                wgpu::Features::EXPERIMENTAL_RAY_QUERY,
-                // Default limits zero out the acceleration-structure caps; adopt the adapter's real
-                // maxima (matches the validated rt_spike recipe).
-                adapter.limits(),
-                // SAFETY: explicit acknowledgment that wgpu's hardware-RT path is experimental and
-                // may carry bugs / breaking changes. We pin wgpu to de-risk this (see Cargo.toml).
-                unsafe { wgpu::ExperimentalFeatures::enabled() },
-            )
+        // DLSS Ray Reconstruction's UAV output (+ some guide buffer formats) need adapter-specific
+        // format capabilities; opt in when the adapter offers them so the M33-G8 DLSS path can
+        // allocate those targets. Harmless when DLSS is off.
+        let format_features = adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
+        let mut required_features = wgpu::Features::empty();
+        if rt_enabled {
+            required_features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        }
+        if format_features {
+            required_features |= wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        }
+        let (required_limits, experimental_features) = if rt_enabled {
+            // Default limits zero out the acceleration-structure caps; adopt the adapter's real
+            // maxima (matches the validated rt_spike recipe). SAFETY: explicit acknowledgment that
+            // wgpu's hardware-RT path is experimental; we pin wgpu to de-risk it (see Cargo.toml).
+            (adapter.limits(), unsafe {
+                wgpu::ExperimentalFeatures::enabled()
+            })
         } else {
             (
-                wgpu::Features::empty(),
                 wgpu::Limits::default(),
                 wgpu::ExperimentalFeatures::disabled(),
             )

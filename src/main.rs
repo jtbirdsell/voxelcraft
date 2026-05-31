@@ -20,8 +20,8 @@ mod world;
 // directly (e.g. `crate::gfx::camera`, `crate::world::worldgen`, `crate::gameplay::player`).
 pub(crate) use gameplay::{crafting, entity, item, player, raycast, smelting};
 pub(crate) use gfx::{
-    camera, capture, device as gpu, environment, frustum, renderer, rt_probe, rt_spike, texture,
-    voxel_volume,
+    camera, capture, device as gpu, dlss, environment, frustum, renderer, rt_probe, rt_spike,
+    texture, voxel_volume,
 };
 pub(crate) use mesh::mesher;
 pub(crate) use ui::{font, overlay};

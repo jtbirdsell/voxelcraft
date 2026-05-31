@@ -16,6 +16,7 @@ struct FragOut {
     @location(2) gmotion: vec2<f32>,  // screen-space motion (cur_uv - prev_uv)
     @location(3) gpos: vec4<f32>,     // world-space surface position .xyz + hurt-flash .w (M33-G6)
     @location(4) galbedo: vec4<f32>,  // albedo .rgb + skylight .a
+    @location(5) gdepth: f32,         // linear view depth (clip.w) — DLSS RR depth guide (M33-G8)
 };
 
 // Clip-space position -> screen UV (origin top-left). Guards w≈0 just behind the eye plane.
@@ -91,5 +92,8 @@ fn fs_main(in: VsOut) -> FragOut {
     // (1 - flash*1.6), matching the flash mix applied above. 0 for all terrain.
     out.gpos = vec4<f32>(in.world_pos, flash);
     out.galbedo = vec4<f32>(albedo, in.light.x);
+    // Linear view depth for DLSS RR: clip.w is the perspective divisor = positive view-space depth,
+    // and is unaffected by the x/y projection jitter. 0 in the in-fragment (non-deferred) path is fine.
+    out.gdepth = in.cur_clip.w;
     return out;
 }

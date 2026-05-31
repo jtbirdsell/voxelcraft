@@ -61,6 +61,10 @@ struct State {
     renderer: ChunkRenderer,
     targets: RenderTargets,
     rt_scene: RtScene,
+    /// M33-G8 DLSS Ray Reconstruction render state (render-res scene → upscaled output). `None` =>
+    /// native resolution. Declared before `dlss` so the RR feature context drops before the SDK.
+    dlss_render: Option<crate::dlss::DlssRender>,
+    dlss: Option<crate::dlss::Dlss>,
     game: Game,
     camera: Camera,
     player: Player,
@@ -565,6 +569,11 @@ impl App {
             .camera_uniform
             .set_environment(&state.environment, FOG_START, FOG_END);
         state.camera_uniform.set_time(state.elapsed, state.environment.time);
+        // M33-G8: jitter the projection to match the jitter handed to NGX (DLSS temporal sampling).
+        if let Some(dr) = &state.dlss_render {
+            let (rw, rh) = dr.render_dims();
+            state.camera_uniform.apply_jitter(dr.jitter(), rw, rh);
+        }
         state.renderer.update_camera(&state.gpu, &state.camera_uniform);
         state.renderer.set_sky(state.environment.wgpu_clear());
 
@@ -663,6 +672,7 @@ impl App {
             as_bg.as_ref(),
             highlight,
             &ui,
+            state.dlss_render.as_mut(),
         );
 
         // Stats.
@@ -886,6 +896,10 @@ impl ApplicationHandler for App {
         ));
         let renderer = ChunkRenderer::new(&gpu);
 
+        // M33-G8: bring up the DLSS SDK (Tensor-core denoise + upscale). `None` => native-resolution
+        // rendering (off / non-DX12 / unsupported). Used by both the headless and interactive paths.
+        let dlss = crate::dlss::Dlss::init(&gpu);
+
         // Headless screenshot path: a fresh generated world with a few verification edits.
         if let Ok(path) = std::env::var("VOXELCRAFT_SHOT") {
             let mut game = Game::new(
@@ -1053,6 +1067,12 @@ impl ApplicationHandler for App {
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .unwrap_or(0.0);
             camera_uniform.set_time(shot_time, environment.time);
+            // M33-G8: build the Ray Reconstruction context (scene at render res → upscale to output).
+            // `None` => native resolution. The per-frame camera jitter is applied inside `screenshot`
+            // (it must advance with NGX's jitter across the warm-up frames).
+            let mut dlss_render = dlss.as_ref().and_then(|d| {
+                crate::dlss::DlssRender::new(d, &renderer, &gpu, (gpu.config.width, gpu.config.height))
+            });
             renderer.set_sky(environment.wgpu_clear());
             renderer.update_camera(&gpu, &camera_uniform);
 
@@ -1159,6 +1179,8 @@ impl ApplicationHandler for App {
                 &ui,
                 gpu.config.width,
                 gpu.config.height,
+                &camera_uniform,
+                dlss_render.as_mut(),
                 &path,
             );
             event_loop.exit();
@@ -1204,13 +1226,23 @@ impl ApplicationHandler for App {
         renderer.update_camera(&gpu, &camera_uniform);
         renderer.set_sky(environment.wgpu_clear());
 
-        let targets = renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height);
+        // M33-G8: build the DLSS Ray Reconstruction context (if available); scene targets are then
+        // sized to its render resolution, else to the output resolution.
+        let dlss_render = dlss.as_ref().and_then(|d| {
+            crate::dlss::DlssRender::new(d, &renderer, &gpu, (gpu.config.width, gpu.config.height))
+        });
+        let targets = match &dlss_render {
+            Some(dr) => dr.make_render_targets(&renderer, &gpu.device),
+            None => renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height),
+        };
         let rt_scene = RtScene::new();
         self.state = Some(State {
             gpu,
             renderer,
             targets,
             rt_scene,
+            dlss_render,
+            dlss,
             game,
             camera,
             player,
@@ -1244,11 +1276,24 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state.gpu.resize(size);
-                    state.targets = state.renderer.make_targets(
-                        &state.gpu.device,
-                        state.gpu.config.width,
-                        state.gpu.config.height,
-                    );
+                    // M33-G8: the DLSS context is output-resolution-bound — recreate it (which
+                    // re-derives the render resolution), then size the scene targets to match.
+                    state.dlss_render = state.dlss.as_ref().and_then(|d| {
+                        crate::dlss::DlssRender::new(
+                            d,
+                            &state.renderer,
+                            &state.gpu,
+                            (state.gpu.config.width, state.gpu.config.height),
+                        )
+                    });
+                    state.targets = match &state.dlss_render {
+                        Some(dr) => dr.make_render_targets(&state.renderer, &state.gpu.device),
+                        None => state.renderer.make_targets(
+                            &state.gpu.device,
+                            state.gpu.config.width,
+                            state.gpu.config.height,
+                        ),
+                    };
                 }
             }
             WindowEvent::Focused(false) => self.set_grab(false),
