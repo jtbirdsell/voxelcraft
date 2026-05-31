@@ -20,13 +20,23 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -> Hi
     let p = origin + dir * hit.t;
     // The solid voxel sits just past the hit along the ray, the air voxel just before it; their
     // integer difference is the entered face normal (voxels are axis-aligned).
-    let solid = vec3<i32>(floor(p + dir * 0.01));
-    let air = vec3<i32>(floor(p - dir * 0.01));
+    let solid = vec3<i32>(floor(p + dir * 0.05));
+    let air = vec3<i32>(floor(p - dir * 0.05));
     let dn = vec3<f32>(air - solid);
     h.hit = true;
     h.pos = p;
     h.id = voxel_id(solid);
-    h.normal = select(-dir, normalize(dn), dot(dn, dn) > 0.5);
+    // `dn` is the entered face normal. On rare grazing rays where both samples land in the same
+    // voxel (dn=0), fall back to the face perpendicular to the ray's dominant travel axis, not -dir
+    // (which is not an axis-aligned normal and skews the bounce term). (review H2)
+    let ad = abs(dir);
+    var fallback = vec3<f32>(0.0, 0.0, -sign(dir.z));
+    if (ad.x >= ad.y && ad.x >= ad.z) {
+        fallback = vec3<f32>(-sign(dir.x), 0.0, 0.0);
+    } else if (ad.y >= ad.z) {
+        fallback = vec3<f32>(0.0, -sign(dir.y), 0.0);
+    }
+    h.normal = select(fallback, normalize(dn), dot(dn, dn) > 0.5);
     return h;
 }
 

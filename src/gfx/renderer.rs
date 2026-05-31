@@ -729,7 +729,9 @@ impl ChunkRenderer {
     }
 
     pub fn upload_mesh(&self, gpu: &Gpu, mesh: &MeshData) -> GpuMesh {
-        let rt = gpu.rt_enabled;
+        // Gate BLAS (+ its BLAS_INPUT buffer usage) on the active tracer, not just the backend: in
+        // VOXELCRAFT_TRACER=dda mode there is no TLAS/trace, so per-chunk BLASes are pure waste. (review M1)
+        let rt = self.use_hw_rt;
         let opaque = upload_geometry(&gpu.device, &mesh.opaque, rt);
         let blas = if rt {
             opaque.as_ref().map(|p| crate::gfx::rt::build_chunk_blas(gpu, p))

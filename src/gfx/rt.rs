@@ -87,12 +87,14 @@ impl RtScene {
         if !gpu.rt_enabled {
             return None;
         }
+        // Always return a (possibly empty) TLAS when RT is on. The pipelines bind group(3)
+        // unconditionally under use_hw_rt, so returning None here would leave the water/glass passes
+        // drawing with an UNBOUND acceleration structure whenever no opaque geometry exists
+        // scene-wide (e.g. spawning into open ocean before terrain streams in). An empty TLAS makes
+        // every ray miss — correct. (review H1)
         let with_blas: Vec<&wgpu::Blas> = meshes.iter().filter_map(|m| m.blas.as_ref()).collect();
-        if with_blas.is_empty() {
-            return None;
-        }
         let n = with_blas.len() as u32;
-        if self.tlas.is_none() || self.capacity < n {
+        if self.tlas.is_none() || self.capacity < n.max(1) {
             self.capacity = n.next_power_of_two().max(256);
             self.tlas = Some(gpu.device.create_tlas(&wgpu::CreateTlasDescriptor {
                 label: Some("world-tlas"),
