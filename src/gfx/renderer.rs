@@ -90,7 +90,10 @@ impl ChunkRenderer {
         // `sun_visibility()` (+ the TLAS binding at group 3 in the hardware case).
         let use_hw_rt =
             gpu.rt_enabled && std::env::var("VOXELCRAFT_TRACER").map_or(true, |v| v != "dda");
-        log::info!("tracer: {}", if use_hw_rt { "hardware ray query (shadows)" } else { "software DDA" });
+        log::info!(
+            "tracer: {}",
+            if use_hw_rt { "hardware ray query (shadows + GI)" } else { "software DDA" }
+        );
         let rtx_common = include_str!("../../assets/shaders/rtx_common.wgsl");
         let rt_prefix = if use_hw_rt {
             "enable wgpu_ray_query;\n@group(3) @binding(0) var rt_acc: acceleration_structure;\n"
@@ -100,7 +103,7 @@ impl ChunkRenderer {
         let sun_vis = if use_hw_rt {
             include_str!("../../assets/shaders/sun_vis_hw.wgsl")
         } else {
-            "fn sun_visibility(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {\n    return sun_visibility_dda(world_pos, n, max_dist);\n}\n"
+            "fn trace(o: vec3<f32>, d: vec3<f32>, md: f32, ms: i32) -> Hit { return trace_dda(o, d, md, ms); }\nfn sun_visibility(p: vec3<f32>, n: vec3<f32>, md: f32) -> f32 { return sun_visibility_dda(p, n, md); }\n"
         };
         let chunk_src = format!(
             "{rt_prefix}{rtx_common}{sun_vis}{}",

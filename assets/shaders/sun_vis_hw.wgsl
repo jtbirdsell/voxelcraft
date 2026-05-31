@@ -1,7 +1,35 @@
-// Hardware sun-shadow ray (M33-G5a): an inline ray-query any-hit against the world TLAS (`rt_acc`,
-// bound at group 3). Appended by the renderer in place of the DDA `sun_visibility` when
-// VOXELCRAFT_TRACER=hwrt and the backend exposes hardware ray query. Same signature/semantics as the
-// DDA version (1 lit, 0 shadowed), so the rest of the shader is unchanged.
+// Hardware ray-query trace + sun shadow (M33-G5). Appended by the renderer in place of the DDA
+// trace/sun_visibility when VOXELCRAFT_TRACER=hwrt and the backend exposes hardware ray query.
+// `rt_acc` (the world TLAS) is bound at group 3; `voxel_id` / `Hit` come from rtx_common.
+//
+// Hybrid model, chosen for parity with the DDA: hardware ray query finds the closest hit on the RT
+// cores, then we recover the material + face normal from the *voxel volume* at the hit point — the
+// same voxel_color / voxel_emission the DDA reads — so GI and water reflections match the software
+// path closely while the (expensive) traversal moves to hardware.
+
+fn trace(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -> Hit {
+    var h: Hit;
+    h.hit = false;
+    var rq: ray_query;
+    rayQueryInitialize(&rq, rt_acc, RayDesc(0u, 0xFFu, 0.001, max_dist, origin, dir));
+    while (rayQueryProceed(&rq)) {}
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
+        return h;
+    }
+    let p = origin + dir * hit.t;
+    // The solid voxel sits just past the hit along the ray, the air voxel just before it; their
+    // integer difference is the entered face normal (voxels are axis-aligned).
+    let solid = vec3<i32>(floor(p + dir * 0.01));
+    let air = vec3<i32>(floor(p - dir * 0.01));
+    let dn = vec3<f32>(air - solid);
+    h.hit = true;
+    h.pos = p;
+    h.id = voxel_id(solid);
+    h.normal = select(-dir, normalize(dn), dot(dn, dn) > 0.5);
+    return h;
+}
+
 fn sun_visibility(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {
     let sun = normalize(camera.sun_dir.xyz);
     if (sun.y <= 0.02) {

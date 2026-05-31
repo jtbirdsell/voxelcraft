@@ -167,7 +167,7 @@ struct Hit {
 
 // DDA voxel traversal. Returns the first opaque voxel hit within `max_dist` blocks, with the
 // face normal it was entered through. `max_steps` bounds work for the shader.
-fn trace(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -> Hit {
+fn trace_dda(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -> Hit {
     var h: Hit;
     h.hit = false;
     h.id = 0u;
