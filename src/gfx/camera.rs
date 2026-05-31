@@ -41,6 +41,9 @@ impl Camera {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
+    /// Previous frame's `view_proj`, for screen-space motion vectors (the world is static, so motion
+    /// is camera-only). Rolled forward each `update`. (M33-G3)
+    pub prev_view_proj: [[f32; 4]; 4],
     pub cam_pos: [f32; 4],
     pub sun_dir: [f32; 4],
     pub sky_color: [f32; 4],
@@ -55,6 +58,7 @@ impl CameraUniform {
     pub fn new() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            prev_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             cam_pos: [0.0; 4],
             sun_dir: [0.4, 0.8, 0.45, 0.0],
             sky_color: [0.46, 0.64, 0.92, 1.0],
@@ -70,6 +74,7 @@ impl CameraUniform {
     }
 
     pub fn update(&mut self, camera: &Camera, aspect: f32) {
+        self.prev_view_proj = self.view_proj;
         self.view_proj = camera.view_proj(aspect).to_cols_array_2d();
         self.cam_pos = [camera.position.x, camera.position.y, camera.position.z, 1.0];
     }

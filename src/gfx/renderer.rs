@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::CameraUniform;
 use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::mesher::{Geometry, MeshData, Vertex};
-use crate::gfx::graph::{RenderTargets, HDR_FORMAT};
+use crate::gfx::graph::{RenderTargets, GMOTION_FORMAT, GNORMAL_FORMAT, HDR_FORMAT};
 use crate::overlay::{self, LineVertex, UiVertex};
 use crate::voxel_volume::VoxelVolume;
 
@@ -231,11 +231,24 @@ impl ChunkRenderer {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                // MRT: HDR scene color (0) + G-buffer normal/emission (1) + motion vectors (2).
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: GNORMAL_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: GMOTION_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             multiview_mask: None,
@@ -646,21 +659,28 @@ impl ChunkRenderer {
     /// path. Called at startup and on resize by the present loop, and per-shot by the screenshot.
     pub fn make_targets(&self, device: &wgpu::Device, width: u32, height: u32) -> RenderTargets {
         let (width, height) = (width.max(1), height.max(1));
-        let hdr = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("hdr-scene-color"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: HDR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
+        let target = |label, format| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let hdr_view = target("hdr-scene-color", HDR_FORMAT);
+        let gnormal_view = target("gbuf-normal", GNORMAL_FORMAT);
+        let gmotion_view = target("gbuf-motion", GMOTION_FORMAT);
         let tonemap_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tonemap-bg"),
             layout: &self.tonemap_bgl,
@@ -677,6 +697,8 @@ impl ChunkRenderer {
         });
         RenderTargets {
             hdr_view,
+            gnormal_view,
+            gmotion_view,
             tonemap_bg,
         }
     }
@@ -686,24 +708,44 @@ impl ChunkRenderer {
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        color_view: &wgpu::TextureView,
+        targets: &RenderTargets,
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
     ) {
-        // Opaque pass (clears color + depth).
+        // Opaque pass: clears the HDR color + G-buffer (normal, motion) + depth, then draws.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("opaque-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.sky_color.get()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.hdr_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(self.sky_color.get()),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.gnormal_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.gmotion_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -735,7 +777,7 @@ impl ChunkRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glass-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
+                    view: &targets.hdr_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -773,7 +815,7 @@ impl ChunkRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("water-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
+                    view: &targets.hdr_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -823,8 +865,8 @@ impl ChunkRenderer {
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
     ) {
-        // Scene passes render into the HDR buffer: opaque (clears), then glass + water (load+blend).
-        self.record(encoder, &targets.hdr_view, depth_view, meshes, volume_bg);
+        // Scene passes render into the HDR buffer + G-buffer: opaque (clears), then glass + water.
+        self.record(encoder, targets, depth_view, meshes, volume_bg);
 
         // Build overlay buffers (kept alive until this function returns; wgpu retains the
         // underlying resources in the command buffer until execution).

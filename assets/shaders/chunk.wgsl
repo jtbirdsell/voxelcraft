@@ -70,8 +70,20 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
     return (accum / f32(rays)) * gi_strength;
 }
 
+struct FragOut {
+    @location(0) color: vec4<f32>,
+    @location(1) gnormal: vec4<f32>,  // world normal .xyz + emission .w (G-buffer, M33-G3)
+    @location(2) gmotion: vec2<f32>,  // screen-space motion (cur_uv - prev_uv)
+};
+
+// Clip-space position -> screen UV (origin top-left). Guards w≈0 just behind the eye plane.
+fn ndc_to_uv(clip: vec4<f32>) -> vec2<f32> {
+    let ndc = clip.xy / max(abs(clip.w), 1e-6);
+    return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FragOut {
     let n = normalize(in.normal);
     let emission = in.shade.x;
     // Lava crust flows: scroll + gently wobble its tile UV over time (torch/glowstone stay static).
@@ -120,5 +132,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let flash = select(0.0, in.shade.y, in.shade.y > 0.0 && in.shade.y < 0.5);
     rgb = mix(rgb, vec3<f32>(1.0, 0.18, 0.13), flash * 1.6);
 
-    return vec4<f32>(rgb, 1.0);
+    var out: FragOut;
+    out.color = vec4<f32>(rgb, 1.0);
+    out.gnormal = vec4<f32>(n, emission);
+    out.gmotion = ndc_to_uv(in.cur_clip) - ndc_to_uv(in.prev_clip);
+    return out;
 }

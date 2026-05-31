@@ -6,12 +6,20 @@
 /// Linear HDR scene-color format. 16-bit float keeps highlights (sun, emissive lava) above 1.0 for
 /// the tonemap to roll off, and is the buffer the future GI / denoise passes read and write.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// G-buffer: world normal (.xyz) + emission (.w), written by the opaque pass. (M33-G3)
+pub const GNORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// G-buffer: screen-space motion vectors (UV delta vs the previous frame). (M33-G3)
+pub const GMOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 /// Per-resolution render targets, owned by each render path (the live present loop and the offscreen
 /// screenshot) and rebuilt on resize. Built by `ChunkRenderer::make_targets`.
 pub struct RenderTargets {
     /// HDR scene color the world renders into (then sampled by the tonemap pass).
     pub hdr_view: wgpu::TextureView,
-    /// Bind group feeding `hdr_view` (+ sampler) to the tonemap pipeline.
+    /// G-buffer normal+emission (written by the opaque pass; read by the GI / denoiser passes later).
+    pub gnormal_view: wgpu::TextureView,
+    /// G-buffer screen-space motion vectors (for temporal reprojection in the denoiser).
+    pub gmotion_view: wgpu::TextureView,
+    /// Bind group feeding the HDR + G-buffer textures (+ debug-mode uniform) to the tonemap pass.
     pub tonemap_bg: wgpu::BindGroup,
 }

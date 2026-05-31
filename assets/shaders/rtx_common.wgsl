@@ -5,6 +5,7 @@
 
 struct Camera {
     view_proj: mat4x4<f32>,
+    prev_view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,
     sun_dir: vec4<f32>,
     sky_color: vec4<f32>,
@@ -51,12 +52,19 @@ struct VsOut {
     @location(3) @interpolate(flat) tile: u32,
     @location(4) light: vec2<f32>,
     @location(5) shade: vec2<f32>,
+    // Clip-space positions for screen-space motion vectors (M33-G3). `@builtin(position)` is
+    // framebuffer space in the fragment stage, so the clip coords are forwarded explicitly.
+    @location(6) cur_clip: vec4<f32>,
+    @location(7) prev_clip: vec4<f32>,
 };
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(in.position, 1.0);
+    let wp = vec4<f32>(in.position, 1.0);
+    out.clip_pos = camera.view_proj * wp;
+    out.cur_clip = out.clip_pos;
+    out.prev_clip = camera.prev_view_proj * wp;
     out.normal = in.normal;
     out.world_pos = in.position;
     out.uv = in.uv;
