@@ -24,6 +24,8 @@ mod persistence;
 mod player;
 mod raycast;
 mod renderer;
+mod rt_probe;
+mod rt_spike;
 mod smelting;
 mod texture;
 mod voxel_volume;
@@ -43,6 +45,18 @@ fn main() {
     // Headless persistence round-trip check (no window needed).
     if std::env::var("VOXELCRAFT_PERSIST_TEST").is_ok() {
         app::persist_selftest();
+        return;
+    }
+
+    // Hardware-ray-tracing capability probe (no window needed).
+    if std::env::var("VOXELCRAFT_RT_PROBE").is_ok() {
+        rt_probe::probe();
+        return;
+    }
+
+    // Hardware-ray-tracing spike: render one frame on the RT cores (no window needed).
+    if std::env::var("VOXELCRAFT_RT_SPIKE").is_ok() {
+        rt_spike::run();
         return;
     }
 
