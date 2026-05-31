@@ -10,6 +10,11 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const GNORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// G-buffer: screen-space motion vectors (UV delta vs the previous frame). (M33-G3)
 pub const GMOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+/// G-buffer: world-space position of the opaque surface — the GI compute pass traces from here.
+/// 32-bit float for precision at large (streamed) world coordinates. (M33-G6)
+pub const GPOS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+/// G-buffer: surface albedo (.rgb) + skylight (.a) — the GI composite multiplies irradiance by these.
+pub const GALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Per-resolution render targets, owned by each render path (the live present loop and the offscreen
 /// screenshot) and rebuilt on resize. Built by `ChunkRenderer::make_targets`.
@@ -20,6 +25,10 @@ pub struct RenderTargets {
     pub gnormal_view: wgpu::TextureView,
     /// G-buffer screen-space motion vectors (for temporal reprojection in the denoiser).
     pub gmotion_view: wgpu::TextureView,
+    /// G-buffer world-space surface position — the GI compute pass traces hemisphere rays from here.
+    pub gpos_view: wgpu::TextureView,
+    /// G-buffer albedo (.rgb) + skylight (.a) — the GI composite multiplies irradiance by these.
+    pub galbedo_view: wgpu::TextureView,
     /// Bind group feeding the HDR + G-buffer textures (+ debug-mode uniform) to the tonemap pass.
     pub tonemap_bg: wgpu::BindGroup,
 }

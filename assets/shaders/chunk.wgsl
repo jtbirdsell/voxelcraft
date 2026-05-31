@@ -74,6 +74,8 @@ struct FragOut {
     @location(0) color: vec4<f32>,
     @location(1) gnormal: vec4<f32>,  // world normal .xyz + emission .w (G-buffer, M33-G3)
     @location(2) gmotion: vec2<f32>,  // screen-space motion (cur_uv - prev_uv)
+    @location(3) gpos: vec4<f32>,     // world-space surface position (M33-G6)
+    @location(4) galbedo: vec4<f32>,  // albedo .rgb + skylight .a
 };
 
 // Clip-space position -> screen UV (origin top-left). Guards w≈0 just behind the eye plane.
@@ -136,5 +138,7 @@ fn fs_main(in: VsOut) -> FragOut {
     out.color = vec4<f32>(rgb, 1.0);
     out.gnormal = vec4<f32>(n, emission);
     out.gmotion = ndc_to_uv(in.cur_clip) - ndc_to_uv(in.prev_clip);
+    out.gpos = vec4<f32>(in.world_pos, 1.0);
+    out.galbedo = vec4<f32>(albedo, in.light.x);
     return out;
 }

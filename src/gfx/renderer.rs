@@ -9,7 +9,9 @@ use wgpu::util::DeviceExt;
 use crate::camera::CameraUniform;
 use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::mesher::{Geometry, MeshData, Vertex};
-use crate::gfx::graph::{RenderTargets, GMOTION_FORMAT, GNORMAL_FORMAT, HDR_FORMAT};
+use crate::gfx::graph::{
+    RenderTargets, GALBEDO_FORMAT, GMOTION_FORMAT, GNORMAL_FORMAT, GPOS_FORMAT, HDR_FORMAT,
+};
 use crate::overlay::{self, LineVertex, UiVertex};
 use crate::voxel_volume::VoxelVolume;
 
@@ -304,6 +306,16 @@ impl ChunkRenderer {
                     }),
                     Some(wgpu::ColorTargetState {
                         format: GMOTION_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: GPOS_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: GALBEDO_FORMAT,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -777,6 +789,8 @@ impl ChunkRenderer {
         let hdr_view = target("hdr-scene-color", HDR_FORMAT);
         let gnormal_view = target("gbuf-normal", GNORMAL_FORMAT);
         let gmotion_view = target("gbuf-motion", GMOTION_FORMAT);
+        let gpos_view = target("gbuf-pos", GPOS_FORMAT);
+        let galbedo_view = target("gbuf-albedo", GALBEDO_FORMAT);
         let tonemap_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tonemap-bg"),
             layout: &self.tonemap_bgl,
@@ -795,6 +809,8 @@ impl ChunkRenderer {
             hdr_view,
             gnormal_view,
             gmotion_view,
+            gpos_view,
+            galbedo_view,
             tonemap_bg,
         }
     }
@@ -835,6 +851,24 @@ impl ChunkRenderer {
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: &targets.gmotion_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.gpos_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.galbedo_view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
