@@ -9,6 +9,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::CameraUniform;
 use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::mesher::{Geometry, MeshData, Vertex};
+use crate::gfx::graph::{RenderTargets, HDR_FORMAT};
 use crate::overlay::{self, LineVertex, UiVertex};
 use crate::voxel_volume::VoxelVolume;
 
@@ -49,6 +50,9 @@ pub struct ChunkRenderer {
     glass_pipeline: wgpu::RenderPipeline,
     highlight_pipeline: wgpu::RenderPipeline,
     ui_pipeline: wgpu::RenderPipeline,
+    tonemap_pipeline: wgpu::RenderPipeline,
+    tonemap_bgl: wgpu::BindGroupLayout,
+    tonemap_sampler: wgpu::Sampler,
     ui_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
@@ -228,7 +232,7 @@ impl ChunkRenderer {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -278,7 +282,7 @@ impl ChunkRenderer {
                 module: &water_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -329,7 +333,7 @@ impl ChunkRenderer {
                 module: &glass_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -378,7 +382,7 @@ impl ChunkRenderer {
                 module: &line_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -514,12 +518,95 @@ impl ChunkRenderer {
             cache: None,
         });
 
+        // ACES tonemap pass: a fullscreen triangle that resolves the HDR scene-color buffer to the
+        // LDR output. The world renders into an Rgba16Float target; this samples and tone-maps it.
+        let tonemap_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tonemap-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../assets/shaders/tonemap.wgsl").into(),
+            ),
+        });
+        let tonemap_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tonemap-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let tonemap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tonemap-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let tonemap_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tonemap-pipeline-layout"),
+            bind_group_layouts: &[Some(&tonemap_bgl)],
+            immediate_size: 0,
+        });
+        let tonemap_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tonemap-pipeline"),
+            layout: Some(&tonemap_layout),
+            vertex: wgpu::VertexState {
+                module: &tonemap_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &tonemap_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             pipeline,
             water_pipeline,
             glass_pipeline,
             highlight_pipeline,
             ui_pipeline,
+            tonemap_pipeline,
+            tonemap_bgl,
+            tonemap_sampler,
             ui_bind_group,
             atlas_bind_group,
             camera_buffer,
@@ -553,6 +640,45 @@ impl ChunkRenderer {
     pub fn update_camera(&self, gpu: &Gpu, uniform: &CameraUniform) {
         gpu.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[*uniform]));
+    }
+
+    /// Build the per-resolution HDR scene-color target (+ its tonemap bind group) for one render
+    /// path. Called at startup and on resize by the present loop, and per-shot by the screenshot.
+    pub fn make_targets(&self, device: &wgpu::Device, width: u32, height: u32) -> RenderTargets {
+        let (width, height) = (width.max(1), height.max(1));
+        let hdr = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hdr-scene-color"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
+        let tonemap_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tonemap-bg"),
+            layout: &self.tonemap_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.tonemap_sampler),
+                },
+            ],
+        });
+        RenderTargets {
+            hdr_view,
+            tonemap_bg,
+        }
     }
 
     /// Record the chunk pass into an existing encoder against arbitrary color/depth targets,
@@ -681,22 +807,24 @@ impl ChunkRenderer {
         }
     }
 
-    /// Record a complete frame (chunks → highlight → HUD) into `encoder` against the given
-    /// targets. Shared by the on-screen present path and the offscreen screenshot path.
+    /// Record a complete frame into `encoder`: the world renders into the HDR scene buffer
+    /// (`targets`), an ACES tonemap resolves it to `final_view`, then the HUD is drawn on top in
+    /// LDR. Shared by the on-screen present path and the offscreen screenshot path.
     #[allow(clippy::too_many_arguments)]
     pub fn record_full(
         &self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
-        color_view: &wgpu::TextureView,
+        targets: &RenderTargets,
+        final_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
     ) {
-        // Chunk passes: opaque (clears color + depth), then glass + water (load + blend).
-        self.record(encoder, color_view, depth_view, meshes, volume_bg);
+        // Scene passes render into the HDR buffer: opaque (clears), then glass + water (load+blend).
+        self.record(encoder, &targets.hdr_view, depth_view, meshes, volume_bg);
 
         // Build overlay buffers (kept alive until this function returns; wgpu retains the
         // underlying resources in the command buffer until execution).
@@ -728,7 +856,7 @@ impl ChunkRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("highlight-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
+                    view: &targets.hdr_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -754,11 +882,35 @@ impl ChunkRenderer {
             pass.draw(0..*count, 0..1);
         }
 
+        // Resolve HDR → LDR (fullscreen ACES). The triangle covers every pixel; clear is just for a
+        // defined initial state on a fresh swapchain view.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tonemap-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: final_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.tonemap_pipeline);
+            pass.set_bind_group(0, &targets.tonemap_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         if let Some((buf, count)) = &ui_buf {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ui-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
+                    view: final_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -782,6 +934,7 @@ impl ChunkRenderer {
     pub fn render_frame(
         &self,
         gpu: &Gpu,
+        targets: &RenderTargets,
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
         highlight: Option<(IVec3, f32)>,
@@ -807,6 +960,7 @@ impl ChunkRenderer {
         self.record_full(
             gpu,
             &mut encoder,
+            targets,
             &view,
             &gpu.depth_view,
             meshes,

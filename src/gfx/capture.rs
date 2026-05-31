@@ -66,12 +66,14 @@ pub fn screenshot(
         mapped_at_creation: false,
     });
 
+    let targets = renderer.make_targets(device, width, height);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("shot-encoder"),
     });
     renderer.record_full(
         gpu,
         &mut encoder,
+        &targets,
         &color_view,
         &depth_view,
         meshes,

@@ -23,6 +23,7 @@ use crate::gpu::Gpu;
 use crate::item::Inventory;
 use crate::persistence::Level;
 use crate::player::{Input, Player};
+use crate::gfx::graph::RenderTargets;
 use crate::renderer::ChunkRenderer;
 use crate::{block, capture, crafting, item, overlay, persistence, raycast, smelting};
 
@@ -57,6 +58,7 @@ impl Screen {
 struct State {
     gpu: Gpu,
     renderer: ChunkRenderer,
+    targets: RenderTargets,
     game: Game,
     camera: Camera,
     player: Player,
@@ -644,7 +646,7 @@ impl App {
         let volume_bg = state.game.volume_bind_group();
         state
             .renderer
-            .render_frame(&state.gpu, &visible, volume_bg, highlight, &ui);
+            .render_frame(&state.gpu, &state.targets, &visible, volume_bg, highlight, &ui);
 
         // Stats.
         state.fps_accum += dt;
@@ -1181,9 +1183,11 @@ impl ApplicationHandler for App {
         renderer.update_camera(&gpu, &camera_uniform);
         renderer.set_sky(environment.wgpu_clear());
 
+        let targets = renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height);
         self.state = Some(State {
             gpu,
             renderer,
+            targets,
             game,
             camera,
             player,
@@ -1217,6 +1221,11 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state.gpu.resize(size);
+                    state.targets = state.renderer.make_targets(
+                        &state.gpu.device,
+                        state.gpu.config.width,
+                        state.gpu.config.height,
+                    );
                 }
             }
             WindowEvent::Focused(false) => self.set_grab(false),
