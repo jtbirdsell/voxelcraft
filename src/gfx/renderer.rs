@@ -63,8 +63,8 @@ impl ChunkRenderer {
 
         // Both the chunk and water shaders are prefixed with the shared RTX scaffolding
         // (camera/volume bindings, vertex stage, the DDA voxel tracer) so there is one copy.
-        let rtx_common = include_str!("../assets/shaders/rtx_common.wgsl");
-        let chunk_src = format!("{rtx_common}{}", include_str!("../assets/shaders/chunk.wgsl"));
+        let rtx_common = include_str!("../../assets/shaders/rtx_common.wgsl");
+        let chunk_src = format!("{rtx_common}{}", include_str!("../../assets/shaders/chunk.wgsl"));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk-shader"),
             source: wgpu::ShaderSource::Wgsl(chunk_src.into()),
@@ -239,7 +239,7 @@ impl ChunkRenderer {
         });
 
         // Translucent water pipeline: same vertex format, alpha blend, depth test but no write.
-        let water_src = format!("{rtx_common}{}", include_str!("../assets/shaders/water.wgsl"));
+        let water_src = format!("{rtx_common}{}", include_str!("../../assets/shaders/water.wgsl"));
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("water-shader"),
             source: wgpu::ShaderSource::Wgsl(water_src.into()),
@@ -290,7 +290,7 @@ impl ChunkRenderer {
 
         // Glass pipeline: a translucent clone of the water pipeline (depth-tested, NO depth write so
         // water + farther glass behind a pane still show through) with no UV animation (glass.wgsl).
-        let glass_src = format!("{rtx_common}{}", include_str!("../assets/shaders/glass.wgsl"));
+        let glass_src = format!("{rtx_common}{}", include_str!("../../assets/shaders/glass.wgsl"));
         let glass_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glass-shader"),
             source: wgpu::ShaderSource::Wgsl(glass_src.into()),
@@ -342,7 +342,7 @@ impl ChunkRenderer {
         // Highlight wireframe pipeline (line list, depth-tested, reuses the camera bind group).
         let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("line-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/line.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../assets/shaders/line.wgsl").into()),
         });
         let highlight_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("highlight-pipeline"),
@@ -391,7 +391,7 @@ impl ChunkRenderer {
         // 2D HUD pipeline (no depth, alpha-blended).
         let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ui-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/ui.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../assets/shaders/ui.wgsl").into()),
         });
         // Bitmap-font atlas (R8 coverage) + nearest sampler for the textured UI pipeline.
         let font_img = crate::font::bake_r8();

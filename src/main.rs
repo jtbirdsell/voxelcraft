@@ -1,4 +1,4 @@
-//! Voxelcraft — M4: an interactive voxel sandbox.
+//! Voxelcraft: an interactive voxel sandbox.
 //!
 //! Controls:
 //!   WASD move · mouse look · Space up/jump · Left-Shift down · Left-Ctrl sprint/boost
@@ -6,33 +6,26 @@
 //!
 //! Set VOXELCRAFT_SHOT=path.png to render one frame offscreen (headless verification).
 
-mod block;
-mod camera;
-mod capture;
-mod crafting;
-mod entity;
-mod environment;
-mod font;
-mod frustum;
-mod game;
-mod gpu;
-mod item;
-mod light;
-mod mesher;
-mod overlay;
-mod persistence;
-mod player;
-mod raycast;
-mod renderer;
-mod rt_probe;
-mod rt_spike;
-mod smelting;
-mod texture;
-mod voxel_volume;
-mod worker;
-mod world;
-mod worldgen;
 mod app;
+mod game;
+mod gameplay;
+mod gfx;
+mod mesh;
+mod persistence;
+mod ui;
+mod world;
+
+// M33-G1 grouping shim: re-export each grouped submodule at the crate root so the existing
+// `crate::<module>` call sites keep resolving unchanged. New code can use the grouped paths
+// directly (e.g. `crate::gfx::camera`, `crate::world::worldgen`, `crate::gameplay::player`).
+pub(crate) use gameplay::{crafting, entity, item, player, raycast, smelting};
+pub(crate) use gfx::{
+    camera, capture, device as gpu, environment, frustum, renderer, rt_probe, rt_spike, texture,
+    voxel_volume,
+};
+pub(crate) use mesh::mesher;
+pub(crate) use ui::{font, overlay};
+pub(crate) use world::{block, light, worker, worldgen};
 
 use winit::event_loop::{ControlFlow, EventLoop};
 

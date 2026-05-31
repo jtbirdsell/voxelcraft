@@ -252,7 +252,7 @@ pub fn run() {
     // ---- Compute pipeline ----
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("rt-spike-shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../assets/shaders/rt_spike.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../assets/shaders/rt_spike.wgsl").into()),
     });
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("rt-spike-bgl"),
