@@ -184,7 +184,7 @@ async fn init_adapter(
 
 /// Backend preference order, defaulting to **DX12** (hardware RT via DXC; best visual parity here)
 /// with Vulkan/GL as fallbacks. Override with `VOXELCRAFT_BACKEND=dx12|vulkan|gl`.
-fn backend_order() -> [wgpu::Backends; 3] {
+pub(crate) fn backend_order() -> [wgpu::Backends; 3] {
     use wgpu::Backends as B;
     match std::env::var("VOXELCRAFT_BACKEND").ok().as_deref() {
         Some("vulkan") | Some("vk") => [B::VULKAN, B::DX12, B::GL],

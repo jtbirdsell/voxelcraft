@@ -115,17 +115,20 @@ pub fn run() {
     let path = std::env::var("VOXELCRAFT_RT_SPIKE").unwrap_or_else(|_| "rt_spike.png".to_string());
     let path = if path == "1" { "rt_spike.png".to_string() } else { path };
 
-    // The probe established that only the Vulkan backend exposes hardware ray queries on the 4090.
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
+    // Test hardware RT on the project's default backend (DX12 + DXC since M33-G0/G0a), honouring
+    // VOXELCRAFT_BACKEND. DX12 needs the DXC compiler to expose ray query (FXC can't compile it).
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = crate::gpu::backend_order()[0];
+    desc.backend_options.dx12.shader_compiler =
+        wgpu::Dx12Compiler::from_env().unwrap_or(wgpu::Dx12Compiler::Auto);
+    let instance = wgpu::Instance::new(desc);
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
     }))
-    .expect("RT_SPIKE: no Vulkan adapter");
+    .expect("RT_SPIKE: no adapter");
+    log::info!("RT_SPIKE backend: {:?}", adapter.get_info().backend);
 
     if !adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
         log::error!("RT_SPIKE: adapter does not expose EXPERIMENTAL_RAY_QUERY; aborting");
