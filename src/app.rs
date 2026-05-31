@@ -852,12 +852,19 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("Voxelcraft — M4")
+            .with_title("Voxelcraft")
             .with_inner_size(LogicalSize::new(1600.0, 900.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         self.window = Some(window.clone());
 
         let gpu = pollster::block_on(Gpu::new(window.clone()));
+        // Surface the active backend + hardware-RT status in the title — at-a-glance confirmation
+        // during the Vulkan/RT migration (M33-G0).
+        window.set_title(&format!(
+            "Voxelcraft  [{:?}{}]",
+            gpu.backend,
+            if gpu.rt_enabled { " · RT cores" } else { "" }
+        ));
         let renderer = ChunkRenderer::new(&gpu);
 
         // Headless screenshot path: a fresh generated world with a few verification edits.

@@ -21,7 +21,12 @@ log = "0.4.30"
 lz4_flex = "0.13.1"
 pollster = "0.4.0"
 rustc-hash = "2.1.2"
-wgpu = "29.0.3"
+# Pinned exact: wgpu's experimental hardware-RT API breaks ~every quarterly release, so a bump
+# is a deliberate mini-project (re-probe -> re-spike -> re-parity -> re-WSI), not a routine update.
+# Hardware RT on the DX12 fallback needs the DXC compiler (FXC can't compile RT shaders): shipped
+# dynamically as dxcompiler.dll + dxil.dll next to the exe (Dx12Compiler::Auto finds them, else
+# falls back to FXC). The static-dxc feature was avoided — it links the VS ATL lib (atls.lib).
+wgpu = "=29.0.3"
 winit = "0.30.13"
 
 [profile.release]

@@ -1,7 +1,7 @@
 # Voxelcraft
 
-A Minecraft-style voxel sandbox written from scratch in **Rust + [wgpu](https://wgpu.rs)** (DirectX 12),
-tuned for a high-end PC (developed on an RTX 4090 / i9-14900K). It features an infinite,
+A Minecraft-style voxel sandbox written from scratch in **Rust + [wgpu](https://wgpu.rs)** (Vulkan,
+with a DirectX 12 fallback), tuned for a high-end PC (developed on an RTX 4090 / i9-14900K). It features an infinite,
 procedurally-generated world streamed across all CPU cores, a procedural texture atlas, real
 block-light + skylight (dark caves, glowing torches), a full inventory, and **ray-traced lighting** —
 sun shadows, ambient occlusion, one-bounce colored global illumination, water reflections, and
@@ -27,6 +27,18 @@ cargo test --release   # worldgen determinism, physics, inventory + save round-t
 ```
 
 The world auto-saves to `saves/world/` on quit.
+
+## GPU backend
+
+Defaults to the **Vulkan** backend — the only one wgpu exposes hardware ray tracing (the RTX 4090's
+RT cores) and DLSS on today. Override with `VOXELCRAFT_BACKEND=vulkan|dx12|gl`.
+
+The **DX12** backend is also hardware-RT-capable, but only through the **DXC** shader compiler (the
+default FXC cannot compile ray-tracing shaders). The build script stages `dxcompiler.dll` + `dxil.dll`
+next to the executable — from a vendored `dll/` directory if present, else your installed Windows SDK;
+if neither is found, DX12 falls back to FXC and the software DDA tracer. DX12 does **not** get DLSS
+(that wrapper is Vulkan-only). Note: `dxil.dll` is a Microsoft redistributable and is **not** committed
+to this repo — it is copied from your local Windows SDK at build time.
 
 ## Controls
 
@@ -127,7 +139,7 @@ the GPU has large headroom, which the lighting spends on per-pixel ray tracing.
 src/
   main.rs           module tree + winit event-loop entry point
   app.rs            App/State, input routing, per-frame update + render, headless screenshot path
-  gpu.rs            wgpu device/surface/depth; DX12-preferred adapter selection
+  gpu.rs            wgpu device/surface/depth; Vulkan-default adapter selection (+DX12/GL), RT-capable device
   camera.rs         fly camera + globals UBO (view-proj, sun, sky/fog, time)
   environment.rs    day/night: sun direction, sky/fog color, ambient/intensity
   world.rs          Chunk (32³ blocks + light), World store, neighborhood view for meshing

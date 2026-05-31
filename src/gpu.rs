@@ -1,6 +1,9 @@
 //! GPU context: instance/surface/device/queue, swapchain config, and a depth buffer.
-//! Adapter selection prefers DX12 on this NVIDIA/Windows box (faster than Vulkan in wgpu),
-//! falling back to Vulkan then GL.
+//! Adapter selection defaults to **Vulkan** — the only wgpu backend that exposes hardware ray
+//! queries (`EXPERIMENTAL_RAY_QUERY`) **and** DLSS today. Override with `VOXELCRAFT_BACKEND=
+//! vulkan|dx12|gl`. DX12 also gets hardware RT via the bundled DXC compiler (but no DLSS — that's
+//! Vulkan-only); GL has neither and uses the software DDA tracer. The device opts into hardware ray
+//! tracing whenever the chosen adapter advertises it.
 
 use std::sync::Arc;
 use winit::window::Window;
@@ -14,6 +17,11 @@ pub struct Gpu {
     pub config: wgpu::SurfaceConfiguration,
     pub depth_view: wgpu::TextureView,
     pub size: winit::dpi::PhysicalSize<u32>,
+    /// Which wgpu backend the adapter resolved to (Vulkan/Dx12/Gl).
+    pub backend: wgpu::Backend,
+    /// True when the device was created with hardware ray query (`EXPERIMENTAL_RAY_QUERY`).
+    /// The RT pipeline (M33-G4+) only builds acceleration structures when this holds.
+    pub rt_enabled: bool,
 }
 
 impl Gpu {
@@ -29,15 +37,47 @@ impl Gpu {
             info.driver_info
         );
 
+        // Opt the real device into hardware ray tracing whenever the adapter supports it (Vulkan
+        // on this 4090). Requesting EXPERIMENTAL_RAY_QUERY on an adapter that lacks it would fail
+        // request_device, so gate on the feature and fall back cleanly to the software DDA path.
+        let rt_enabled = adapter
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let (required_features, required_limits, experimental_features) = if rt_enabled {
+            (
+                wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+                // Default limits zero out the acceleration-structure caps; adopt the adapter's real
+                // maxima (matches the validated rt_spike recipe).
+                adapter.limits(),
+                // SAFETY: explicit acknowledgment that wgpu's hardware-RT path is experimental and
+                // may carry bugs / breaking changes. We pin wgpu to de-risk this (see Cargo.toml).
+                unsafe { wgpu::ExperimentalFeatures::enabled() },
+            )
+        } else {
+            (
+                wgpu::Features::empty(),
+                wgpu::Limits::default(),
+                wgpu::ExperimentalFeatures::disabled(),
+            )
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("voxelcraft-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_features,
+                required_limits,
+                experimental_features,
                 ..Default::default()
             })
             .await
             .expect("Failed to create wgpu device");
+        log::info!(
+            "RT cores: {}",
+            if rt_enabled {
+                "ENABLED (hardware EXPERIMENTAL_RAY_QUERY)"
+            } else {
+                "unavailable on this backend/adapter — software DDA fallback"
+            }
+        );
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -68,6 +108,8 @@ impl Gpu {
             config,
             depth_view,
             size,
+            backend: info.backend,
+            rt_enabled,
         }
     }
 
@@ -107,15 +149,15 @@ fn create_depth(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> w
 async fn init_adapter(
     window: Arc<Window>,
 ) -> (wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter) {
-    for backends in [
-        wgpu::Backends::DX12,
-        wgpu::Backends::VULKAN,
-        wgpu::Backends::GL,
-    ] {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+    for backends in backend_order() {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = backends;
+        // Use DXC on DX12 (bundled via the static-dxc feature) — FXC cannot compile ray-tracing
+        // shaders, so without this DX12 never advertises EXPERIMENTAL_RAY_QUERY. Ignored by the
+        // Vulkan/GL backends. WGPU_DX12_COMPILER overrides it.
+        desc.backend_options.dx12.shader_compiler =
+            wgpu::Dx12Compiler::from_env().unwrap_or(wgpu::Dx12Compiler::Auto);
+        let instance = wgpu::Instance::new(desc);
         let surface = match instance.create_surface(window.clone()) {
             Ok(s) => s,
             Err(_) => continue,
@@ -131,5 +173,20 @@ async fn init_adapter(
             return (instance, surface, adapter);
         }
     }
-    panic!("No compatible GPU adapter found (tried DX12, Vulkan, GL)");
+    panic!("No compatible GPU adapter found (tried, in order: {:?})", backend_order());
+}
+
+/// Backend preference order, defaulting to Vulkan (hardware RT + DLSS) with the others as
+/// fallbacks. Override with `VOXELCRAFT_BACKEND=vulkan|dx12|gl`.
+fn backend_order() -> [wgpu::Backends; 3] {
+    use wgpu::Backends as B;
+    match std::env::var("VOXELCRAFT_BACKEND").ok().as_deref() {
+        Some("dx12") | Some("d3d12") => [B::DX12, B::VULKAN, B::GL],
+        Some("gl") | Some("opengl") => [B::GL, B::VULKAN, B::DX12],
+        Some("vulkan") | Some("vk") | None => [B::VULKAN, B::DX12, B::GL],
+        Some(other) => {
+            log::warn!("unknown VOXELCRAFT_BACKEND={other:?}; defaulting to vulkan");
+            [B::VULKAN, B::DX12, B::GL]
+        }
+    }
 }
