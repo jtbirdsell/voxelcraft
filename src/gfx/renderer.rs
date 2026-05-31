@@ -11,6 +11,7 @@ use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::mesher::{Geometry, MeshData, Vertex};
 use crate::gfx::graph::{
     RenderTargets, GALBEDO_FORMAT, GMOTION_FORMAT, GNORMAL_FORMAT, GPOS_FORMAT, HDR_FORMAT,
+    IRRADIANCE_FORMAT,
 };
 use crate::overlay::{self, LineVertex, UiVertex};
 use crate::voxel_volume::VoxelVolume;
@@ -77,6 +78,14 @@ pub struct ChunkRenderer {
     volume_bgl: wgpu::BindGroupLayout,
     as_bgl: Option<wgpu::BindGroupLayout>,
     use_hw_rt: bool,
+    /// M33-G6: when set (VOXELCRAFT_GI != "fragment", the default), the hemisphere GI is gathered in
+    /// the compute pass + composite below instead of inline in the chunk fragment. The pipelines /
+    /// layouts are `Some` only in this mode.
+    defer_gi: bool,
+    gi_pipeline: Option<wgpu::ComputePipeline>,
+    composite_pipeline: Option<wgpu::RenderPipeline>,
+    gi_io_bgl: Option<wgpu::BindGroupLayout>,
+    composite_bgl: Option<wgpu::BindGroupLayout>,
     sky_color: Cell<wgpu::Color>,
 }
 
@@ -92,11 +101,20 @@ impl ChunkRenderer {
         // `sun_visibility()` (+ the TLAS binding at group 3 in the hardware case).
         let use_hw_rt =
             gpu.rt_enabled && std::env::var("VOXELCRAFT_TRACER").map_or(true, |v| v != "dda");
+        // M33-G6: where the hemisphere GI is gathered. Default = a deferred compute pass + composite
+        // (the path DLSS Ray Reconstruction feeds off in G8). VOXELCRAFT_GI=fragment restores the
+        // in-fragment G5b gather as a switchable parity oracle / non-deferred fallback.
+        let defer_gi = std::env::var("VOXELCRAFT_GI").map_or(true, |v| v != "fragment");
+        let gi_raw = std::env::var("VOXELCRAFT_GI_RAW").is_ok();
         log::info!(
-            "tracer: {}",
-            if use_hw_rt { "hardware ray query (shadows + GI)" } else { "software DDA" }
+            "tracer: {} | GI: {}",
+            if use_hw_rt { "hardware ray query (shadows + GI)" } else { "software DDA" },
+            if defer_gi { "deferred compute pass" } else { "in-fragment (G5b oracle)" }
         );
         let rtx_common = include_str!("../../assets/shaders/rtx_common.wgsl");
+        // Atlas bindings + sample_tile (textureSample, fragment-only) — prepended to the render
+        // shaders only, NOT to rtx_common, so rtx_common can also feed the GI compute shader.
+        let atlas = include_str!("../../assets/shaders/atlas.wgsl");
         let rt_prefix = if use_hw_rt {
             "enable wgpu_ray_query;\n@group(3) @binding(0) var rt_acc: acceleration_structure;\n"
         } else {
@@ -107,8 +125,9 @@ impl ChunkRenderer {
         } else {
             "fn trace(o: vec3<f32>, d: vec3<f32>, md: f32, ms: i32) -> Hit { return trace_dda(o, d, md, ms); }\nfn sun_visibility(p: vec3<f32>, n: vec3<f32>, md: f32) -> f32 { return sun_visibility_dda(p, n, md); }\n"
         };
+        let gi_defines = format!("const DEFER_GI: bool = {defer_gi};\n");
         let chunk_src = format!(
-            "{rt_prefix}{rtx_common}{sun_vis}{}",
+            "{rt_prefix}{gi_defines}{rtx_common}{atlas}{sun_vis}{}",
             include_str!("../../assets/shaders/chunk.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -127,7 +146,8 @@ impl ChunkRenderer {
             label: Some("camera-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                // + COMPUTE so the same camera bind group feeds the M33-G6 GI compute pass.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -239,7 +259,8 @@ impl ChunkRenderer {
                 label: Some("rt-as-bgl"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // FRAGMENT for the chunk/water/glass shadow + GI rays; COMPUTE for the G6 GI pass.
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
                     count: None,
                 }],
@@ -328,7 +349,7 @@ impl ChunkRenderer {
 
         // Translucent water pipeline: same vertex format, alpha blend, depth test but no write.
         let water_src = format!(
-            "{rt_prefix}{rtx_common}{sun_vis}{}",
+            "{rt_prefix}{rtx_common}{atlas}{sun_vis}{}",
             include_str!("../../assets/shaders/water.wgsl")
         );
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -382,7 +403,7 @@ impl ChunkRenderer {
         // Glass pipeline: a translucent clone of the water pipeline (depth-tested, NO depth write so
         // water + farther glass behind a pane still show through) with no UV animation (glass.wgsl).
         let glass_src = format!(
-            "{rt_prefix}{rtx_common}{sun_vis}{}",
+            "{rt_prefix}{rtx_common}{atlas}{sun_vis}{}",
             include_str!("../../assets/shaders/glass.wgsl")
         );
         let glass_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -688,6 +709,172 @@ impl ChunkRenderer {
             cache: None,
         });
 
+        // M33-G6 deferred GI: a compute pass traces the hemisphere GI from the G-buffer into a noisy
+        // irradiance texture; a fullscreen composite additively blends it onto the HDR scene. Built
+        // only when GI is deferred (the default). The compute shader reuses rtx_common + the active
+        // tracer so the gather matches the in-fragment oracle bit-for-bit; the world TLAS, when
+        // present, binds at group 3 exactly as in the render path (group 2 is the GI io instead of
+        // the atlas — the compute path needs no texture atlas).
+        let (gi_pipeline, composite_pipeline, gi_io_bgl, composite_bgl) = if defer_gi {
+            let compute_rt_prefix = if use_hw_rt {
+                "enable wgpu_ray_query;\n@group(3) @binding(0) var rt_acc: acceleration_structure;\n"
+            } else {
+                ""
+            };
+            let gi_src = format!(
+                "{compute_rt_prefix}{rtx_common}{sun_vis}{}",
+                include_str!("../../assets/shaders/gi_compute.wgsl")
+            );
+            let gi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gi-compute-shader"),
+                source: wgpu::ShaderSource::Wgsl(gi_src.into()),
+            });
+            // group 2: gpos (in), gnormal (in), irradiance (out). Reads are textureLoad-only, so the
+            // inputs are declared non-filterable (gpos is Rgba32Float, which isn't filterable anyway).
+            let in_tex = |binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
+            let gi_io_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("gi-io-bgl"),
+                entries: &[
+                    in_tex(0),
+                    in_tex(1),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: IRRADIANCE_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            let mut gi_bgls: Vec<Option<&wgpu::BindGroupLayout>> =
+                vec![Some(&camera_bgl), Some(&volume_bgl), Some(&gi_io_bgl)];
+            if let Some(b) = &as_bgl {
+                gi_bgls.push(Some(b)); // rt_acc at group 3
+            }
+            let gi_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gi-compute-layout"),
+                bind_group_layouts: &gi_bgls,
+                immediate_size: 0,
+            });
+            let gi_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("gi-compute-pipeline"),
+                layout: Some(&gi_layout),
+                module: &gi_shader,
+                entry_point: Some("gi_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+            let composite_src = format!(
+                "const GI_RAW: bool = {gi_raw};\n{}",
+                include_str!("../../assets/shaders/gi_composite.wgsl")
+            );
+            let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gi-composite-shader"),
+                source: wgpu::ShaderSource::Wgsl(composite_src.into()),
+            });
+            // group 1: albedo, pos, normal, irradiance (all textureLoad). camera is group 0.
+            let fin_tex = |binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
+            let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("gi-composite-bgl"),
+                entries: &[fin_tex(0), fin_tex(1), fin_tex(2), fin_tex(3)],
+            });
+            let composite_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gi-composite-layout"),
+                bind_group_layouts: &[Some(&camera_bgl), Some(&composite_bgl)],
+                immediate_size: 0,
+            });
+            // Additive (One,One): the indirect contribution adds onto the opaque HDR color. Alpha is
+            // masked off (write_mask COLOR) so the HDR alpha stays 1.0 for the following water/glass
+            // ALPHA_BLENDING. GI_RAW instead REPLACES, dumping the raw irradiance for debugging.
+            let (blend, write_mask) = if gi_raw {
+                (Some(wgpu::BlendState::REPLACE), wgpu::ColorWrites::ALL)
+            } else {
+                (
+                    Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    wgpu::ColorWrites::COLOR,
+                )
+            };
+            let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gi-composite-pipeline"),
+                layout: Some(&composite_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend,
+                        write_mask,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
+            (
+                Some(gi_pipeline),
+                Some(composite_pipeline),
+                Some(gi_io_bgl),
+                Some(composite_bgl),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
         Self {
             pipeline,
             water_pipeline,
@@ -704,6 +891,11 @@ impl ChunkRenderer {
             volume_bgl,
             as_bgl,
             use_hw_rt,
+            defer_gi,
+            gi_pipeline,
+            composite_pipeline,
+            gi_io_bgl,
+            composite_bgl,
             sky_color: Cell::new(wgpu::Color {
                 r: 0.46,
                 g: 0.64,
@@ -791,6 +983,75 @@ impl ChunkRenderer {
         let gmotion_view = target("gbuf-motion", GMOTION_FORMAT);
         let gpos_view = target("gbuf-pos", GPOS_FORMAT);
         let galbedo_view = target("gbuf-albedo", GALBEDO_FORMAT);
+
+        // GI compute (group 2: gpos + gnormal in, irradiance out) + composite (group 1: albedo, pos,
+        // normal, irradiance) bind groups — built only in deferred-GI mode (the layouts are `Some`).
+        // The irradiance texture (compute-written storage, composite-sampled) is created here and
+        // kept alive by the bind groups, so it isn't allocated at all in the in-fragment path.
+        let (gi_compute_bg, composite_bg) = match (&self.gi_io_bgl, &self.composite_bgl) {
+            (Some(gi_io_bgl), Some(composite_bgl)) => {
+                let irradiance_view = device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("gi-irradiance"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: IRRADIANCE_FORMAT,
+                        usage: wgpu::TextureUsages::STORAGE_BINDING
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let gi_compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("gi-compute-bg"),
+                    layout: gi_io_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&gpos_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&gnormal_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&irradiance_view),
+                        },
+                    ],
+                });
+                let composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("gi-composite-bg"),
+                    layout: composite_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&galbedo_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&gpos_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&gnormal_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&irradiance_view),
+                        },
+                    ],
+                });
+                (Some(gi_compute_bg), Some(composite_bg))
+            }
+            _ => (None, None),
+        };
+
         let tonemap_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tonemap-bg"),
             layout: &self.tonemap_bgl,
@@ -811,6 +1072,10 @@ impl ChunkRenderer {
             gmotion_view,
             gpos_view,
             galbedo_view,
+            width,
+            height,
+            gi_compute_bg,
+            composite_bg,
             tonemap_bg,
         }
     }
@@ -901,6 +1166,61 @@ impl ChunkRenderer {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
                     pass.set_index_buffer(part.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..part.index_count, 0, 0..1);
+                }
+            }
+        }
+
+        // M33-G6 deferred GI: trace the hemisphere GI from the just-written G-buffer into the noisy
+        // irradiance texture (compute), then additively composite `albedo * irradiance * skylight *
+        // (1-fog) * (1-flash)` onto the opaque HDR color — BEFORE glass/water blend over it. wgpu
+        // inserts the storage-write → sampled-read barrier between the passes. Skipped entirely in
+        // the in-fragment (VOXELCRAFT_GI=fragment) oracle path.
+        if self.defer_gi {
+            if let (Some(gi_pipeline), Some(gi_bg), Some(composite_pipeline), Some(composite_bg)) = (
+                self.gi_pipeline.as_ref(),
+                targets.gi_compute_bg.as_ref(),
+                self.composite_pipeline.as_ref(),
+                targets.composite_bg.as_ref(),
+            ) {
+                {
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("gi-compute-pass"),
+                        timestamp_writes: None,
+                    });
+                    cpass.set_pipeline(gi_pipeline);
+                    cpass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    cpass.set_bind_group(1, volume_bg, &[]);
+                    cpass.set_bind_group(2, gi_bg, &[]);
+                    if let Some(b) = as_bg {
+                        cpass.set_bind_group(3, b, &[]);
+                    }
+                    cpass.dispatch_workgroups(
+                        targets.width.div_ceil(8),
+                        targets.height.div_ceil(8),
+                        1,
+                    );
+                }
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("gi-composite-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &targets.hdr_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(composite_pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_bind_group(1, composite_bg, &[]);
+                    pass.draw(0..3, 0..1);
                 }
             }
         }

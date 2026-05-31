@@ -15,6 +15,10 @@ pub const GMOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 pub const GPOS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 /// G-buffer: surface albedo (.rgb) + skylight (.a) — the GI composite multiplies irradiance by these.
 pub const GALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Noisy demodulated GI irradiance written by the compute pass and resolved by the composite (and,
+/// later, the denoiser / DLSS Ray Reconstruction). 16-bit float since indirect light exceeds 1.0
+/// (sky, emissive bounces). Used as both a write storage texture (compute) and a sampled texture. (M33-G6)
+pub const IRRADIANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Per-resolution render targets, owned by each render path (the live present loop and the offscreen
 /// screenshot) and rebuilt on resize. Built by `ChunkRenderer::make_targets`.
@@ -29,6 +33,13 @@ pub struct RenderTargets {
     pub gpos_view: wgpu::TextureView,
     /// G-buffer albedo (.rgb) + skylight (.a) — the GI composite multiplies irradiance by these.
     pub galbedo_view: wgpu::TextureView,
+    /// Target dimensions — the GI compute dispatch covers width×height. (M33-G6)
+    pub width: u32,
+    pub height: u32,
+    /// GI compute bind group (group 2: gpos + gnormal in, irradiance out). `None` unless GI is deferred. (M33-G6)
+    pub gi_compute_bg: Option<wgpu::BindGroup>,
+    /// GI composite bind group (group 1: albedo/pos/normal/irradiance). `None` unless GI is deferred. (M33-G6)
+    pub composite_bg: Option<wgpu::BindGroup>,
     /// Bind group feeding the HDR + G-buffer textures (+ debug-mode uniform) to the tonemap pass.
     pub tonemap_bg: wgpu::BindGroup,
 }

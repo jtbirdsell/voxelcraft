@@ -84,10 +84,17 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
 - **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /
   glowstone / lava illuminate their surroundings.
 
-**Ray-traced lighting** (a GPU-resident 768×256 toroidal voxel volume the fragment shaders DDA-march)
+**Ray-traced lighting** — traced on the RTX **hardware ray-tracing cores** (a per-chunk BLAS + a
+per-frame TLAS over the greedy-meshed geometry, inline `rayQuery`), with a software DDA march over a
+768×256 toroidal voxel volume as a switchable fallback (`VOXELCRAFT_TRACER=dda`). The world renders
+through an **HDR (Rgba16Float) deferred pipeline** — a G-buffer (normal, motion vectors, world
+position, albedo + skylight) and an ACES tonemap.
 - **Sun shadows** against the real voxel geometry.
 - **Ambient occlusion + one-bounce colored global illumination** (cosine-weighted hemisphere rays
-  gather sky on a miss and sun-lit material color on a hit).
+  gather sky on a miss and sun-lit material color on a hit), gathered in a **deferred compute pass**
+  that writes a noisy demodulated irradiance buffer and composites it back — the input a denoiser /
+  DLSS Ray Reconstruction resolves. `VOXELCRAFT_GI=fragment` restores the in-shader gather as a
+  bit-for-bit parity oracle.
 - **Water reflections** via a Schlick-Fresnel mirror ray, with depth-based clarity (Beer–Lambert).
 - **Emissive blocks** (lava, glowstone, torches) that cast colored light into the scene and reflect.
 
@@ -160,10 +167,13 @@ src/
   smelting.rs       furnace smelt-recipe + fuel tables (drives the furnace tick in game.rs)
   overlay.rs        HUD, hotbar, inventory/crafting screens, block + crack highlight (UI geometry)
   frustum.rs        Gribb–Hartmann frustum culling
-  renderer.rs       pipelines (chunk/water/highlight/UI) + atlas/font bind groups, frame recording
+  renderer.rs       pipelines (chunk/water/glass/GI-compute/composite/tonemap/highlight/UI), HDR frame recording
+  graph.rs          render-graph targets: HDR scene buffer + G-buffer (normal/motion/position/albedo)
+  rt.rs             hardware ray-tracing acceleration structures (per-chunk BLAS + per-frame TLAS)
   persistence.rs    LZ4 chunk save/load, level header, inventory save_state
   capture.rs        offscreen screenshot (headless verification)
-assets/shaders/     rtx_common (shared bindings + voxel DDA tracer) + chunk / water / glass / line / ui WGSL
+assets/shaders/     rtx_common (shared bindings + DDA tracer + GI) + atlas + sun_vis_hw (hardware rayQuery)
+                    + gi_compute / gi_composite + chunk / water / glass / tonemap / line / ui WGSL
 ```
 
 **Hardware-driven choices:** worker threads keep all cores busy on generation/meshing/lighting while
@@ -176,8 +186,10 @@ Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
 `VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft|furnace`,
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
-armor bars). `VOXELCRAFT_PERSIST_TEST=1` round-trips a sample inventory/armor/furnace/survival state
-through the real save/load and logs the result (no window).
+armor bars). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
+(software DDA vs hardware ray query), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
+`VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer). `VOXELCRAFT_PERSIST_TEST=1` round-trips a
+sample inventory/armor/furnace/survival state through the real save/load and logs the result (no window).
 
 ## Roadmap
 

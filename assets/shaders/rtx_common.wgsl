@@ -23,18 +23,10 @@ struct Volume {
 @group(1) @binding(0) var voxels: texture_3d<u32>;
 @group(1) @binding(1) var<uniform> volume: Volume;
 
-// Procedural block atlas (8x8 grid of 16px tiles), nearest-sampled. `uv` tiles one unit per block,
-// so fract() repeats the tile across a greedy-merged quad.
-@group(2) @binding(0) var atlas_tex: texture_2d<f32>;
-@group(2) @binding(1) var atlas_samp: sampler;
-
-fn sample_tile(tile: u32, uv: vec2<f32>) -> vec4<f32> {
-    let col = f32(tile % 8u);
-    let row = f32(tile / 8u);
-    let local = fract(uv);
-    let atlas_uv = (vec2<f32>(col, row) + local) / 8.0;
-    return textureSample(atlas_tex, atlas_samp, atlas_uv);
-}
+// NOTE: the procedural block atlas (group 2) + `sample_tile()` live in `atlas.wgsl`, prepended only
+// to the render shaders (chunk/water/glass). They use `textureSample`, which is fragment-only, so
+// they are kept OUT of this module — `rtx_common.wgsl` is also prepended to the GI compute shader
+// (`gi_compute.wgsl`), where `textureSample` is illegal.
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -237,4 +229,77 @@ fn sun_visibility_dda(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 
     // ~2 voxel boundaries per block keeps diagonal rays from clipping short of max_dist.
     let h = trace(origin, sun, max_dist, i32(max_dist * 2.0) + 4);
     return select(1.0, 0.0, h.hit);
+}
+
+// ---- Ambient occlusion + one-bounce colored GI -------------------------------------------------
+// Shared by the chunk fragment shader (in-fragment GI, the parity oracle) and the GI compute pass
+// (`gi_compute.wgsl`, the deferred path), so the gather can't drift between them.
+
+// Branchless orthonormal basis (Duff et al. 2017) with `n` as the third (z) column.
+fn onb(n: vec3<f32>) -> mat3x3<f32> {
+    let s = select(-1.0, 1.0, n.z >= 0.0);
+    let a = -1.0 / (s + n.z);
+    let b = n.x * n.y * a;
+    let t = vec3<f32>(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    let bt = vec3<f32>(b, s + n.y * n.y * a, -n.y);
+    return mat3x3<f32>(t, bt, n);
+}
+
+fn hash2(p: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
+    return fract(sin(q) * 43758.5453);
+}
+
+// Cosine-weighted hemisphere rays gather sky radiance when they escape and bounced (sun-lit)
+// material color when they hit. Returns the indirect irradiance (NOT yet multiplied by the surface
+// albedo or skylight — the caller demodulates), so the compute path can hand a clean noisy
+// irradiance buffer to the denoiser / DLSS Ray Reconstruction.
+fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
+    let rays = i32(volume.params.z);
+    if (rays <= 0) {
+        return vec3<f32>(camera.params.z);
+    }
+    let gi_dist = volume.paramsf.x;
+    let gi_strength = volume.paramsf.y;
+    let sky_boost = volume.paramsf.z;
+    // A diagonal ray crosses up to ~sqrt(3) voxel boundaries per block travelled, so size the
+    // step budget above gi_dist to keep AO range isotropic rather than clipping diagonal rays.
+    let max_steps = i32(gi_dist * 1.8) + 2;
+
+    let sun = normalize(camera.sun_dir.xyz);
+    let ambient = camera.params.z;
+    let sun_intensity = camera.params.w;
+    let sky = camera.sky_color.rgb * sky_boost;
+
+    let basis = onb(n);
+    let rnd = hash2(px);
+    let origin = world_pos + n * 0.06;
+
+    var accum = vec3<f32>(0.0);
+    for (var i = 0; i < rays; i = i + 1) {
+        // Stratified-ish cosine-weighted hemisphere sample via golden-ratio additive recurrence,
+        // Cranley–Patterson rotated per-pixel so neighbouring pixels don't share a pattern.
+        let u1 = fract(rnd.x + f32(i) * 0.7548776662);
+        let u2 = fract(rnd.y + f32(i) * 0.5698402909);
+        let r = sqrt(u1);
+        let phi = 6.28318530718 * u2;
+        let local = vec3<f32>(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u1)));
+        let dir = normalize(basis * local);
+
+        let h = trace(origin, dir, gi_dist, max_steps);
+        if (h.hit) {
+            let alb = voxel_color(h.id);
+            let ndl_h = max(dot(h.normal, sun), 0.0);
+            var vis = 1.0;
+            if (ndl_h > 0.0) {
+                vis = sun_visibility(h.pos, h.normal, gi_dist);
+            }
+            // Bounced radiance leaving the hit surface: its own ambient + direct sun term, plus any
+            // self-emission (lava) so emissive blocks cast colored indirect light.
+            accum += alb * (ambient + sun_intensity * ndl_h * vis) + voxel_emission(h.id);
+        } else {
+            accum += sky;
+        }
+    }
+    return (accum / f32(rays)) * gi_strength;
 }

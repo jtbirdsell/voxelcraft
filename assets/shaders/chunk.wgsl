@@ -1,80 +1,20 @@
 // Chunk lighting: ray-traced sun shadows + ambient occlusion + one-bounce colored global
-// illumination, composed with the direct sun term and distance fog. rtx_common.wgsl is prepended
-// at pipeline build time and provides the Camera/Volume bindings, the vertex stage, voxel_color(),
-// trace() and sun_visibility().
-
-// Branchless orthonormal basis (Duff et al. 2017) with `n` as the third (z) column.
-fn onb(n: vec3<f32>) -> mat3x3<f32> {
-    let s = select(-1.0, 1.0, n.z >= 0.0);
-    let a = -1.0 / (s + n.z);
-    let b = n.x * n.y * a;
-    let t = vec3<f32>(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
-    let bt = vec3<f32>(b, s + n.y * n.y * a, -n.y);
-    return mat3x3<f32>(t, bt, n);
-}
-
-fn hash2(p: vec2<f32>) -> vec2<f32> {
-    let q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
-    return fract(sin(q) * 43758.5453);
-}
-
-// Ambient occlusion + one-bounce colored GI: cosine-weighted hemisphere rays gather sky radiance
-// when they escape and bounced (sun-lit) material color when they hit. Returns indirect irradiance.
-fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
-    let rays = i32(volume.params.z);
-    if (rays <= 0) {
-        return vec3<f32>(camera.params.z);
-    }
-    let gi_dist = volume.paramsf.x;
-    let gi_strength = volume.paramsf.y;
-    let sky_boost = volume.paramsf.z;
-    // A diagonal ray crosses up to ~sqrt(3) voxel boundaries per block travelled, so size the
-    // step budget above gi_dist to keep AO range isotropic rather than clipping diagonal rays.
-    let max_steps = i32(gi_dist * 1.8) + 2;
-
-    let sun = normalize(camera.sun_dir.xyz);
-    let ambient = camera.params.z;
-    let sun_intensity = camera.params.w;
-    let sky = camera.sky_color.rgb * sky_boost;
-
-    let basis = onb(n);
-    let rnd = hash2(px);
-    let origin = world_pos + n * 0.06;
-
-    var accum = vec3<f32>(0.0);
-    for (var i = 0; i < rays; i = i + 1) {
-        // Stratified-ish cosine-weighted hemisphere sample via golden-ratio additive recurrence,
-        // Cranley–Patterson rotated per-pixel so neighbouring pixels don't share a pattern.
-        let u1 = fract(rnd.x + f32(i) * 0.7548776662);
-        let u2 = fract(rnd.y + f32(i) * 0.5698402909);
-        let r = sqrt(u1);
-        let phi = 6.28318530718 * u2;
-        let local = vec3<f32>(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u1)));
-        let dir = normalize(basis * local);
-
-        let h = trace(origin, dir, gi_dist, max_steps);
-        if (h.hit) {
-            let alb = voxel_color(h.id);
-            let ndl_h = max(dot(h.normal, sun), 0.0);
-            var vis = 1.0;
-            if (ndl_h > 0.0) {
-                vis = sun_visibility(h.pos, h.normal, gi_dist);
-            }
-            // Bounced radiance leaving the hit surface: its own ambient + direct sun term, plus any
-            // self-emission (lava) so emissive blocks cast colored indirect light.
-            accum += alb * (ambient + sun_intensity * ndl_h * vis) + voxel_emission(h.id);
-        } else {
-            accum += sky;
-        }
-    }
-    return (accum / f32(rays)) * gi_strength;
-}
+// illumination, composed with the direct sun term and distance fog. rtx_common.wgsl + atlas.wgsl
+// are prepended at pipeline build time and provide the Camera/Volume bindings, the vertex stage,
+// voxel_color(), gather_gi(), sample_tile(), trace() and sun_visibility().
+//
+// M33-G6: `DEFER_GI` (a const injected by the renderer per VOXELCRAFT_GI) selects WHERE the
+// hemisphere GI is gathered. When false (VOXELCRAFT_GI=fragment, the parity oracle) it is gathered
+// inline here, exactly as in G5b. When true (default) the indirect term is left to the GI compute
+// pass (gi_compute.wgsl) + composite (gi_composite.wgsl): this shader writes only the direct +
+// block-light + emissive color (fogged + hurt-flashed), and the composite additively blends
+// albedo * irradiance * skylight * (1-fog) * (1-flash) back in — algebraically identical.
 
 struct FragOut {
     @location(0) color: vec4<f32>,
     @location(1) gnormal: vec4<f32>,  // world normal .xyz + emission .w (G-buffer, M33-G3)
     @location(2) gmotion: vec2<f32>,  // screen-space motion (cur_uv - prev_uv)
-    @location(3) gpos: vec4<f32>,     // world-space surface position (M33-G6)
+    @location(3) gpos: vec4<f32>,     // world-space surface position .xyz + hurt-flash .w (M33-G6)
     @location(4) galbedo: vec4<f32>,  // albedo .rgb + skylight .a
 };
 
@@ -111,16 +51,25 @@ fn fs_main(in: VsOut) -> FragOut {
     }
     let direct = sun_intensity * ndl * shadow;
 
-    var indirect = vec3<f32>(ambient);
-    if (volume.params.y >= 2u) {
-        indirect = gather_gi(in.world_pos, n, in.clip_pos.xy);
-    }
     // Block-light + skylight (M14): skylight gates the sky-driven indirect so caves go dark, while
     // block light (torch/glowstone/lava grid) adds warm local light that survives underground.
     let sky = in.light.x;
     let blockl = in.light.y;
-    indirect = indirect * sky;
     let warm = blockl * vec3<f32>(1.15, 0.92, 0.55);
+
+    // Indirect (AO + one-bounce GI). DEFER_GI=false (VOXELCRAFT_GI=fragment): gather inline, the
+    // G5b parity oracle. DEFER_GI=true (default): the GI compute pass produces the irradiance and
+    // the composite additively blends `albedo * irradiance * sky * (1-fog) * (1-flash)`, so the
+    // indirect term stays 0 here. When GI is off (rtx_mode < 2) the baseline is the ambient term —
+    // the compute pass writes that same baseline, so both paths agree across all rtx modes.
+    var indirect = vec3<f32>(0.0);
+    if (!DEFER_GI) {
+        var irr = vec3<f32>(ambient);
+        if (volume.params.y >= 2u) {
+            irr = gather_gi(in.world_pos, n, in.clip_pos.xy);
+        }
+        indirect = irr * sky;
+    }
     // Lit albedo plus self-emission (lava glows regardless of sun/ambient).
     var rgb = albedo * (indirect + vec3<f32>(direct) + warm) + albedo * (emission * 2.5);
 
@@ -138,7 +87,9 @@ fn fs_main(in: VsOut) -> FragOut {
     out.color = vec4<f32>(rgb, 1.0);
     out.gnormal = vec4<f32>(n, emission);
     out.gmotion = ndc_to_uv(in.cur_clip) - ndc_to_uv(in.prev_clip);
-    out.gpos = vec4<f32>(in.world_pos, 1.0);
+    // .w carries the hurt-flash amount so the GI composite can attenuate the deferred indirect by
+    // (1 - flash*1.6), matching the flash mix applied above. 0 for all terrain.
+    out.gpos = vec4<f32>(in.world_pos, flash);
     out.galbedo = vec4<f32>(albedo, in.light.x);
     return out;
 }
