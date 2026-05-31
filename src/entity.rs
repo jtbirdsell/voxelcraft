@@ -153,6 +153,21 @@ impl Species {
             2
         }
     }
+
+    /// Item loot dropped when this mob is killed (in addition to XP).
+    fn loot(self) -> &'static [(crate::item::ItemId, u8)] {
+        use crate::item::*;
+        match self {
+            Species::Cow => &[(BEEF, 1), (LEATHER, 1)],
+            Species::Pig => &[(PORK, 2)],
+            Species::Sheep => &[(MUTTON, 1)],
+            Species::Chicken => &[(CHICKEN_MEAT, 1), (FEATHER, 1)],
+            Species::Zombie => &[(ROTTEN_FLESH, 1)],
+            Species::Skeleton => &[(BONE, 2)],
+            Species::Creeper => &[(GUNPOWDER, 1)],
+            Species::Spider => &[(STRING, 1), (SPIDER_EYE, 1)],
+        }
+    }
 }
 
 /// One box of a mob's model, in local space (feet at origin, +x = forward/facing, +y = up).
@@ -748,9 +763,13 @@ impl Entities {
             }
         }
         self.list.retain(|e| !e.dead);
-        // Killed mobs drop experience (item loot waits on a food/material milestone).
+        // Killed mobs drop their species loot + experience.
         for (pos, species) in deaths {
-            self.spawn_xp(pos + Vec3::new(0.0, 0.3, 0.0), species.xp_drop());
+            let drop_at = pos + Vec3::new(0.0, 0.3, 0.0);
+            self.spawn_xp(drop_at, species.xp_drop());
+            for &(item, count) in species.loot() {
+                self.spawn_item(drop_at, ItemStack::new(item, count));
+            }
         }
         // Arrows skeletons loosed this frame (spawned after the iteration to avoid aliasing the list).
         for (pos, vel) in shots {
@@ -1142,6 +1161,20 @@ mod tests {
         assert_eq!(es.mob_count(), 2);
         let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1); // floor at y<1
         assert_eq!(es.mob_count(), 1, "the far mob despawns, the near one stays");
+    }
+
+    #[test]
+    fn killed_mob_drops_loot_and_xp() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::ZERO, Species::Cow); // -> beef + leather + xp
+        let (o, d) = (Vec3::new(0.0, 0.6, -3.0), Vec3::new(0.0, 0.0, 1.0));
+        for _ in 0..3 {
+            es.attack(o, d, 6.0, 5.0); // 10 hp -> dead
+        }
+        let _ = es.update(0.016, o, |_| false);
+        assert_eq!(es.species_summary(), "passive:0 hostile:0", "the cow died");
+        // Two item drops (beef, leather) + one XP orb remain as entities.
+        assert!(es.count() >= 3, "cow should drop loot + xp (count = {})", es.count());
     }
 
     #[test]

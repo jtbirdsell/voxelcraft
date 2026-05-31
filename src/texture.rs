@@ -85,6 +85,10 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::MOB_SKELETON => [0.82, 0.82, 0.78],
         T::MOB_CREEPER => [0.36, 0.66, 0.34],
         T::MOB_SPIDER => [0.20, 0.17, 0.20],
+        // Mob-drop material tiles (51..=61) map back to the item's flat color (single source of truth).
+        t if (T::MATERIAL_DROP..T::MATERIAL_DROP + 11).contains(&t) => {
+            crate::item::material_color(crate::item::BEEF + (t - T::MATERIAL_DROP) as u16)
+        }
         _ => [1.0, 0.0, 1.0],
     }
 }

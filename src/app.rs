@@ -949,6 +949,21 @@ impl ApplicationHandler for App {
                 let hit = game.attack_nearest(camera.position, aim, 40.0, 6.0);
                 log::info!("M29 melee: hit a mob = {hit}");
                 game.flash_mobs(0.45);
+                // Loot color check: a row of mob-drop items (should render in distinct colors).
+                let loot = [
+                    item::BEEF,
+                    item::LEATHER,
+                    item::BONE,
+                    item::GUNPOWDER,
+                    item::STRING,
+                    item::FEATHER,
+                ];
+                for (i, &it) in loot.iter().enumerate() {
+                    game.spawn_item(
+                        Vec3::new(6.0 + i as f32 * 1.4, 86.3, 21.0),
+                        item::ItemStack::new(it, 1),
+                    );
+                }
             }
 
             // Debug: VOXELCRAFT_EXPLODE=1 builds a stone platform, detonates a creeper-sized blast in

@@ -490,6 +490,9 @@ pub mod tile {
     pub const MOB_SKELETON: u32 = 48;
     pub const MOB_CREEPER: u32 = 49;
     pub const MOB_SPIDER: u32 = 50;
+    /// Base of 11 flat-color tiles (51..=61) for mob-drop materials (item.rs BEEF..=ROTTEN_FLESH),
+    /// so dropped loot renders in its real color instead of a generic wooden box.
+    pub const MATERIAL_DROP: u32 = 51;
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 

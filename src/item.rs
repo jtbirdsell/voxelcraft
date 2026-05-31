@@ -47,18 +47,62 @@ pub const DIAMOND_AXE: ItemId = tool_id(Tier::Diamond, 1);
 pub const DIAMOND_SHOVEL: ItemId = tool_id(Tier::Diamond, 2);
 pub const DIAMOND_SWORD: ItemId = tool_id(Tier::Diamond, 3);
 
-/// Crafting materials (non-block, non-tool items) occupy `[MATERIAL_BASE, MATERIAL_BASE+16)`.
+/// Crafting + mob-drop materials (non-block, non-tool items) occupy `[MATERIAL_BASE, +16)`.
 pub const MATERIAL_BASE: ItemId = 512;
 pub const STICK: ItemId = MATERIAL_BASE;
 pub const IRON_INGOT: ItemId = MATERIAL_BASE + 1;
 pub const GOLD_INGOT: ItemId = MATERIAL_BASE + 2;
+// Mob drops (M29 combat loot). Foods become edible once a hunger-eating milestone lands; the rest
+// are crafting materials (leather→armor, bone→bonemeal, gunpowder→TNT, string→bows, …).
+pub const BEEF: ItemId = MATERIAL_BASE + 3;
+pub const PORK: ItemId = MATERIAL_BASE + 4;
+pub const CHICKEN_MEAT: ItemId = MATERIAL_BASE + 5;
+pub const MUTTON: ItemId = MATERIAL_BASE + 6;
+pub const LEATHER: ItemId = MATERIAL_BASE + 7;
+pub const BONE: ItemId = MATERIAL_BASE + 8;
+pub const FEATHER: ItemId = MATERIAL_BASE + 9;
+pub const GUNPOWDER: ItemId = MATERIAL_BASE + 10;
+pub const STRING: ItemId = MATERIAL_BASE + 11;
+pub const SPIDER_EYE: ItemId = MATERIAL_BASE + 12;
+pub const ROTTEN_FLESH: ItemId = MATERIAL_BASE + 13;
 
 fn material_name(item: ItemId) -> &'static str {
     match item {
         STICK => "Stick",
         IRON_INGOT => "Iron Ingot",
         GOLD_INGOT => "Gold Ingot",
+        BEEF => "Raw Beef",
+        PORK => "Raw Porkchop",
+        CHICKEN_MEAT => "Raw Chicken",
+        MUTTON => "Raw Mutton",
+        LEATHER => "Leather",
+        BONE => "Bone",
+        FEATHER => "Feather",
+        GUNPOWDER => "Gunpowder",
+        STRING => "String",
+        SPIDER_EYE => "Spider Eye",
+        ROTTEN_FLESH => "Rotten Flesh",
         _ => "Material",
+    }
+}
+
+/// Flat display color of a material item (UI swatch + the world-drop tile).
+pub fn material_color(item: ItemId) -> [f32; 3] {
+    match item {
+        IRON_INGOT => [0.80, 0.78, 0.74],
+        GOLD_INGOT => [0.95, 0.80, 0.22],
+        BEEF => [0.78, 0.25, 0.22],
+        PORK => [0.92, 0.62, 0.62],
+        CHICKEN_MEAT => [0.90, 0.72, 0.55],
+        MUTTON => [0.82, 0.40, 0.36],
+        LEATHER => [0.62, 0.43, 0.24],
+        BONE => [0.92, 0.91, 0.82],
+        FEATHER => [0.95, 0.95, 0.96],
+        GUNPOWDER => [0.22, 0.22, 0.24],
+        STRING => [0.88, 0.88, 0.86],
+        SPIDER_EYE => [0.55, 0.18, 0.20],
+        ROTTEN_FLESH => [0.52, 0.36, 0.30],
+        _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
 
@@ -257,9 +301,14 @@ pub fn item_name(item: ItemId) -> &'static str {
 
 /// Atlas tile for a dropped item entity: the block's tile, or a generic tool tile.
 pub fn item_tile(item: ItemId) -> u32 {
+    // Mob-drop materials get a flat-colored atlas tile so a dropped pile reads as its real item
+    // (beef/leather/bone/…) instead of a generic wooden box.
+    if (BEEF..=ROTTEN_FLESH).contains(&item) {
+        return block::tile::MATERIAL_DROP + (item - BEEF) as u32;
+    }
     match block_of_item(item) {
         Some(b) => block::face_tile(b, [0, 1, 0]),
-        None => block::tile::PLANKS, // generic handle-colored placeholder for tool drops
+        None => block::tile::PLANKS, // generic handle-colored placeholder for tools/sticks/ingots
     }
 }
 
@@ -274,7 +323,9 @@ pub fn item_emission(item: ItemId) -> f32 {
 pub fn is_known(item: ItemId) -> bool {
     is_tool(item)
         || is_armor(item)
-        || matches!(item, STICK | IRON_INGOT | GOLD_INGOT)
+        // A *defined* material (material_name returns its real name, not the "Material" fallback) —
+        // so the unpopulated tail of the material range is still rejected from corrupt saves.
+        || (is_material(item) && material_name(item) != "Material")
         || (item != block::AIR && item <= block::MAX_BLOCK)
 }
 
@@ -284,11 +335,7 @@ pub fn item_color(item: ItemId) -> [f32; 3] {
         return block::face_color(b, [0, 1, 0]);
     }
     if is_material(item) {
-        return match item {
-            IRON_INGOT => [0.80, 0.78, 0.74],
-            GOLD_INGOT => [0.95, 0.80, 0.22],
-            _ => [0.55, 0.40, 0.22], // stick / generic wooden
-        };
+        return material_color(item);
     }
     if is_armor(item) {
         return armor_color(item);
@@ -635,7 +682,9 @@ mod tests {
     #[test]
     fn unknown_material_ids_rejected() {
         assert!(is_known(STICK) && is_known(IRON_INGOT) && is_known(GOLD_INGOT));
-        assert!(!is_known(MATERIAL_BASE + 5), "undefined material id should be rejected");
+        assert!(is_known(LEATHER) && is_known(GUNPOWDER)); // defined mob-drop materials
+        // The unpopulated tail of the material range (515..528 minus the defined ids) is rejected.
+        assert!(!is_known(MATERIAL_BASE + 15), "undefined material id should be rejected");
     }
 
     #[test]
