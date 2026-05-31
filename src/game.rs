@@ -487,19 +487,24 @@ impl Game {
             center.y.floor() as i32,
             center.z.floor() as i32,
         );
+        // Collect the cells to clear, then carve them in ONE batched pass (apply_fluid_changes
+        // re-meshes each affected chunk once — set_block-per-block would remesh 100+ times). Fluids
+        // are left intact (Minecraft blasts don't destroy water; carving them leaves dry holes).
+        let mut changes: Vec<(IVec3, BlockId)> = Vec::new();
         for dx in -r..=r {
             for dy in -r..=r {
                 for dz in -r..=r {
                     let p = c + IVec3::new(dx, dy, dz);
                     if (p.as_vec3() + Vec3::splat(0.5) - center).length() <= radius {
                         let id = self.block_at(p);
-                        if id != block::AIR && id != block::BEDROCK {
-                            self.set_block(gpu, renderer, p, block::AIR);
+                        if id != block::AIR && id != block::BEDROCK && !block::is_fluid(id) {
+                            changes.push((p, block::AIR));
                         }
                     }
                 }
             }
         }
+        self.apply_fluid_changes(gpu, renderer, &changes);
         explosion_damage((player_pos - center).length(), radius)
     }
 
@@ -826,11 +831,22 @@ impl Game {
         x
     }
 
-    /// Topmost solid surface at (wx,wz) with 2 air blocks above it (room for a mob), else None.
+    /// Topmost walkable ground surface at (wx,wz) with 2 air blocks above (room for a mob), else
+    /// None. Only real ground counts (grass/dirt/stone/sand/snow/gravel) — never a leaf canopy or a
+    /// tree trunk, so mobs don't spawn perched in the air on trees.
     fn surface_at(&self, wx: i32, wz: i32) -> Option<(i32, BlockId)> {
-        for y in (1..120).rev() {
+        for y in (1..WORLD_HEIGHT_CHUNKS * CHUNK_SIZE_I - 2).rev() {
             let here = self.block_at(IVec3::new(wx, y, wz));
-            if block::is_solid(here)
+            let ground = matches!(
+                here,
+                block::GRASS
+                    | block::DIRT
+                    | block::STONE
+                    | block::SAND
+                    | block::SNOW
+                    | block::GRAVEL
+            );
+            if ground
                 && self.block_at(IVec3::new(wx, y + 1, wz)) == block::AIR
                 && self.block_at(IVec3::new(wx, y + 2, wz)) == block::AIR
             {

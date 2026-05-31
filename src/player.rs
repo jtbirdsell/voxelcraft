@@ -94,6 +94,8 @@ pub struct Player {
     pub level: u32,
     /// Total equipped-armor defense points, refreshed from the inventory each frame.
     armor_points: u32,
+    /// Post-hit invulnerability timer (seconds); incoming combat damage is ignored while it's >0.
+    hurt_cooldown: f32,
     drown_timer: f32,
     /// Highest y reached since last touching ground, for fall-damage distance.
     air_max_y: f32,
@@ -134,6 +136,7 @@ impl Player {
             xp: 0.0,
             level: 0,
             armor_points: 0,
+            hurt_cooldown: 0.0,
             drown_timer: 0.0,
             air_max_y: position.y,
             respawn_point: position,
@@ -147,10 +150,15 @@ impl Player {
         self.health = (self.health - raw * (1.0 - reduction)).max(0.0);
     }
 
-    /// External hit (e.g. a mob's contact attack), reduced by the currently equipped armor.
+    /// External combat hit (mob contact / arrow), reduced by armor. A short post-hit invulnerability
+    /// window drops further hits so a swarm can't stack a frame of damage into an instant kill.
     pub fn take_hit(&mut self, raw: f32) {
+        if self.hurt_cooldown > 0.0 || raw <= 0.0 {
+            return;
+        }
         let armor = self.armor_points;
         self.apply_damage(raw, armor);
+        self.hurt_cooldown = 0.5;
     }
 
     /// Award experience points, rolling over into levels.
@@ -343,6 +351,7 @@ impl Player {
         armor_points: u32,
     ) {
         self.armor_points = armor_points;
+        self.hurt_cooldown = (self.hurt_cooldown - dt).max(0.0);
         let (sy, cy) = yaw.sin_cos();
         let fwd = Vec3::new(cy, 0.0, sy);
         let right = Vec3::new(-sy, 0.0, cy);

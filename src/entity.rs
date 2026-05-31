@@ -293,6 +293,8 @@ struct Entity {
     wander: f32,
     rng: u64,
     dead: bool,
+    /// Knockback/stun timer: while >0 the mob AI doesn't drive velocity, so a melee impulse rides.
+    stun: f32,
 }
 
 #[derive(Default)]
@@ -398,9 +400,10 @@ impl Entities {
         let mut kb = e.pos - origin;
         kb.y = 0.0;
         let kb = kb.normalize_or_zero();
-        e.vel.x += kb.x * KNOCKBACK;
-        e.vel.z += kb.z * KNOCKBACK;
+        e.vel.x = kb.x * KNOCKBACK;
+        e.vel.z = kb.z * KNOCKBACK;
         e.vel.y = e.vel.y.max(0.0) + 3.0; // small pop-up
+        e.stun = 0.3; // suppress the AI velocity drive so the impulse actually integrates
         true
     }
 
@@ -446,6 +449,7 @@ impl Entities {
             wander: 1.0 + randf(&mut rng) * 2.0,
             rng,
             dead: false,
+            stun: 0.0,
         });
     }
 
@@ -464,6 +468,7 @@ impl Entities {
             wander: 0.0,
             rng,
             dead: false,
+            stun: 0.0,
         });
     }
 
@@ -485,6 +490,7 @@ impl Entities {
             wander: 0.0,
             rng,
             dead: false,
+            stun: 0.0,
         });
     }
 
@@ -501,6 +507,7 @@ impl Entities {
             wander: 0.0,
             rng,
             dead: false,
+            stun: 0.0,
         });
     }
 
@@ -586,13 +593,24 @@ impl Entities {
                             if m.ai == Ai::Idle { 0.0 } else { MOB_SPEED }
                         }
                     };
-                    e.vel.x = e.heading.cos() * speed;
-                    e.vel.z = e.heading.sin() * speed;
-                    // Occasional hop helps clear 1-block steps without real pathfinding.
-                    if speed > 0.0 && e.on_ground && randf(&mut e.rng) < 0.05 {
-                        e.vel.y = 7.0;
+                    if e.stun > 0.0 {
+                        // Recovering from a knockback hit: let the impulse ride (with friction),
+                        // don't let the AI immediately re-drive velocity back toward the player.
+                        e.stun -= dt;
+                        e.vel.x *= 0.86;
+                        e.vel.z *= 0.86;
+                    } else {
+                        e.vel.x = e.heading.cos() * speed;
+                        e.vel.z = e.heading.sin() * speed;
+                        // Occasional hop helps clear 1-block steps without real pathfinding.
+                        if speed > 0.0 && e.on_ground && randf(&mut e.rng) < 0.05 {
+                            e.vel.y = 7.0;
+                        }
                     }
 
+                    // Snapshot the firing eye BEFORE the move so a skeleton's LOS check (taken from
+                    // the pre-move position) and its arrow's spawn point agree.
+                    let shot_from = e.pos + Vec3::new(0.0, mh * 0.7, 0.0);
                     e.vel.y -= GRAVITY * dt;
                     e.on_ground = collide_move(&mut e.pos, &mut e.vel, mw, mh, dt, &is_solid);
 
@@ -601,11 +619,10 @@ impl Entities {
                         // Skeleton: looses an arrow at the player while it has a clear shot.
                         Species::Skeleton => {
                             if matches!(m.ai, Ai::Chase | Ai::Attack) && los && m.atk_cd <= 0.0 {
-                                let from = e.pos + Vec3::new(0.0, mh * 0.7, 0.0);
-                                let aim = (target - from).normalize_or_zero();
+                                let aim = (target - shot_from).normalize_or_zero();
                                 // Aim a touch high so gravity arcs the shot into the target.
                                 let vel = aim * ARROW_SPEED + Vec3::new(0.0, dist * 0.05, 0.0);
-                                shots.push((from, vel));
+                                shots.push((shot_from, vel));
                                 m.atk_cd = SKELETON_SHOOT_CD;
                             }
                         }
@@ -616,7 +633,9 @@ impl Entities {
                                     m.fuse = CREEPER_FUSE;
                                 }
                                 m.fuse -= dt;
-                                m.hurt = (1.0 - m.fuse / CREEPER_FUSE).clamp(0.0, 0.45); // blink
+                                // Blink white as it primes, but never hide a fresh melee hit-flash.
+                                let blink = (1.0 - m.fuse / CREEPER_FUSE).clamp(0.0, 0.45);
+                                m.hurt = m.hurt.max(blink);
                                 if m.fuse <= 0.0 {
                                     collected
                                         .explosions
@@ -627,9 +646,13 @@ impl Entities {
                                 m.fuse = -1.0; // walked out of range — defuse
                             }
                         }
-                        // Zombie / spider: melee contact damage on cooldown.
+                        // Zombie / spider: melee contact damage, but only on genuine AABB contact
+                        // (the hysteresis Attack state can hold ~2.4 blocks out — too far to bite).
                         _ => {
-                            if m.ai == Ai::Attack && m.atk_cd <= 0.0 {
+                            let dh = player_pos - e.pos;
+                            let horiz = (dh.x * dh.x + dh.z * dh.z).sqrt();
+                            let touching = horiz <= mw * 0.5 + 0.6 && dh.y.abs() <= mh + 0.5;
+                            if m.ai == Ai::Attack && m.atk_cd <= 0.0 && touching {
                                 let dmg = m.species.contact_damage();
                                 if dmg > 0.0 {
                                     collected.player_damage += dmg;
@@ -693,23 +716,32 @@ impl Entities {
                 Kind::Arrow(dmg) => {
                     e.vel.y -= ARROW_GRAVITY * dt;
                     e.heading = e.vel.z.atan2(e.vel.x);
-                    // Point-like flight: move freely until the next cell is solid (then it sticks).
-                    let next = e.pos + e.vel * dt;
-                    let cell = IVec3::new(
-                        next.x.floor() as i32,
-                        next.y.floor() as i32,
-                        next.z.floor() as i32,
-                    );
-                    if is_solid(cell) {
-                        e.dead = true; // stuck in a block
-                    } else {
+                    // Sub-step the flight so a fast arrow can't tunnel through a 1-block wall or skip
+                    // past the player in a single frame: march ~0.4 blocks at a time, testing the
+                    // cell ahead and the player-hit at each step.
+                    let move_vec = e.vel * dt;
+                    let steps = (move_vec.length() / 0.4).ceil().max(1.0) as i32;
+                    let step = move_vec / steps as f32;
+                    let chest = player_pos + Vec3::new(0.0, 1.0, 0.0);
+                    for _ in 0..steps {
+                        let next = e.pos + step;
+                        let cell = IVec3::new(
+                            next.x.floor() as i32,
+                            next.y.floor() as i32,
+                            next.z.floor() as i32,
+                        );
+                        if is_solid(cell) {
+                            e.dead = true; // stuck in the wall — stop before entering it (no hit)
+                            break;
+                        }
                         e.pos = next;
+                        if (chest - e.pos).length() < 0.7 {
+                            collected.player_damage += dmg;
+                            e.dead = true;
+                            break;
+                        }
                     }
-                    let to_player = player_pos + Vec3::new(0.0, 1.0, 0.0) - e.pos;
-                    if to_player.length() < 0.7 {
-                        collected.player_damage += dmg;
-                        e.dead = true;
-                    } else if e.age > ARROW_LIFETIME || e.pos.y < FALL_OUT_Y {
+                    if !e.dead && (e.age > ARROW_LIFETIME || e.pos.y < FALL_OUT_Y) {
                         e.dead = true;
                     }
                 }
@@ -1110,6 +1142,17 @@ mod tests {
         assert_eq!(es.mob_count(), 2);
         let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1); // floor at y<1
         assert_eq!(es.mob_count(), 1, "the far mob despawns, the near one stays");
+    }
+
+    #[test]
+    fn fast_arrow_does_not_tunnel_a_thin_wall() {
+        let mut es = Entities::new();
+        // 22 m/s arrow at z=0; a 1-cell wall at z=1. With a 0.1s frame the naive single-step would
+        // jump from z=0 to z=2.2 (final cell z=2), never testing z=1 — the sub-step march must catch it.
+        es.spawn_arrow(Vec3::new(0.5, 1.0, 0.0), Vec3::new(0.0, 0.0, 22.0));
+        let wall = |p: IVec3| p.z == 1;
+        es.update(0.1, Vec3::new(0.0, 500.0, 500.0), wall); // player far away
+        assert_eq!(es.count(), 0, "the arrow stops at the wall instead of tunneling through it");
     }
 
     #[test]

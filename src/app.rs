@@ -420,11 +420,11 @@ impl App {
         let fwd = state.camera.forward();
         let mut target = raycast::cast(eye, fwd, REACH, |p| state.game.is_solid_at(p));
 
-        // Melee: if a mob is nearer than the targeted block, the left-click hits it (not the block).
+        // Melee: if a mob is nearer than the targeted block FACE, the left-click hits it (not the
+        // block). Using the ray's face-hit distance (not the block center) means a mob standing
+        // flush behind a block can't be struck through it.
         state.melee_cd = (state.melee_cd - dt).max(0.0);
-        let block_dist = target
-            .as_ref()
-            .map_or(REACH, |h| (h.block.as_vec3() + Vec3::splat(0.5) - eye).length());
+        let block_dist = target.as_ref().map_or(REACH, |h| h.dist);
         let mob_in_way = state.screen == Screen::None
             && state.input.break_held
             && state
