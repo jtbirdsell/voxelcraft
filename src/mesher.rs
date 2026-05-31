@@ -197,12 +197,26 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
             block::RenderKind::Cross => emit_cross(&mut mesh.opaque, origin, x, y, z, id, l),
             // Bottom slab: a half-height box.
             block::RenderKind::Slab => {
-                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l)
+                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l, 0)
             }
-            // Stairs: a bottom slab + an upper-back quarter (fixed orientation, stepping toward +z).
+            // Stairs: a bottom slab + an upper half-box on the high side (per the block's facing). The
+            // upper box's bottom face sits flush on the slab, so skip it (face 2 = -Y) — that removes
+            // the wasted coplanar quad + its z-fighting.
             block::RenderKind::Stairs => {
-                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l);
-                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.5, 0.5], [1.0, 1.0, 1.0], id, l);
+                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l, 0);
+                let ub = block::stair_upper_box(block::stair_facing(id));
+                emit_box(
+                    &mut mesh.opaque,
+                    origin,
+                    x,
+                    y,
+                    z,
+                    [ub[0], ub[1], ub[2]],
+                    [ub[3], ub[4], ub[5]],
+                    id,
+                    l,
+                    1 << 2,
+                );
             }
             block::RenderKind::Cube => {}
         }
@@ -211,9 +225,10 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
     mesh
 }
 
-/// Emit the 6 faces of an axis-aligned sub-cube `[lo,hi]` (local 0..1 within cell `(lx,ly,lz)`) into
-/// `geom`, textured per-face like a normal block. No face culling — partial blocks are rare and don't
-/// participate in greedy merging. `face_light` is the (sky<<4|block) value sampled at the cell.
+/// Emit the faces of an axis-aligned sub-cube `[lo,hi]` (local 0..1 within cell `(lx,ly,lz)`) into
+/// `geom`, textured per-face like a normal block. `skip` is a face bitmask (bit `d*2 + positive`,
+/// i.e. 0:-X 1:+X 2:-Y 3:+Y 4:-Z 5:+Z) to omit faces flush against another box. Partial blocks are
+/// rare and don't greedy-merge. `face_light` is the (sky<<4|block) value sampled at the cell.
 #[allow(clippy::too_many_arguments)]
 fn emit_box(
     geom: &mut Geometry,
@@ -225,6 +240,7 @@ fn emit_box(
     hi: [f32; 3],
     id: u16,
     face_light: u8,
+    skip: u8,
 ) {
     let cell = [
         (origin[0] + lx) as f32,
@@ -243,6 +259,9 @@ fn emit_box(
         let u = (d + 1) % 3;
         let v = (d + 2) % 3;
         for positive in [false, true] {
+            if skip & (1 << (d * 2 + positive as usize)) != 0 {
+                continue;
+            }
             let foff = normal_offset(d, positive);
             let normal = normal_vec(d, positive);
             let tile = block::face_tile(id, foff);

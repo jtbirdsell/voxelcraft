@@ -45,11 +45,38 @@ pub const ICE: BlockId = 37;
 // M26 glass + partial blocks.
 pub const GLASS: BlockId = 38;
 pub const STONE_SLAB: BlockId = 39;
-pub const STONE_STAIRS: BlockId = 40;
+pub const STONE_STAIRS: BlockId = 40; // = stairs facing 0 (ascend toward +z); 42..44 are the other 3
 pub const WOOD_SLAB: BlockId = 41;
+// Stone-stair orientations (M26 was fixed-facing; placement now picks one by player yaw). The base
+// STONE_STAIRS(40) is facing 0; E/S/W are appended after WOOD_SLAB to keep older save ids stable.
+pub const STONE_STAIRS_E: BlockId = 42;
+pub const STONE_STAIRS_S: BlockId = 43;
+pub const STONE_STAIRS_W: BlockId = 44;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = WOOD_SLAB;
+pub const MAX_BLOCK: BlockId = STONE_STAIRS_W;
+
+/// Orientation (0..3) of a stair block — 0:+z, 1:+x, 2:-z, 3:-x (the direction the high step faces).
+#[inline]
+pub fn stair_facing(id: BlockId) -> u8 {
+    match id {
+        STONE_STAIRS_E => 1,
+        STONE_STAIRS_S => 2,
+        STONE_STAIRS_W => 3,
+        _ => 0,
+    }
+}
+
+/// The stair block id for a facing 0..3 (defaults to facing 0).
+#[inline]
+pub fn stair_with_facing(facing: u8) -> BlockId {
+    match facing {
+        1 => STONE_STAIRS_E,
+        2 => STONE_STAIRS_S,
+        3 => STONE_STAIRS_W,
+        _ => STONE_STAIRS,
+    }
+}
 
 /// How a block is meshed: a full greedy cube, a cross billboard (plants), or a non-greedy partial
 /// shape (slab / stairs) emitted one cell at a time like a billboard.
@@ -68,7 +95,7 @@ pub fn render_kind(id: BlockId) -> RenderKind {
             RenderKind::Cross
         }
         STONE_SLAB | WOOD_SLAB => RenderKind::Slab,
-        STONE_STAIRS => RenderKind::Stairs,
+        STONE_STAIRS | STONE_STAIRS_E | STONE_STAIRS_S | STONE_STAIRS_W => RenderKind::Stairs,
         _ => RenderKind::Cube,
     }
 }
@@ -114,15 +141,28 @@ pub fn is_solid(id: BlockId) -> bool {
 pub type Aabb = [f32; 6];
 const BOX_FULL: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
 const BOX_SLAB: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
-// Stairs: a bottom slab plus the upper-back quarter (fixed orientation, stepping toward +z).
-const BOX_STAIRS: [Aabb; 2] = [
-    [0.0, 0.0, 0.0, 1.0, 0.5, 1.0],
-    [0.0, 0.5, 0.5, 1.0, 1.0, 1.0],
-];
 const BOX_NONE: [Aabb; 0] = [];
+// Stairs: a bottom slab + an upper half-box on the high side, one per facing (0:+z 1:+x 2:-z 3:-x).
+const SLAB_HALF: Aabb = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
+const BOX_STAIRS_N: [Aabb; 2] = [SLAB_HALF, [0.0, 0.5, 0.5, 1.0, 1.0, 1.0]];
+const BOX_STAIRS_E: [Aabb; 2] = [SLAB_HALF, [0.5, 0.5, 0.0, 1.0, 1.0, 1.0]];
+const BOX_STAIRS_S: [Aabb; 2] = [SLAB_HALF, [0.0, 0.5, 0.0, 1.0, 1.0, 0.5]];
+const BOX_STAIRS_W: [Aabb; 2] = [SLAB_HALF, [0.0, 0.5, 0.0, 0.5, 1.0, 1.0]];
+
+/// The upper-step box (above the bottom slab) of a stair, given its facing.
+#[inline]
+pub fn stair_upper_box(facing: u8) -> Aabb {
+    match facing {
+        1 => BOX_STAIRS_E[1],
+        2 => BOX_STAIRS_S[1],
+        3 => BOX_STAIRS_W[1],
+        _ => BOX_STAIRS_N[1],
+    }
+}
 
 /// The solid collision boxes of a block (empty if passable). Full cubes are a single unit box;
-/// slabs/stairs return their true partial shape so the player can stand at half-height / step up.
+/// slabs/stairs return their true partial shape (per stair facing) so the player can stand at
+/// half-height / step up.
 #[inline]
 pub fn solid_boxes(id: BlockId) -> &'static [Aabb] {
     if !is_solid(id) {
@@ -130,7 +170,12 @@ pub fn solid_boxes(id: BlockId) -> &'static [Aabb] {
     }
     match render_kind(id) {
         RenderKind::Slab => &BOX_SLAB,
-        RenderKind::Stairs => &BOX_STAIRS,
+        RenderKind::Stairs => match stair_facing(id) {
+            1 => &BOX_STAIRS_E,
+            2 => &BOX_STAIRS_S,
+            3 => &BOX_STAIRS_W,
+            _ => &BOX_STAIRS_N,
+        },
         _ => &BOX_FULL,
     }
 }
@@ -216,7 +261,7 @@ pub fn display_name(id: BlockId) -> &'static str {
         ICE => "Ice",
         GLASS => "Glass",
         STONE_SLAB => "Stone Slab",
-        STONE_STAIRS => "Stone Stairs",
+        STONE_STAIRS | STONE_STAIRS_E | STONE_STAIRS_S | STONE_STAIRS_W => "Stone Stairs",
         WOOD_SLAB => "Wood Slab",
         _ => "Unknown",
     }
@@ -286,8 +331,10 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         }
         ICE => [0.66, 0.80, 0.92],
         GLASS => [0.82, 0.91, 0.98],
-        STONE_SLAB | STONE_STAIRS => [0.49, 0.49, 0.52], // stone
-        WOOD_SLAB => [0.62, 0.48, 0.30],                 // planks
+        STONE_SLAB | STONE_STAIRS | STONE_STAIRS_E | STONE_STAIRS_S | STONE_STAIRS_W => {
+            [0.49, 0.49, 0.52] // stone
+        }
+        WOOD_SLAB => [0.62, 0.48, 0.30], // planks
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -384,7 +431,7 @@ pub fn hardness(id: BlockId) -> f32 {
         ICE => 0.5,
         PUMPKIN => 1.0,
         GLASS => 0.3,
-        STONE_SLAB | STONE_STAIRS => 1.5,
+        STONE_SLAB | STONE_STAIRS | STONE_STAIRS_E | STONE_STAIRS_S | STONE_STAIRS_W => 1.5,
         WOOD_SLAB => 1.2,
         _ if is_plant(id) => 0.0,
         _ => 1.0,
@@ -396,7 +443,9 @@ pub fn tool_class(id: BlockId) -> ToolClass {
     match id {
         STONE | COBBLESTONE | BRICKS | DEEPSLATE | OBSIDIAN | FURNACE | COAL_ORE | IRON_ORE
         | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE => ToolClass::Pickaxe,
-        ICE | STONE_SLAB | STONE_STAIRS => ToolClass::Pickaxe,
+        ICE | STONE_SLAB | STONE_STAIRS | STONE_STAIRS_E | STONE_STAIRS_S | STONE_STAIRS_W => {
+            ToolClass::Pickaxe
+        }
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB => ToolClass::Axe,
         DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
         _ => ToolClass::None,
@@ -419,6 +468,8 @@ pub fn drops(id: BlockId) -> Option<BlockId> {
         LEAVES => None,
         ICE => None,   // melts away (no silk touch yet)
         GLASS => None, // shatters
+        // Oriented stairs drop the base stair item (orientation is re-derived on placement).
+        STONE_STAIRS_E | STONE_STAIRS_S | STONE_STAIRS_W => Some(STONE_STAIRS),
         _ => Some(id),
     }
 }
@@ -570,7 +621,7 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         }
         ICE => tile::ICE,
         GLASS => tile::GLASS,
-        STONE_SLAB | STONE_STAIRS => tile::STONE,
+        STONE_SLAB | STONE_STAIRS | STONE_STAIRS_E | STONE_STAIRS_S | STONE_STAIRS_W => tile::STONE,
         WOOD_SLAB => tile::PLANKS,
         _ => tile::MAGENTA,
     }

@@ -517,7 +517,19 @@ impl App {
                     state.pending_open = Some(Screen::Furnace(hit.block));
                 } else {
                     let place = hit.block + hit.normal;
-                    let id = state.inventory.selected_block();
+                    let mut id = state.inventory.selected_block();
+                    // Stairs orient by where the player faces: the high step rises away from you.
+                    if id == block::STONE_STAIRS {
+                        let f = state.camera.forward();
+                        let facing = if f.x.abs() > f.z.abs() {
+                            if f.x > 0.0 { 1 } else { 3 }
+                        } else if f.z > 0.0 {
+                            0
+                        } else {
+                            2
+                        };
+                        id = block::stair_with_facing(facing);
+                    }
                     let blocks_player = block::is_solid(id) && state.player.intersects_block(place);
                     if id != block::AIR
                         && !blocks_player
