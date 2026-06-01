@@ -75,6 +75,10 @@ pub struct ChunkRenderer {
     /// Generation can tag output-resolution guides for the RR-upscaled frame.
     guide_upscale_pipeline: wgpu::RenderPipeline,
     guide_upscale_bgl: wgpu::BindGroupLayout,
+    /// M33-G9 supersampling: Catmull-Rom downscale (super-res LDR → swapchain) + bidirectional guide
+    /// resize (super-res depth/motion → swap-res FG guides).
+    ss_downscale_pipeline: wgpu::RenderPipeline,
+    guide_downscale_pipeline: wgpu::RenderPipeline,
     ui_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
@@ -792,6 +796,94 @@ impl ChunkRenderer {
                 cache: None,
             });
 
+        // M33-G9 supersampling: Catmull-Rom downscale (super-res LDR → swapchain), reusing the tonemap
+        // BGL/sampler (texture + filtering sampler); and a bidirectional guide resize (super-res
+        // depth/motion → swap-res FG guides), reusing the guide-upscale BGL (2 textures, MRT out).
+        let ss_downscale_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ss-downscale-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../assets/shaders/ss_downscale.wgsl").into(),
+            ),
+        });
+        let fullscreen_primitive = wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        };
+        let no_multisample = wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        };
+        let ss_downscale_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ss-downscale-pipeline"),
+            layout: Some(&tonemap_layout),
+            vertex: wgpu::VertexState {
+                module: &ss_downscale_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: fullscreen_primitive,
+            depth_stencil: None,
+            multisample: no_multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &ss_downscale_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let guide_downscale_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("guide-downscale-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../assets/shaders/gbuf_downscale.wgsl").into(),
+            ),
+        });
+        let guide_downscale_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("guide-downscale-pipeline"),
+                layout: Some(&guide_upscale_layout),
+                vertex: wgpu::VertexState {
+                    module: &guide_downscale_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: fullscreen_primitive,
+                depth_stencil: None,
+                multisample: no_multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: &guide_downscale_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: crate::gfx::graph::GDEPTH_FORMAT,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: crate::gfx::graph::GMOTION_FORMAT,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
         // M33-G6 deferred GI: a compute pass traces the hemisphere GI from the G-buffer into a noisy
         // irradiance texture; a fullscreen composite additively blends it onto the HDR scene. Built
         // only when GI is deferred (the default). The compute shader reuses rtx_common + the active
@@ -969,6 +1061,8 @@ impl ChunkRenderer {
             tonemap_sampler,
             guide_upscale_pipeline,
             guide_upscale_bgl,
+            ss_downscale_pipeline,
+            guide_downscale_pipeline,
             ui_bind_group,
             atlas_bind_group,
             camera_buffer,
@@ -1540,7 +1634,56 @@ impl ChunkRenderer {
             tonemap(encoder, hv);
         }
 
-        // The HUD vertex buffer, shared by the swapchain pass and the UI-layer pass.
+        // HUD over the real (presented) frame; then the FG UI-recomposition layer (transparent + HUD).
+        if !ui_verts.is_empty() {
+            self.draw_hud(gpu, encoder, final_view, ui_verts, false);
+        }
+        if let Some(uv) = ui_view {
+            self.draw_hud(gpu, encoder, uv, ui_verts, true);
+        }
+    }
+
+    /// Fullscreen blit: clear `view` and draw the fullscreen triangle with `pipeline` + `bg`. Used by
+    /// the supersample resolve (tonemap into the super-res LDR, then Catmull-Rom downscale). (M33-G9)
+    fn blit(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        bg: &wgpu::BindGroup,
+        view: &wgpu::TextureView,
+        label: &str,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Draw the HUD (`ui_verts`) into `view`. `clear` clears to transparent first (the FG
+    /// UI-recomposition layer) — otherwise loads + alpha-blends over the presented frame.
+    fn draw_hud(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        ui_verts: &[UiVertex],
+        clear: bool,
+    ) {
         let buf = (!ui_verts.is_empty()).then(|| {
             gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("ui-vbuf"),
@@ -1548,53 +1691,61 @@ impl ChunkRenderer {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
-        // HUD over the real (presented) frame — load the tonemapped scene and alpha-blend on top.
+        let load = if clear {
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+        } else {
+            wgpu::LoadOp::Load
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ui-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
         if let Some(buf) = &buf {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ui-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: final_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
             pass.set_pipeline(&self.ui_pipeline);
             pass.set_bind_group(0, &self.ui_bind_group, &[]);
             pass.set_vertex_buffer(0, buf.slice(..));
             pass.draw(0..ui_verts.len() as u32, 0..1);
         }
-        // Phase 4: the UI layer for DLSS-G recomposition — clear to transparent, then the same HUD.
+    }
+
+    /// M33-G9 supersample resolve: tonemap the super-res HDR (`hdr_tonemap_bg`) into the super-res LDR
+    /// (`ss_ldr_view`), Catmull-Rom downscale that to the swapchain `final_view` (+ the FG hudless
+    /// layer), then draw the crisp HUD at swapchain resolution.
+    #[allow(clippy::too_many_arguments)]
+    fn record_resolve_supersampled(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        hdr_tonemap_bg: &wgpu::BindGroup,
+        ss_ldr_view: &wgpu::TextureView,
+        ss_downscale_bg: &wgpu::BindGroup,
+        final_view: &wgpu::TextureView,
+        ui_verts: &[UiVertex],
+        hudless_view: Option<&wgpu::TextureView>,
+        ui_view: Option<&wgpu::TextureView>,
+    ) {
+        // 1. ACES tonemap the super-res HDR → super-res LDR (swapchain colour format).
+        self.blit(encoder, &self.tonemap_pipeline, hdr_tonemap_bg, ss_ldr_view, "ss-tonemap");
+        // 2. Catmull-Rom downscale → swapchain (and the FG HUD-less layer, also at swap res).
+        self.blit(encoder, &self.ss_downscale_pipeline, ss_downscale_bg, final_view, "ss-downscale");
+        if let Some(hv) = hudless_view {
+            self.blit(encoder, &self.ss_downscale_pipeline, ss_downscale_bg, hv, "ss-downscale-hudless");
+        }
+        // 3. Crisp HUD at swapchain res; 4. the FG UI-recomposition layer.
+        if !ui_verts.is_empty() {
+            self.draw_hud(gpu, encoder, final_view, ui_verts, false);
+        }
         if let Some(uv) = ui_view {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ui-layer-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: uv,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if let Some(buf) = &buf {
-                pass.set_pipeline(&self.ui_pipeline);
-                pass.set_bind_group(0, &self.ui_bind_group, &[]);
-                pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..ui_verts.len() as u32, 0..1);
-            }
+            self.draw_hud(gpu, encoder, uv, ui_verts, true);
         }
     }
 
@@ -1631,16 +1782,17 @@ impl ChunkRenderer {
     /// M33-G8-FG (Phase 3): point-upscale the render-resolution depth + motion guides in `src` into
     /// the output-resolution `dst_depth` / `dst_motion` views, for the DLSS Frame Generation tag
     /// (DLSS-G tags the output-res guides of the presented frame; RR only emits them at render res).
-    pub fn upscale_guides(
+    pub fn resize_guides(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         src: &RenderTargets,
         dst_depth: &wgpu::TextureView,
         dst_motion: &wgpu::TextureView,
+        pipeline: &wgpu::RenderPipeline,
     ) {
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("guide-upscale-bg"),
+            label: Some("guide-resize-bg"),
             layout: &self.guide_upscale_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1665,14 +1817,14 @@ impl ChunkRenderer {
             })
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("guide-upscale-pass"),
+            label: Some("guide-resize-pass"),
             color_attachments: &[attach(dst_depth), attach(dst_motion)],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.guide_upscale_pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bg, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -1720,18 +1872,40 @@ impl ChunkRenderer {
                 let mut enc2 = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("dlss-resolve-encoder"),
                 });
-                // M33-G8-FG (Phase 3): point-upscale render-res depth/motion → output res so DLSS
-                // Frame Generation can tag the presented (output-res) frame. Harmless when FG is off.
-                self.upscale_guides(
+                // Resize the render-res depth/motion guides to SWAPCHAIN res for DLSS-G: point-upscale
+                // without supersampling, box-downscale with it (M33-G9). Harmless when FG is off.
+                let supersampled = dlss.is_supersampled();
+                let guide_pipeline = if supersampled {
+                    &self.guide_downscale_pipeline
+                } else {
+                    &self.guide_upscale_pipeline
+                };
+                self.resize_guides(
                     &gpu.device,
                     &mut enc2,
                     targets,
                     dlss.output_gdepth_view(),
                     dlss.output_gmotion_view(),
+                    guide_pipeline,
                 );
-                self.record_resolve(
-                    gpu, &mut enc2, resolve_bg, final_view, ui_verts, hudless_view, ui_view,
-                );
+                if supersampled {
+                    // Tonemap the super-res RR output, Catmull-Rom downscale to the swapchain, crisp HUD.
+                    self.record_resolve_supersampled(
+                        gpu,
+                        &mut enc2,
+                        resolve_bg,
+                        dlss.ss_ldr_view(),
+                        dlss.ss_downscale_bg(),
+                        final_view,
+                        ui_verts,
+                        hudless_view,
+                        ui_view,
+                    );
+                } else {
+                    self.record_resolve(
+                        gpu, &mut enc2, resolve_bg, final_view, ui_verts, hudless_view, ui_view,
+                    );
+                }
                 gpu.queue.submit(Some(enc2.finish()));
             }
             None => {

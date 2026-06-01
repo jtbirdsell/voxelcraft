@@ -1119,7 +1119,13 @@ impl ApplicationHandler for App {
             // `None` => native resolution. The per-frame camera jitter is applied inside `screenshot`
             // (it must advance with NGX's jitter across the warm-up frames).
             let mut dlss_render = dlss.as_ref().and_then(|d| {
-                crate::dlss::DlssRender::new(d, &renderer, &gpu, (gpu.config.width, gpu.config.height))
+                crate::dlss::DlssRender::new(
+                    d,
+                    &renderer,
+                    &gpu,
+                    (gpu.config.width, gpu.config.height),
+                    crate::dlss::supersample_from_env(),
+                )
             });
             renderer.set_sky(environment.wgpu_clear());
             renderer.update_camera(&gpu, &camera_uniform);
@@ -1287,7 +1293,13 @@ impl ApplicationHandler for App {
         // frames from the (point-upscaled) output-res guides. RR off (VOXELCRAFT_DLSS=off) → FG runs
         // standalone over the native-res frame.
         let dlss_render = dlss.as_ref().and_then(|d| {
-            crate::dlss::DlssRender::new(d, &renderer, &gpu, (gpu.config.width, gpu.config.height))
+            crate::dlss::DlssRender::new(
+                d,
+                &renderer,
+                &gpu,
+                (gpu.config.width, gpu.config.height),
+                crate::dlss::supersample_from_env(),
+            )
         });
         let targets = match &dlss_render {
             Some(dr) => dr.make_render_targets(&renderer, &gpu.device),
@@ -1347,6 +1359,7 @@ impl ApplicationHandler for App {
                             &state.renderer,
                             &state.gpu,
                             (state.gpu.config.width, state.gpu.config.height),
+                            crate::dlss::supersample_from_env(),
                         )
                     });
                     state.targets = match &state.dlss_render {

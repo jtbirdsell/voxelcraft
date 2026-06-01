@@ -111,6 +111,17 @@ fn quality_from_env() -> DlssPerfQualityMode {
     }
 }
 
+/// Supersample factor from `VOXELCRAFT_SS` (render above native res, then downscale — DLDSR-style).
+/// Default 1.0 (off), clamped `[1.0, 4.0]`. `>1` spends GPU headroom for a sharper, less grainy image;
+/// when set, RR renders in DLAA at `swap * ss` and a Catmull-Rom pass resolves down to the window.
+pub fn supersample_from_env() -> f32 {
+    std::env::var("VOXELCRAFT_SS")
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(1.0)
+        .clamp(1.0, 4.0)
+}
+
 /// Per-output-resolution DLSS Ray Reconstruction state. Recreated on resize. Owns the RR feature
 /// context, the render-resolution scene depth (also the RR hardware-depth guide), the two constant
 /// guide textures voxels don't vary (specular albedo = 0, roughness = 1), and the upscaled output.
@@ -138,6 +149,13 @@ pub struct DlssRender {
     output_gdepth_view: wgpu::TextureView,
     output_gmotion_tex: wgpu::Texture,
     output_gmotion_view: wgpu::TextureView,
+    /// M33-G9 supersampling factor: when `ss > 1`, RR renders the scene at `swap * ss` (DLAA, no
+    /// internal upscale) and a Catmull-Rom pass downscales the tonemapped result to the swapchain;
+    /// `ss_ldr_*` is the super-res tonemapped LDR the downscale samples from.
+    ss: f32,
+    // The ss_ldr texture itself isn't stored — the view + bind group keep it alive (wgpu ref-counts).
+    ss_ldr_view: wgpu::TextureView,
+    ss_downscale_bg: wgpu::BindGroup,
 }
 
 impl DlssRender {
@@ -147,16 +165,29 @@ impl DlssRender {
         dlss: &Dlss,
         renderer: &ChunkRenderer,
         gpu: &Gpu,
-        output_res: (u32, u32),
+        swap_res: (u32, u32),
+        ss: f32,
     ) -> Option<DlssRender> {
         if dlss.mode != DlssMode::RayReconstruction {
             // Super Resolution isn't wired yet; render natively for any non-RR mode.
             log::warn!("DLSS: only Ray Reconstruction is implemented — native res for {:?}", dlss.mode);
             return None;
         }
-        let output_res = UVec2::new(output_res.0.max(1), output_res.1.max(1));
+        let swap = UVec2::new(swap_res.0.max(1), swap_res.1.max(1));
+        let ss = ss.clamp(1.0, 4.0);
+        // M33-G9: supersample → render at super_res. `output_res` is what RR upscales TO; with ss>1 we
+        // force DLAA so RR render-res == super_res (true supersampling, no internal upscale), then a
+        // Catmull-Rom pass downscales to the swapchain. At ss==1 this is today's behaviour.
+        let output_res = UVec2::new(
+            (swap.x as f32 * ss).round() as u32,
+            (swap.y as f32 * ss).round() as u32,
+        );
         let device = &gpu.device;
-        let quality = quality_from_env();
+        let quality = if ss > 1.0 {
+            DlssPerfQualityMode::Dlaa
+        } else {
+            quality_from_env()
+        };
         let rr = match DlssRayReconstructionContext::new(
             output_res,
             quality,
@@ -177,11 +208,13 @@ impl DlssRender {
         };
         let render_res = rr.render_resolution();
         log::info!(
-            "DLSS-RR: render {}x{} -> output {}x{} ({quality:?})",
+            "DLSS-RR: render {}x{} -> output {}x{} -> swap {}x{} (ss {ss}, {quality:?})",
             render_res.x,
             render_res.y,
             output_res.x,
-            output_res.y
+            output_res.y,
+            swap.x,
+            swap.y
         );
 
         let extent = |r: UVec2| wgpu::Extent3d {
@@ -219,14 +252,19 @@ impl DlssRender {
             device,
             &output_tex.create_view(&wgpu::TextureViewDescriptor::default()),
         );
-        // Output-resolution depth/motion guides for DLSS Frame Generation (written by the renderer's
-        // nearest-upscale pass; tagged by FG). Render attachment (upscale target) + texture binding
-        // (NGX reads them).
-        let output_gdepth_tex = make("dlss-fg-gdepth", output_res, GDEPTH_FORMAT, attach);
+        // FG depth/motion guides at SWAPCHAIN resolution (the presented frame). The renderer resizes
+        // the render-res guides into these — point-upscale without supersampling, box-downscale with it.
+        // Render attachment (resize target) + texture binding (NGX reads them). (M33-G9)
+        let output_gdepth_tex = make("dlss-fg-gdepth", swap, GDEPTH_FORMAT, attach);
         let output_gdepth_view = output_gdepth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let output_gmotion_tex = make("dlss-fg-gmotion", output_res, GMOTION_FORMAT, attach);
+        let output_gmotion_tex = make("dlss-fg-gmotion", swap, GMOTION_FORMAT, attach);
         let output_gmotion_view =
             output_gmotion_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        // Super-res tonemapped LDR (swapchain colour format) the Catmull-Rom downscale samples from.
+        // Allocated at output_res (== super_res with ss>1); unused on the ss==1 fast path.
+        let ss_ldr_tex = make("dlss-ss-ldr", output_res, gpu.config.format, attach);
+        let ss_ldr_view = ss_ldr_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let ss_downscale_bg = renderer.make_tonemap_bg(device, &ss_ldr_view);
 
         // One-time clear of the constant guides: specular -> 0, roughness -> 1.
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -272,6 +310,9 @@ impl DlssRender {
             output_gdepth_view,
             output_gmotion_tex,
             output_gmotion_view,
+            ss,
+            ss_ldr_view,
+            ss_downscale_bg,
         })
     }
 
@@ -303,6 +344,21 @@ impl DlssRender {
     }
     pub fn output_gmotion_view(&self) -> &wgpu::TextureView {
         &self.output_gmotion_view
+    }
+
+    /// M33-G9: true when supersampling (ss > 1) — the renderer renders at super-res and downscales.
+    pub fn is_supersampled(&self) -> bool {
+        self.ss > 1.0
+    }
+
+    /// The super-res tonemapped-LDR render target (the supersample downscale writes its source here).
+    pub fn ss_ldr_view(&self) -> &wgpu::TextureView {
+        &self.ss_ldr_view
+    }
+
+    /// Bind group sampling the super-res LDR — the input to the Catmull-Rom downscale pass.
+    pub fn ss_downscale_bg(&self) -> &wgpu::BindGroup {
+        &self.ss_downscale_bg
     }
 
     /// The subpixel camera jitter (in render-resolution pixels) to apply this frame — must match
