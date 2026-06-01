@@ -84,6 +84,16 @@ enum Carve {
 /// Carved cells at or below this y flood with lava (deep lava lakes near bedrock).
 const LAVA_LEVEL: i32 = 8;
 
+/// U8 cave biome: drives underground decoration (dripstone clusters, lush moss/vines, deep-dark sculk).
+/// A pure function of (seed-independent) world position noise, so it's deterministic and chunk-local.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum CaveBiome {
+    Normal,
+    Dripstone,
+    Lush,
+    DeepDark,
+}
+
 pub struct Worldgen {
     seed: u64,
     continent: FastNoiseLite,
@@ -100,6 +110,10 @@ pub struct Worldgen {
     noodle_b: FastNoiseLite,
     spaghetti_radius: FastNoiseLite,
     water_table: FastNoiseLite,
+    // U8 cave biomes: low-frequency temperature/humidity climate for caves, + a 3D deep-dark blotch.
+    cave_temp: FastNoiseLite,
+    cave_humid: FastNoiseLite,
+    deep_dark: FastNoiseLite,
 }
 
 impl Worldgen {
@@ -133,6 +147,9 @@ impl Worldgen {
             noodle_b: mk(11, NoiseType::OpenSimplex2S, 0.050, 2),
             spaghetti_radius: mk(12, NoiseType::OpenSimplex2, 0.006, 2),
             water_table: mk(13, NoiseType::OpenSimplex2, 0.004, 2),
+            cave_temp: mk(14, NoiseType::OpenSimplex2, 0.0015, 2),
+            cave_humid: mk(15, NoiseType::OpenSimplex2, 0.0015, 2),
+            deep_dark: mk(16, NoiseType::OpenSimplex2S, 0.012, 2),
         }
     }
 
@@ -263,6 +280,40 @@ impl Worldgen {
         }
     }
 
+    /// The block a carved cell fills with (U7/U8): lava near bedrock, aquifer water below the local
+    /// water table, else air. Shared by the cave post-pass AND ravines so both flood identically.
+    fn carve_fill(&self, wx: i32, wy: i32, wz: i32) -> BlockId {
+        if wy <= LAVA_LEVEL {
+            block::LAVA
+        } else if wy < self.local_water_table(wx, wz) {
+            block::WATER
+        } else {
+            block::AIR
+        }
+    }
+
+    /// U8 cave biome at a world cell. Deep Dark is the deepest + rarest (a 3D blotch gate below the
+    /// y22 band); otherwise a low-frequency cave climate splits humid→Lush, hot→Dripstone, else Normal.
+    fn cave_biome(&self, wx: i32, wy: i32, wz: i32) -> CaveBiome {
+        if wy < 22
+            && self
+                .deep_dark
+                .get_noise_3d(wx as f32 * 0.6, wy as f32, wz as f32 * 0.6)
+                > 0.55
+        {
+            return CaveBiome::DeepDark;
+        }
+        let t = self.cave_temp.get_noise_2d(wx as f32, wz as f32);
+        let h = self.cave_humid.get_noise_2d(wx as f32, wz as f32);
+        if h > 0.4 {
+            CaveBiome::Lush
+        } else if t > 0.4 {
+            CaveBiome::Dripstone
+        } else {
+            CaveBiome::Normal
+        }
+    }
+
     /// U7 cave post-pass: carve caves AFTER the ore/blob passes so the walls expose ore. Never touches
     /// the bedrock band or the top surface skin; fills carved space with air/water/lava per `carve`.
     fn carve_caves(
@@ -285,13 +336,10 @@ impl Worldgen {
                     if cur == block::AIR || cur == block::BEDROCK {
                         continue;
                     }
-                    let fill = match self.carve(wx, wy, wz) {
-                        Carve::None => continue,
-                        Carve::Air => block::AIR,
-                        Carve::Aquifer => block::WATER,
-                        Carve::Lava => block::LAVA,
-                    };
-                    chunk.set(lx, ly, lz, fill);
+                    if let Carve::None = self.carve(wx, wy, wz) {
+                        continue;
+                    }
+                    chunk.set(lx, ly, lz, self.carve_fill(wx, wy, wz));
                 }
             }
         }
@@ -669,6 +717,330 @@ impl Worldgen {
         });
     }
 
+    // ── U8: amethyst geodes ──────────────────────────────────────────────────────────────────────
+    // Rare deep region-cell features: a hollow sphere of smooth-basalt / calcite / budding-amethyst
+    // shells around an air pocket, with amethyst clusters glinting on the inner lining. Like the ore
+    // blobs, every chunk within `reach` re-derives the identical origin and clips its writes.
+
+    /// Blocks a geode shell may replace (solid rock only — never carved space, ore, or other features).
+    #[inline]
+    fn is_geode_host(b: BlockId) -> bool {
+        matches!(
+            b,
+            block::STONE
+                | block::DEEPSLATE
+                | block::GRANITE
+                | block::DIORITE
+                | block::ANDESITE
+                | block::TUFF
+        )
+    }
+
+    /// Place amethyst geodes (rare, deep) via the region-cell engine.
+    fn place_geodes(&self, chunk: &mut Chunk, origin: IVec3) {
+        self.for_cells(origin, 0xA3E0_DE5, 48, 12, |ex, ey, ez, h| {
+            if h % 100 < 12 && (8..44).contains(&ey) {
+                self.stamp_geode(chunk, origin, ex, ey, ez, h);
+            }
+        });
+    }
+
+    /// Stamp one hollow amethyst geode centered at (ex,ey,ez): concentric smooth-basalt → calcite →
+    /// budding-amethyst shells around a hollow air center, with clusters on the inner lining. Shells
+    /// replace only solid rock; the hollow is carved regardless. Clipped to this chunk's bounds.
+    fn stamp_geode(&self, chunk: &mut Chunk, origin: IVec3, ex: i32, ey: i32, ez: i32, h: u32) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        let r_outer = 5 + (h % 3) as i32; // 5..=7
+        let rr = r_outer + 1;
+        for dz in -rr..=rr {
+            for dy in -rr..=rr {
+                for dx in -rr..=rr {
+                    let lx = ex + dx - ox;
+                    let ly = ey + dy - oy;
+                    let lz = ez + dz - oz;
+                    if lx < 0
+                        || lx >= CHUNK_SIZE_I
+                        || ly < 0
+                        || ly >= CHUNK_SIZE_I
+                        || lz < 0
+                        || lz >= CHUNK_SIZE_I
+                    {
+                        continue;
+                    }
+                    let jitter =
+                        (hash3(h as u64 ^ 0x6E0DE, ex + dx, ey + dy, ez + dz) & 0xff) as f32 / 255.0;
+                    let d = ((dx * dx + dy * dy + dz * dz) as f32).sqrt() + (jitter - 0.5) * 0.6;
+                    let r = r_outer as f32;
+                    if d > r + 0.5 {
+                        continue;
+                    }
+                    let (lxu, lyu, lzu) = (lx as usize, ly as usize, lz as usize);
+                    let cur = chunk.get(lxu, lyu, lzu);
+                    if d > r - 1.0 {
+                        if Self::is_geode_host(cur) {
+                            chunk.set(lxu, lyu, lzu, block::SMOOTH_BASALT); // outer shell
+                        }
+                    } else if d > r - 2.0 {
+                        if Self::is_geode_host(cur) {
+                            chunk.set(lxu, lyu, lzu, block::CALCITE); // middle shell
+                        }
+                    } else if d > r - 2.7 {
+                        if Self::is_geode_host(cur) {
+                            chunk.set(lxu, lyu, lzu, block::BUDDING_AMETHYST); // inner lining
+                        }
+                    } else {
+                        chunk.set(lxu, lyu, lzu, block::AIR); // hollow center (carved regardless)
+                    }
+                }
+            }
+        }
+        // Scatter amethyst clusters: a budding-amethyst lining cell whose neighbor toward the center is
+        // air sprouts a cluster into that air cell (~30% gate). Same-chunk reads/writes only.
+        for dz in -rr..=rr {
+            for dy in -rr..=rr {
+                for dx in -rr..=rr {
+                    let lx = ex + dx - ox;
+                    let ly = ey + dy - oy;
+                    let lz = ez + dz - oz;
+                    if lx < 0
+                        || lx >= CHUNK_SIZE_I
+                        || ly < 0
+                        || ly >= CHUNK_SIZE_I
+                        || lz < 0
+                        || lz >= CHUNK_SIZE_I
+                    {
+                        continue;
+                    }
+                    if chunk.get(lx as usize, ly as usize, lz as usize) != block::BUDDING_AMETHYST {
+                        continue;
+                    }
+                    // Step toward the geode center and, if that cell is air + inside the chunk, sprout.
+                    let nx = lx - dx.signum();
+                    let ny = ly - dy.signum();
+                    let nz = lz - dz.signum();
+                    if nx < 0
+                        || nx >= CHUNK_SIZE_I
+                        || ny < 0
+                        || ny >= CHUNK_SIZE_I
+                        || nz < 0
+                        || nz >= CHUNK_SIZE_I
+                    {
+                        continue;
+                    }
+                    let (nxu, nyu, nzu) = (nx as usize, ny as usize, nz as usize);
+                    if chunk.get(nxu, nyu, nzu) != block::AIR {
+                        continue;
+                    }
+                    if hash3(h as u64 ^ 0xC1057E, ex + dx, ey + dy, ez + dz) % 100 < 30 {
+                        chunk.set(nxu, nyu, nzu, block::AMETHYST_CLUSTER);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── U8: ravines ──────────────────────────────────────────────────────────────────────────────
+    // Rare long vertical chasms along a hash-derived heading, pinching toward their ends, that can
+    // breach the surface for drama. Region-cell sourced (cross-chunk-safe), clipped to this chunk.
+
+    /// Place ravines (rare, long) via the region-cell engine.
+    fn place_ravines(&self, chunk: &mut Chunk, origin: IVec3) {
+        self.for_cells(origin, 0x2A1_DE5, 128, 64, |ex, ey, ez, h| {
+            if h % 100 < 22 {
+                self.carve_ravine(chunk, origin, ex, ey, ez, h);
+            }
+        });
+    }
+
+    /// Carve one ravine: a thin chasm walked along a hash heading from (ex,ez). At each step it cuts a
+    /// narrow cross-section (half-width pinching toward the ends) from a deep bottom up toward the
+    /// surface. Only solid rock is carved; fills follow `carve_fill` (lava/water/air). Clipped.
+    fn carve_ravine(&self, chunk: &mut Chunk, origin: IVec3, ex: i32, ey: i32, ez: i32, h: u32) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        let len = 50 + (h % 60) as i32;
+        let ang = (h >> 4) as f32 / (1u32 << 28) as f32 * std::f32::consts::TAU;
+        let (sx, sz) = (ang.cos(), ang.sin());
+        let bottom = (ey - (20 + (h % 16) as i32)).max(3); // chasm floor, never into bedrock
+        let (mut fx, mut fz) = (ex as f32, ez as f32);
+        for i in 0..len {
+            let (px, pz) = (fx.round() as i32, fz.round() as i32);
+            // Half-width pinches toward both ends via a sine envelope (1.5..3.0).
+            let frac = i as f32 / len as f32;
+            let env = (frac * std::f32::consts::PI).sin(); // 0 at the ends, 1 in the middle
+            let hw = (1.5 + 1.5 * env) as i32; // 1..3 cells of horizontal half-width
+            // Top: allow it to open at the surface (but the column's top skin stays; carve_caves-style
+            // bound is height-1 elsewhere — here we deliberately breach to `surface-1` for drama).
+            let surf = self.height(px, pz);
+            let top = (surf - 1).min(ey + 4);
+            if top < bottom {
+                fx += sx + ((hash3(h as u64 ^ 0x5A1, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
+                fz += sz + ((hash3(h as u64 ^ 0x5A2, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
+                continue;
+            }
+            for ddz in -hw..=hw {
+                for ddx in -hw..=hw {
+                    // Round the cross-section + jitter the rim so walls read ragged.
+                    let rim = (hash3(h as u64 ^ 0x21B, px + ddx, 0, pz + ddz) & 0x7) as i32;
+                    if ddx * ddx + ddz * ddz > hw * hw + rim {
+                        continue;
+                    }
+                    let (wx, wz) = (px + ddx, pz + ddz);
+                    for wy in bottom..=top {
+                        let lx = wx - ox;
+                        let ly = wy - oy;
+                        let lz = wz - oz;
+                        if lx < 0
+                            || lx >= CHUNK_SIZE_I
+                            || ly < 0
+                            || ly >= CHUNK_SIZE_I
+                            || lz < 0
+                            || lz >= CHUNK_SIZE_I
+                        {
+                            continue;
+                        }
+                        let (lxu, lyu, lzu) = (lx as usize, ly as usize, lz as usize);
+                        let cur = chunk.get(lxu, lyu, lzu);
+                        // Only carve solid rock; skip already-carved/bedrock/fluid cells.
+                        if cur == block::AIR
+                            || cur == block::BEDROCK
+                            || cur == block::WATER
+                            || cur == block::LAVA
+                        {
+                            continue;
+                        }
+                        chunk.set(lxu, lyu, lzu, self.carve_fill(wx, wy, wz));
+                    }
+                }
+            }
+            fx += sx + ((hash3(h as u64 ^ 0x5A1, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
+            fz += sz + ((hash3(h as u64 ^ 0x5A2, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
+        }
+    }
+
+    // ── U8: cave-biome decoration ────────────────────────────────────────────────────────────────
+    // Runs LAST, on the final carved state. For each AIR cell with a solid floor/ceiling inside this
+    // chunk, the cell's `cave_biome` picks a decoration. All reads/writes are same-chunk + the floor/
+    // ceiling tests require ly>0 / ly<31, so chunk Y-seams are simply skipped (like surface deco) and
+    // the result is a pure function of world position — identical regardless of which chunk gen'd it.
+
+    fn decorate_caves(
+        &self,
+        chunk: &mut Chunk,
+        origin: IVec3,
+        heights: &[i32; CHUNK_SIZE * CHUNK_SIZE],
+    ) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let height = heights[lz * CHUNK_SIZE + lx];
+                let (wx, wz) = (ox + lx as i32, oz + lz as i32);
+                for ly in 0..CHUNK_SIZE {
+                    let wy = oy + ly as i32;
+                    if wy < 3 || wy >= height - 1 {
+                        continue;
+                    }
+                    if chunk.get(lx, ly, lz) != block::AIR {
+                        continue;
+                    }
+                    let biome = self.cave_biome(wx, wy, wz);
+                    let g = hash3(self.seed ^ 0xDEC0_8A7E, wx, wy, wz);
+
+                    // FLOOR: only when the cell below is in-chunk and an opaque solid cube.
+                    if ly > 0 {
+                        let below = chunk.get(lx, ly - 1, lz);
+                        if block::is_opaque(below) && block::is_cube(below) {
+                            match biome {
+                                CaveBiome::Lush if g % 1000 < 120 => {
+                                    chunk.set(lx, ly - 1, lz, block::MOSS_BLOCK);
+                                    let sub = g >> 10;
+                                    if sub % 100 < 14 {
+                                        chunk.set(lx, ly, lz, block::AZALEA);
+                                    } else if sub % 100 < 20 {
+                                        chunk.set(lx, ly, lz, block::SPORE_BLOSSOM);
+                                    } else if sub % 100 < 26 {
+                                        chunk.set(lx, ly - 1, lz, block::CLAY);
+                                    }
+                                }
+                                CaveBiome::Dripstone if g % 1000 < 100 => {
+                                    chunk.set(lx, ly, lz, block::POINTED_DRIPSTONE);
+                                    if (g >> 10) % 100 < 25 {
+                                        chunk.set(lx, ly - 1, lz, block::DRIPSTONE_BLOCK);
+                                    }
+                                }
+                                CaveBiome::DeepDark if g % 1000 < 220 => {
+                                    chunk.set(lx, ly - 1, lz, block::SCULK);
+                                    let sub = g >> 10;
+                                    if sub % 1000 < 20 {
+                                        let pick = (sub >> 10) % 3;
+                                        let f = match pick {
+                                            0 => block::SCULK_SENSOR,
+                                            1 => block::SCULK_SHRIEKER,
+                                            _ => block::SCULK_CATALYST,
+                                        };
+                                        chunk.set(lx, ly, lz, f);
+                                    }
+                                }
+                                CaveBiome::Normal if g % 1000 < 12 => {
+                                    chunk.set(lx, ly, lz, block::GLOW_LICHEN);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Re-read: a floor pass may have filled this air cell already.
+                    if chunk.get(lx, ly, lz) != block::AIR {
+                        continue;
+                    }
+
+                    // WALLS (deep dark): sculk vein onto an adjacent in-chunk solid wall.
+                    if biome == CaveBiome::DeepDark && (g >> 20) % 100 < 30 {
+                        for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                            let (nx, nz) = (lx as i32 + dx, lz as i32 + dz);
+                            if !(0..CHUNK_SIZE_I).contains(&nx) || !(0..CHUNK_SIZE_I).contains(&nz) {
+                                continue;
+                            }
+                            if block::is_opaque(chunk.get(nx as usize, ly, nz as usize)) {
+                                chunk.set(lx, ly, lz, block::SCULK_VEIN);
+                                break;
+                            }
+                        }
+                    }
+
+                    if chunk.get(lx, ly, lz) != block::AIR {
+                        continue;
+                    }
+
+                    // CEILING: only when the cell above is in-chunk and an opaque solid cube.
+                    if ly < CHUNK_SIZE - 1 {
+                        let above = chunk.get(lx, ly + 1, lz);
+                        if block::is_opaque(above) && block::is_cube(above) {
+                            let c = g >> 5;
+                            match biome {
+                                CaveBiome::Dripstone if c % 1000 < 80 => {
+                                    chunk.set(lx, ly, lz, block::POINTED_DRIPSTONE);
+                                }
+                                CaveBiome::Lush if c % 1000 < 100 => {
+                                    let pick = (c >> 10) % 3;
+                                    let v = match pick {
+                                        0 => block::CAVE_VINE_BERRIES,
+                                        1 => block::CAVE_VINE,
+                                        _ => block::GLOW_LICHEN,
+                                    };
+                                    chunk.set(lx, ly, lz, v);
+                                }
+                                CaveBiome::DeepDark if c % 1000 < 120 => {
+                                    chunk.set(lx, ly, lz, block::SCULK_VEIN);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn generate_chunk(&self, pos: IVec3) -> Chunk {
         let origin = chunk_origin(pos);
         let (ox, oy, oz) = (origin.x, origin.y, origin.z);
@@ -735,11 +1107,15 @@ impl Worldgen {
             }
         }
 
-        // U5/U6/U7: material blobs -> ore blobs/veins -> carve caves (after ores, so walls expose ore).
+        // U5/U6/U7/U8: material blobs -> ore blobs/veins -> carve caves (after ores, so walls expose
+        // ore) -> geodes + ravines (carve more) -> cave-biome decoration (on the final carved state).
         if oy <= hmax {
             self.place_blobs(&mut chunk, origin);
             self.place_ores(&mut chunk, origin);
             self.carve_caves(&mut chunk, origin, &heights);
+            self.place_geodes(&mut chunk, origin);
+            self.place_ravines(&mut chunk, origin);
+            self.decorate_caves(&mut chunk, origin, &heights);
         }
 
         // Trees + surface decoration only for chunks overlapping the surface band.
@@ -1352,6 +1728,59 @@ mod tests {
         assert!(saw_aquifer, "no underground aquifer water generated");
         assert!(floor_intact, "bedrock floor at y0 was carved away");
         // Determinism with caves + fluids.
+        let a = wg.generate_chunk(IVec3::new(0, 0, 0));
+        let b = wg.generate_chunk(IVec3::new(0, 0, 0));
+        assert_eq!(a.blocks, b.blocks);
+        assert_eq!(a.solid_count, b.solid_count);
+    }
+
+    /// U8 (geodes + ravines + cave biomes): over a deep multi-chunk region the marquee features all
+    /// appear — geode shells (smooth basalt / calcite / budding amethyst) + amethyst clusters, plus
+    /// the three flavored cave biomes' signature deco (sculk / moss / dripstone). Also: `cave_biome`
+    /// returns all four variants over a world-position grid, and a deep chunk regenerates identically.
+    #[test]
+    fn u8_geodes_ravines_and_cave_biomes() {
+        let wg = Worldgen::new(0x0DE_5EED);
+        let mut seen = HashSet::new();
+        for cy in 0..3 {
+            for cx in -2..=2 {
+                for cz in -2..=2 {
+                    let c = wg.generate_chunk(IVec3::new(cx, cy, cz));
+                    for &blk in &c.blocks {
+                        seen.insert(blk);
+                    }
+                }
+            }
+        }
+        // A geode generated somewhere in the sample (all three shells present).
+        assert!(seen.contains(&block::SMOOTH_BASALT), "no geode smooth-basalt shell");
+        assert!(seen.contains(&block::CALCITE), "no geode calcite shell");
+        assert!(seen.contains(&block::BUDDING_AMETHYST), "no geode budding-amethyst lining");
+        assert!(seen.contains(&block::AMETHYST_CLUSTER), "no amethyst clusters in geodes");
+        // Cave-biome decoration: deep-dark sculk, lush moss, dripstone spikes.
+        assert!(seen.contains(&block::SCULK), "no deep-dark sculk floor");
+        assert!(seen.contains(&block::MOSS_BLOCK), "no lush moss floor");
+        assert!(seen.contains(&block::POINTED_DRIPSTONE), "no dripstone spikes");
+
+        // `cave_biome` surfaces all four variants over a grid of world positions.
+        let mut biomes = HashSet::new();
+        let mut wx = -512;
+        while wx <= 512 {
+            let mut wz = -512;
+            while wz <= 512 {
+                for wy in [6, 12, 18, 30, 50] {
+                    biomes.insert(wg.cave_biome(wx, wy, wz));
+                }
+                wz += 24;
+            }
+            wx += 24;
+        }
+        assert!(biomes.contains(&CaveBiome::Normal), "cave_biome never Normal");
+        assert!(biomes.contains(&CaveBiome::Dripstone), "cave_biome never Dripstone");
+        assert!(biomes.contains(&CaveBiome::Lush), "cave_biome never Lush");
+        assert!(biomes.contains(&CaveBiome::DeepDark), "cave_biome never DeepDark");
+
+        // Determinism with geodes + ravines + decoration in the mix.
         let a = wg.generate_chunk(IVec3::new(0, 0, 0));
         let b = wg.generate_chunk(IVec3::new(0, 0, 0));
         assert_eq!(a.blocks, b.blocks);
