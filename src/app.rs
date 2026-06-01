@@ -32,6 +32,7 @@ const SEED: u64 = 0x5EED_C0FFEE;
 const RENDER_DISTANCE: i32 = 12;
 const REACH: f32 = 6.0;
 const EAT_TIME: f32 = 1.6; // seconds to eat a food (hold right-click)
+const SHIELD_RAISE_DELAY: f32 = 0.25; // seconds a shield must be up before it blocks (MC ~5 ticks)
 const SENSITIVITY: f32 = 0.0022;
 const FOG_END: f32 = (RENDER_DISTANCE as f32 - 1.0) * 32.0;
 const FOG_START: f32 = FOG_END * 0.68;
@@ -104,6 +105,10 @@ struct State {
     /// Bow-draw progress (seconds) and the bow id being drawn (right-click-hold with a bow, P13).
     draw_progress: f32,
     draw_item: Option<item::ItemId>,
+    /// Shield-raise progress (seconds) and the shield id being raised; blocks once past
+    /// SHIELD_RAISE_DELAY (right-click-hold with a shield, P14).
+    shield_progress: f32,
+    shield_item: Option<item::ItemId>,
     /// World difficulty (P6); mirrored to player + game, persisted in level.bin, cycled with G.
     difficulty: crate::rules::Difficulty,
 }
@@ -457,7 +462,7 @@ impl App {
         }
 
         // Stream chunks, advance fluids/entities; collect any picked-up item drops into inventory.
-        let collected = state.game.update(
+        let mut collected = state.game.update(
             &state.gpu,
             &state.renderer,
             state.player.position,
@@ -476,9 +481,38 @@ impl App {
             state.player.add_xp(collected.xp);
         }
 
-        // Mob contact damage accumulated by the entity tick this frame (reduced by armor).
-        if collected.player_damage > 0.0 {
-            state.player.take_hit(collected.player_damage);
+        // P14 shield raise-timer: hold right-click with a SHIELD (no screen open) to raise it. Updated
+        // HERE (above the damage loop) so shield_ready reflects this frame. Pre-empts eat/place below.
+        // `sel_item` is computed once and reused by the bow/eat blocks (selection can't change mid-tick).
+        let sel_item = state.inventory.selected_item();
+        if state.screen == Screen::None && state.input.place_held && item::is_shield(sel_item) {
+            if state.shield_item != Some(sel_item) {
+                state.shield_item = Some(sel_item);
+                state.shield_progress = 0.0;
+            }
+            state.shield_progress += dt;
+        } else {
+            // Released, swapped off the shield, or a screen opened → lower instantly.
+            state.shield_progress = 0.0;
+            state.shield_item = None;
+        }
+
+        // Combat damage from the entity tick. Each hit carries its source position; a RAISED, ready
+        // shield fully blocks hits whose source is in the front arc (melee, arrows, blasts alike — MC
+        // blocks the frontal source). Summed into ONE take_hit so the 0.5s i-frame applies as before
+        // (a per-hit call would drop all but the first simultaneous source). Environmental damage
+        // (fall/lava/drown/starve) bypasses Collected entirely, so a shield never blocks it.
+        let shield_up = state.shield_item.is_some() && state.shield_progress >= SHIELD_RAISE_DELAY;
+        let fwd = state.camera.forward();
+        let mut incoming = 0.0;
+        for (amount, src) in std::mem::take(&mut collected.player_damage) {
+            if shield_up && crate::player::shield_blocks(fwd, state.player.position, src) {
+                continue; // fully blocked
+            }
+            incoming += amount;
+        }
+        if incoming > 0.0 {
+            state.player.take_hit(incoming);
         }
 
         // Block targeting.
@@ -615,8 +649,6 @@ impl App {
             state.mine_progress = 0.0;
         }
 
-        let sel_item = state.inventory.selected_item();
-
         // Bow (P13): hold right-click with a bow + ammo to DRAW (charge over BOW_DRAW_TIME); release
         // looses a gravity-arced arrow whose speed/damage scale with the draw. This pre-empts eating
         // and block placement. Combined into one block so the RELEASE (place_held just went false) is
@@ -657,6 +689,7 @@ impl App {
         let edible = state.screen == Screen::None
             && state.input.place_held
             && !item::is_bow(sel_item)
+            && !item::is_shield(sel_item)
             && crate::food::food(sel_item).is_some_and(|f| state.player.can_eat(f.always_edible));
         if edible {
             if state.eat_item != Some(sel_item) {
@@ -681,6 +714,8 @@ impl App {
             state.input.place_pressed = false;
             if item::is_bow(state.inventory.selected_item()) {
                 // A bow press only starts the draw (handled above) — never place/interact.
+            } else if item::is_shield(state.inventory.selected_item()) {
+                // A shield press only starts the raise (handled above) — never place/interact.
             } else if let Some(hit) = &target {
                 let targeted = state.game.block_at(hit.block);
                 if targeted == block::WOODEN_DOOR {
@@ -961,6 +996,11 @@ impl App {
         } else {
             0.0
         };
+        let shield_charge = if state.shield_item.is_some() {
+            (state.shield_progress / SHIELD_RAISE_DELAY).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let mut ui = overlay::build_ui(
             state.gpu.config.width,
             state.gpu.config.height,
@@ -975,6 +1015,7 @@ impl App {
             state.player.xp_fraction(),
             attack_charge,
             draw_charge,
+            shield_charge,
             debug_lines.as_deref(),
         );
         if let Screen::Chest(pos) = state.screen {
@@ -1550,6 +1591,7 @@ impl ApplicationHandler for App {
                 if survival_demo { 0.6 } else { 0.0 },
                 if survival_demo { 0.5 } else { 1.0 }, // attack_charge: show the cooldown bar in the demo
                 if survival_demo { 0.7 } else { 0.0 }, // draw_charge: show the bow-draw bar in the demo
+                if survival_demo { 1.0 } else { 0.0 }, // shield_charge: show the READY shield cue in the demo
                 Some(&dbg),
             );
             let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();
@@ -1742,6 +1784,8 @@ impl ApplicationHandler for App {
             eat_item: None,
             draw_progress: 0.0,
             draw_item: None,
+            shield_progress: 0.0,
+            shield_item: None,
             difficulty,
         });
         self.set_grab(true);

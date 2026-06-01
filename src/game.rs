@@ -470,7 +470,10 @@ impl Game {
         // Apply any creeper explosions: carve the crater, then add radial blast damage to the player.
         let mut collected = collected;
         for (center, radius) in std::mem::take(&mut collected.explosions) {
-            collected.player_damage += self.apply_explosion(gpu, renderer, center, radius, camera_pos);
+            let dmg = self.apply_explosion(gpu, renderer, center, radius, camera_pos);
+            if dmg > 0.0 {
+                collected.player_damage.push((dmg, center)); // source = blast center
+            }
         }
 
         // Feed the GPU voxel volume (ray-traced lighting) around the player.

@@ -126,6 +126,23 @@ pub fn is_critical_hit(on_ground: bool, vel_y: f32, sprint: bool, submerged: boo
     !on_ground && vel_y < 0.0 && !sprint && !submerged && !flying
 }
 
+/// Cosine of the half-angle of a raised shield's frontal block arc. `0.0` = the full front hemisphere
+/// (±90°), matching Minecraft's "are you facing the source" half-plane test.
+pub const SHIELD_BLOCK_COS: f32 = 0.0;
+
+/// Does a RAISED shield (player at `player_pos`, looking along `forward`) intercept a hit from
+/// `source`? Horizontal-only — vertical attack angle is ignored (a creeper at your feet still hits the
+/// front). Degenerate cases (source directly above/below, or looking straight up/down) don't block.
+pub fn shield_blocks(forward: Vec3, player_pos: Vec3, source: Vec3) -> bool {
+    let to_src = source - player_pos;
+    let to_src_h = Vec3::new(to_src.x, 0.0, to_src.z);
+    let fwd_h = Vec3::new(forward.x, 0.0, forward.z);
+    if to_src_h.length_squared() < 1e-6 || fwd_h.length_squared() < 1e-6 {
+        return false;
+    }
+    fwd_h.normalize().dot(to_src_h.normalize()) >= SHIELD_BLOCK_COS
+}
+
 #[inline]
 fn set_comp(v: &mut Vec3, axis: usize, value: f32) {
     match axis {
@@ -763,5 +780,18 @@ mod tests {
         assert!(!is_critical_hit(false, -2.0, true, false, false), "sprint-attacks can't crit");
         assert!(!is_critical_hit(false, -2.0, false, true, false), "no crit underwater");
         assert!(!is_critical_hit(false, -2.0, false, false, true), "no crit while creative-flying");
+    }
+
+    #[test]
+    fn shield_blocks_frontal_only() {
+        let fwd = Vec3::new(1.0, 0.0, 0.0); // looking +X
+        let me = Vec3::ZERO;
+        assert!(shield_blocks(fwd, me, Vec3::new(5.0, 0.0, 0.0)), "dead ahead is blocked");
+        assert!(shield_blocks(fwd, me, Vec3::new(1.0, 0.0, 5.0)), "front-side (in the hemisphere) blocks");
+        assert!(shield_blocks(fwd, me, Vec3::new(2.0, 3.0, 0.0)), "vertical offset is ignored (still front)");
+        assert!(!shield_blocks(fwd, me, Vec3::new(-5.0, 0.0, 0.0)), "from behind is not blocked");
+        assert!(!shield_blocks(fwd, me, Vec3::new(0.0, 5.0, 0.0)), "straight overhead is degenerate");
+        // Looking straight up: no horizontal facing -> nothing blocks (known limitation).
+        assert!(!shield_blocks(Vec3::new(0.0, 1.0, 0.0), me, Vec3::new(5.0, 0.0, 0.0)));
     }
 }

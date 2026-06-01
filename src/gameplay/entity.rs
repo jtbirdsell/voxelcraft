@@ -304,7 +304,10 @@ enum Kind {
 pub struct Collected {
     pub items: Vec<ItemStack>,
     pub xp: u32,
-    pub player_damage: f32,
+    /// Per-source combat damage to the player this frame: `(amount, source_pos)`. The source position
+    /// lets the consumer test directional shield blocking (P14); each is pre-armor/pre-difficulty.
+    /// Environmental damage (fall/lava/drown/starve) is applied directly in player.rs, never here.
+    pub player_damage: Vec<(f32, Vec3)>,
     pub explosions: Vec<(Vec3, f32)>,
 }
 
@@ -755,7 +758,7 @@ impl Entities {
                             if m.ai == Ai::Attack && m.atk_cd <= 0.0 && touching {
                                 let dmg = m.species.contact_damage();
                                 if dmg > 0.0 {
-                                    collected.player_damage += dmg;
+                                    collected.player_damage.push((dmg, e.pos)); // source = mob feet
                                     m.atk_cd = MOB_ATTACK_COOLDOWN;
                                 }
                             }
@@ -838,7 +841,10 @@ impl Entities {
                         match owner {
                             ArrowOwner::Mob => {
                                 if (chest - e.pos).length() < 0.7 {
-                                    collected.player_damage += dmg;
+                                    // Source = a point back along the flight path (the impact point sits
+                                    // on the player's chest, too degenerate for a direction test).
+                                    let from = e.pos - e.vel.normalize_or_zero();
+                                    collected.player_damage.push((dmg, from));
                                     e.dead = true;
                                     break;
                                 }
@@ -1289,7 +1295,7 @@ mod tests {
         let player = Vec3::new(0.0, 0.0, 3.0); // feet; chest (+1) sits at z=3
         let mut dmg = 0.0;
         for _ in 0..120 {
-            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage;
+            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }
@@ -1308,7 +1314,7 @@ mod tests {
         let player = Vec3::ZERO; // the shooter
         let mut dmg = 0.0;
         for _ in 0..240 {
-            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage;
+            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.mob_count() == 0 {
                 break;
             }
@@ -1325,7 +1331,7 @@ mod tests {
         let player = Vec3::ZERO;
         let mut dmg = 0.0;
         for _ in 0..300 {
-            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage;
+            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }

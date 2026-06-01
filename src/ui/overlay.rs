@@ -669,6 +669,7 @@ pub fn build_ui(
     xp_frac: f32,
     attack_charge: f32,
     draw_charge: f32,
+    shield_charge: f32,
     debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
@@ -707,6 +708,21 @@ pub fn build_ui(
             let c = [0.35 + 0.6 * full, 0.75, 0.95, 0.95];
             push_px_rect(&mut v, sw, sh, bx, by, fw, bar_h, c);
         }
+    }
+
+    // Shield indicator (P14): a small square LEFT of the crosshair — dim grey while raising, bright
+    // purple-grey once READY (blocking active). Mode-0 rects only (no texture / RTX path).
+    if shield_charge > 0.01 {
+        let ready = shield_charge >= 1.0;
+        let s = 8.0;
+        let (sx, sy) = (cx - 34.0, cy - s * 0.5);
+        push_px_rect(&mut v, sw, sh, sx - 1.0, sy - 1.0, s + 2.0, s + 2.0, [0.05, 0.05, 0.06, 0.6]);
+        let c = if ready {
+            [0.55, 0.42, 0.78, 0.95]
+        } else {
+            [0.30, 0.30, 0.34, 0.7]
+        };
+        push_px_rect(&mut v, sw, sh, sx, sy, s, s, c);
     }
 
     // Hotbar (9 slots backed by the inventory; shows block swatch + stack count).

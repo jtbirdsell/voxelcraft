@@ -193,6 +193,10 @@ position, albedo + skylight) and an ACES tonemap.
   (a charge bar fills above the crosshair) and release to loose a **gravity-arced arrow** whose speed and
   damage scale with the draw — a full draw fires a faster, harder **critical** arrow. Arrows are owner-
   tagged, so yours strike mobs (never yourself); drawing spends one arrow (free in creative).
+- **Shield**: craft a shield (planks + iron); **hold right-click to raise** it (a cue lights up beside the
+  crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
+  explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
+  Environmental damage (falling, lava, drowning, starvation) is never blocked.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
 
 Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;

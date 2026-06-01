@@ -109,6 +109,13 @@ fn build_recipes() -> Vec<Recipe> {
         item::ARROW,
         4,
     ));
+    // P14: shield (6 planks + 1 iron ingot, MC shape).
+    r.push(shaped(
+        &["PIP", "PPP", " P "],
+        &[('P', P), ('I', item::IRON_INGOT)],
+        item::SHIELD,
+        1,
+    ));
     r
 }
 

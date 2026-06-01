@@ -79,6 +79,8 @@ pub const FLINT: ItemId = MATERIAL_BASE + 27;
 // Bow + ammo (P13).
 pub const ARROW: ItemId = MATERIAL_BASE + 28;
 pub const BOW: ItemId = MATERIAL_BASE + 29;
+// Shield (P14): raised with right-click-hold to block frontal damage.
+pub const SHIELD: ItemId = MATERIAL_BASE + 30;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -115,6 +117,7 @@ fn material_name(item: ItemId) -> &'static str {
         FLINT => "Flint",
         ARROW => "Arrow",
         BOW => "Bow",
+        SHIELD => "Shield",
         _ => "Material",
     }
 }
@@ -151,6 +154,7 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         FLINT => [0.30, 0.28, 0.28],
         ARROW => [0.62, 0.58, 0.52], // grey shaft + pale fletching
         BOW => [0.55, 0.40, 0.22],   // bow wood
+        SHIELD => [0.42, 0.30, 0.55], // iron-banded wood, distinct purple-grey
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -334,6 +338,12 @@ pub fn is_bow(item: ItemId) -> bool {
     item == BOW
 }
 
+/// Whether this item is a shield (raised with right-click-hold to block frontal damage, P14).
+#[inline]
+pub fn is_shield(item: ItemId) -> bool {
+    item == SHIELD
+}
+
 // Bow tuning (P13). Draw time to full; a release below the min draw is a dry-fire (no shot).
 pub const BOW_DRAW_TIME: f32 = 1.0;
 pub const BOW_MIN_DRAW: f32 = 0.15; // seconds of draw below which release fires nothing
@@ -374,7 +384,7 @@ pub fn item_of_block(b: BlockId) -> ItemId {
 /// Max stack size: tools, armor, and bows don't stack.
 #[inline]
 pub fn max_stack(item: ItemId) -> u8 {
-    if is_tool(item) || is_armor(item) || item == BOW {
+    if is_tool(item) || is_armor(item) || item == BOW || item == SHIELD {
         1
     } else {
         64
@@ -608,8 +618,9 @@ impl Inventory {
             for piece in 0..4u16 {
                 slots[HOTBAR + MAIN + piece as usize] = Some(ItemStack::new(armor_id(3, piece), 1));
             }
-            // P13: a bow + arrows in the last two free main-grid cells (34/35) for creative testing.
-            slots[HOTBAR + MAIN - 2] = Some(ItemStack::new(BOW, 1));
+            // P13/P14: a bow, shield, and arrows in the last free main-grid cells (33/34/35) for testing.
+            slots[HOTBAR + MAIN - 3] = Some(ItemStack::new(BOW, 1));
+            slots[HOTBAR + MAIN - 2] = Some(ItemStack::new(SHIELD, 1));
             slots[HOTBAR + MAIN - 1] = Some(ItemStack::new(ARROW, 64));
         }
         Self {
