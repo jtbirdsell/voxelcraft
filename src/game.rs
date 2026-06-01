@@ -37,6 +37,9 @@ const RANDOM_TICK_INTERVAL: f32 = 0.25;
 const RANDOM_TICKS_PER_CHUNK: u32 = 16;
 const RANDOM_TICK_RADIUS: i32 = 4;
 
+/// F2: seconds the player must stand on a big dripleaf before it tilts down one stage.
+const DRIPLEAF_TILT_DELAY: f32 = 0.6;
+
 /// Whether a block participates in U9 random-tick growth.
 fn random_tickable(id: BlockId) -> bool {
     matches!(
@@ -405,6 +408,11 @@ pub struct Game {
     /// U11 darkness the app drains into the Player after each update (a shrieker pulse). Read + cleared
     /// via `take_pending_darkness` (Game can't reach the Player directly).
     pending_darkness: f32,
+
+    /// F2 dripleaf platform tilt: the big-dripleaf cell the player stands on + how long (it tilts a
+    /// stage each DRIPLEAF_TILT_DELAY, drops them at full tilt, then springs back when they leave).
+    dripleaf_on: Option<IVec3>,
+    dripleaf_timer: f32,
 }
 
 impl Game {
@@ -478,6 +486,8 @@ impl Game {
             warden_warn_pos: None,
             shriek_cd: 0.0,
             pending_darkness: 0.0,
+            dripleaf_on: None,
+            dripleaf_timer: 0.0,
         }
     }
 
@@ -689,6 +699,9 @@ impl Game {
             self.tick_timer -= RANDOM_TICK_INTERVAL;
             self.step_random_ticks(gpu, renderer);
         }
+
+        // F2: tilt a big dripleaf the player is standing on (drops them at full tilt, springs back).
+        self.step_dripleaf(gpu, renderer, camera_pos, dt);
 
         // Natural spawning: one gated attempt per interval around the player (M31).
         self.spawn_timer += dt;
@@ -1506,6 +1519,45 @@ impl Game {
     /// update ticks spread sculk over the surrounding exposed rock. Used for U10 verification.
     pub fn debug_seed_sculk(&mut self, pos: IVec3, amount: u16) {
         self.sculk_charges.push_back(SculkCharge { pos, amount });
+    }
+
+    /// F2: tilt the big dripleaf the player stands on — a stage each DRIPLEAF_TILT_DELAY until it folds
+    /// flat (no collision → they fall through); spring it back upright the moment they step off.
+    fn step_dripleaf(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, camera_pos: Vec3, dt: f32) {
+        let feet_y = camera_pos.y - crate::player::EYE_HEIGHT;
+        let stand = IVec3::new(
+            camera_pos.x.floor() as i32,
+            (feet_y - 0.1).floor() as i32,
+            camera_pos.z.floor() as i32,
+        );
+        let on_leaf = self.block_at(stand) == block::BIG_DRIPLEAF;
+        // Left the leaf we were on → spring it back upright.
+        if let Some(prev) = self.dripleaf_on {
+            if !on_leaf || stand != prev {
+                if self.block_at(prev) == block::BIG_DRIPLEAF
+                    && block::dripleaf_tilt(self.block_state_at(prev).1) != block::DRIPLEAF_STABLE
+                {
+                    self.set_block_state(gpu, renderer, prev, block::BIG_DRIPLEAF, block::DRIPLEAF_STABLE);
+                }
+                self.dripleaf_on = None;
+                self.dripleaf_timer = 0.0;
+            }
+        }
+        // Standing on a leaf → advance its tilt toward full (then the player falls through).
+        if on_leaf {
+            if self.dripleaf_on != Some(stand) {
+                self.dripleaf_on = Some(stand);
+                self.dripleaf_timer = 0.0;
+            }
+            self.dripleaf_timer += dt;
+            if self.dripleaf_timer >= DRIPLEAF_TILT_DELAY {
+                self.dripleaf_timer = 0.0;
+                let stage = block::dripleaf_tilt(self.block_state_at(stand).1);
+                if stage < block::DRIPLEAF_FULL {
+                    self.set_block_state(gpu, renderer, stand, block::BIG_DRIPLEAF, stage + 1);
+                }
+            }
+        }
     }
 
     pub fn spawn_mob(&mut self, pos: Vec3, species: crate::entity::Species) {

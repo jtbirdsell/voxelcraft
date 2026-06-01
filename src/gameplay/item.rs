@@ -1063,6 +1063,22 @@ mod tests {
     }
 
     #[test]
+    fn f2_dripleaf_platform_tilt() {
+        // Big dripleaf is now a solid, standable, non-opaque platform (not a walk-through plant).
+        assert!(block::is_solid(block::BIG_DRIPLEAF) && !block::is_plant(block::BIG_DRIPLEAF));
+        assert!(!block::is_opaque(block::BIG_DRIPLEAF)); // thin leaf — light passes, doesn't occlude
+        assert!(matches!(block::render_kind(block::BIG_DRIPLEAF), block::RenderKind::Platform));
+        // Stable + tilting have a thin collision box near the top; fully tilted has none (you fall).
+        assert_eq!(block::solid_boxes(block::BIG_DRIPLEAF, block::DRIPLEAF_STABLE).len(), 1);
+        assert_eq!(block::solid_boxes(block::BIG_DRIPLEAF, block::DRIPLEAF_TILTING).len(), 1);
+        assert_eq!(block::solid_boxes(block::BIG_DRIPLEAF, block::DRIPLEAF_FULL).len(), 0);
+        let b = block::solid_boxes(block::BIG_DRIPLEAF, block::DRIPLEAF_STABLE)[0];
+        assert!(b[1] > 0.5 && b[4] <= 1.0, "the stable leaf sits near the cell top");
+        // The small dripleaf stays a decorative walk-through plant.
+        assert!(block::is_plant(block::SMALL_DRIPLEAF));
+    }
+
+    #[test]
     fn slab_collision_boxes_per_state() {
         // Aabb = [minx,miny,minz, maxx,maxy,maxz]. Bottom = y0..0.5, top = y0.5..1, double = full.
         let bottom = block::solid_boxes(block::STONE_SLAB, block::SLAB_BOTTOM)[0];

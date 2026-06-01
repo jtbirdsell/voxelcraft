@@ -324,6 +324,25 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     );
                 }
             }
+            // F2 big dripleaf: a thin standable leaf whose box droops with the tilt stage (render ==
+            // collision); fully tilted = no box (the leaf has folded down and you fall through).
+            block::RenderKind::Platform => {
+                let st = neigh.state_at(x, y, z);
+                for b in block::solid_boxes(id, st) {
+                    emit_box(
+                        &mut mesh.opaque,
+                        origin,
+                        x,
+                        y,
+                        z,
+                        [b[0], b[1], b[2]],
+                        [b[3], b[4], b[5]],
+                        id,
+                        l,
+                        0,
+                    );
+                }
+            }
             block::RenderKind::Cube => {}
         }
     }

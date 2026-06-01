@@ -311,6 +311,9 @@ pub enum RenderKind {
     /// Small attached fixture (torch/lever/button): a box (or two) on a floor/wall face. Walk-through,
     /// non-occluding, emitted per-cell; the attach face lives in the block-state byte (P11).
     Attach,
+    /// Big dripleaf (F2): a thin standable leaf platform whose collision/render box droops with the
+    /// tilt stage in the state byte (stand on it → it tilts down → you fall through → it resets).
+    Platform,
 }
 
 #[inline]
@@ -320,10 +323,11 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         // U4 cave-biome cross-billboard cutouts (crystals, vines, dripleaves, roots, sculk vein).
         | AMETHYST_CLUSTER | SMALL_AMETHYST_BUD | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD
         | POINTED_DRIPSTONE | GLOW_LICHEN | CAVE_VINE | CAVE_VINE_BERRIES | AZALEA
-        | FLOWERING_AZALEA | BIG_DRIPLEAF | SMALL_DRIPLEAF | HANGING_ROOTS | SPORE_BLOSSOM
+        | FLOWERING_AZALEA | SMALL_DRIPLEAF | HANGING_ROOTS | SPORE_BLOSSOM
         | SCULK_VEIN => {
             RenderKind::Cross
         }
+        BIG_DRIPLEAF => RenderKind::Platform, // F2: a standable, tilting leaf platform
         STONE_SLAB | WOOD_SLAB => RenderKind::Slab,
         STONE_STAIRS => RenderKind::Stairs,
         WOODEN_DOOR => RenderKind::Door,
@@ -386,6 +390,11 @@ const BOX_FULL: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
 const BOX_SLAB: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]; // bottom half
 const BOX_SLAB_TOP: [Aabb; 1] = [[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]]; // top half
 const BOX_NONE: [Aabb; 0] = [];
+// Big-dripleaf (F2) leaf-platform boxes by tilt stage: a firm flat leaf near the cell top, drooping as
+// it tilts, then nothing (you fall through) at full tilt. Render geometry == collision (mesher emits
+// solid_boxes), so the leaf visibly droops + vanishes as it folds.
+const DRIPLEAF_STABLE_BOX: [Aabb; 1] = [[0.0, 0.6875, 0.0, 1.0, 0.8125, 1.0]];
+const DRIPLEAF_TILT_BOX: [Aabb; 1] = [[0.0, 0.5, 0.0, 1.0, 0.625, 1.0]];
 // Stairs: a bottom slab + an upper half-box on the high side, one per facing (0:+z 1:+x 2:-z 3:-x).
 const SLAB_HALF: Aabb = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
 const BOX_STAIRS_N: [Aabb; 2] = [SLAB_HALF, [0.0, 0.5, 0.5, 1.0, 1.0, 1.0]];
@@ -575,8 +584,24 @@ pub fn solid_boxes(id: BlockId, state: u8) -> &'static [Aabb] {
         // Attach fixtures (torch/lever/button): walk-through. Render geometry is the small box(es) in
         // attach_boxes (emitted by the mesher); collision is empty so you can stand in a torch's cell.
         RenderKind::Attach => &BOX_NONE,
+        // F2 big dripleaf: a standable leaf that droops with its tilt stage, then drops you at full tilt.
+        RenderKind::Platform => match dripleaf_tilt(state) {
+            DRIPLEAF_FULL => &BOX_NONE,
+            DRIPLEAF_TILTING => &DRIPLEAF_TILT_BOX,
+            _ => &DRIPLEAF_STABLE_BOX,
+        },
         _ => &BOX_FULL,
     }
+}
+
+// Big-dripleaf tilt stage (F2), in the block-state byte: 0 stable (firm), 1 tilting (drooping), 2 full
+// (no collision — you fall through). Resets toward 0 when nobody is standing on it.
+pub const DRIPLEAF_STABLE: u8 = 0;
+pub const DRIPLEAF_TILTING: u8 = 1;
+pub const DRIPLEAF_FULL: u8 = 2;
+#[inline]
+pub fn dripleaf_tilt(state: u8) -> u8 {
+    (state & 0b11).min(2)
 }
 
 /// Water or lava — simulated by the flowing-fluid tick and passable to the player.
@@ -597,6 +622,7 @@ pub fn is_opaque(id: BlockId) -> bool {
         && id != WOODEN_FENCE
         && id != COBBLESTONE_WALL
         && id != GLASS_PANE
+        && id != BIG_DRIPLEAF // F2: a thin leaf platform — doesn't occlude or block light
         && !is_plant(id)
         && !is_attach(id)
         && !is_partial(id)
