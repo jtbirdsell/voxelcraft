@@ -111,6 +111,9 @@ struct State {
     shield_item: Option<item::ItemId>,
     /// World difficulty (P6); mirrored to player + game, persisted in level.bin, cycled with G.
     difficulty: crate::rules::Difficulty,
+    /// F1 creative menu: the full reachable item list (built once) + the current page (scroll to flip).
+    creative_palette: Vec<item::ItemId>,
+    creative_page: usize,
 }
 
 pub struct App {
@@ -266,6 +269,22 @@ impl App {
             if hit(x, y) {
                 state.inventory.click_slot(slot_i, right);
                 return;
+            }
+        }
+        // F1: clicking a creative-palette cell grabs a stack of that item onto the cursor (left = full
+        // stack, right = one). The old held stack is simply discarded — creative items are infinite.
+        if state.screen == Screen::Inventory && state.inventory.creative {
+            for (i, x, y) in overlay::creative_palette_rects(w, h) {
+                if hit(x, y) {
+                    let idx = state.creative_page * overlay::PAL_PER_PAGE + i;
+                    if let Some(&it) = state.creative_palette.get(idx) {
+                        let count = if right { 1 } else { item::max_stack(it) };
+                        state.inventory.held = Some(item::ItemStack::new(it, count));
+                    } else {
+                        state.inventory.held = None; // clicked an empty palette cell = trash the cursor
+                    }
+                    return;
+                }
             }
         }
         // Furnace screen: move items between held and the input/fuel slots; output is take-only.
@@ -1069,6 +1088,9 @@ impl App {
                 state.cursor,
             ));
         } else if state.screen != Screen::None {
+            // F1: in the creative inventory screen, show the paged block/tool palette instead of craft.
+            let palette = (state.screen == Screen::Inventory && state.inventory.creative)
+                .then_some((state.creative_palette.as_slice(), state.creative_page));
             ui.extend(overlay::build_inventory_screen(
                 state.gpu.config.width,
                 state.gpu.config.height,
@@ -1076,6 +1098,7 @@ impl App {
                 &state.craft,
                 state.screen.craft_size(),
                 state.cursor,
+                palette,
             ));
         }
         let volume_bg = state.game.volume_bind_group();
@@ -1701,6 +1724,8 @@ impl ApplicationHandler for App {
                     shot_craft[7] = Some(item::ItemStack::new(item::STICK, 1));
                 }
                 let cursor = (600.0, 343.0);
+                // F1: show the creative palette in the headless inventory shot (shot_inv is creative).
+                let shot_pal = item::creative_palette();
                 ui.extend(overlay::build_inventory_screen(
                     gpu.config.width,
                     gpu.config.height,
@@ -1708,6 +1733,7 @@ impl ApplicationHandler for App {
                     &shot_craft,
                     size,
                     cursor,
+                    Some((&shot_pal, 0)),
                 ));
             } else if screen_env == "furnace" {
                 // A mid-smelt furnace: iron ore cooking over planks into iron ingots.
@@ -1893,6 +1919,8 @@ impl ApplicationHandler for App {
             shield_progress: 0.0,
             shield_item: None,
             difficulty,
+            creative_palette: item::creative_palette(),
+            creative_page: 0,
         });
         self.set_grab(true);
     }
@@ -1965,8 +1993,16 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
                         MouseScrollDelta::PixelDelta(p) => -(p.y.signum() as i32),
                     };
-                    if dir != 0 && state.screen == Screen::None {
-                        state.inventory.scroll(dir);
+                    if dir != 0 {
+                        if state.screen == Screen::None {
+                            state.inventory.scroll(dir);
+                        } else if state.screen == Screen::Inventory && state.inventory.creative {
+                            // F1: scroll pages the creative palette.
+                            let pages =
+                                state.creative_palette.len().div_ceil(overlay::PAL_PER_PAGE).max(1);
+                            let p = state.creative_page as i32 + dir;
+                            state.creative_page = p.clamp(0, pages as i32 - 1) as usize;
+                        }
                     }
                 }
             }

@@ -229,6 +229,26 @@ pub fn inventory_slot_rects(width: u32, height: u32) -> Vec<(usize, f32, f32)> {
     rects
 }
 
+/// Creative-palette grid (F1): a `PAL_COLS`×`PAL_ROWS` page of block/tool/material icons above the
+/// inventory grid. Returns (cell index 0..PAL_PER_PAGE, x, y).
+pub const PAL_COLS: usize = 9;
+pub const PAL_ROWS: usize = 5;
+pub const PAL_PER_PAGE: usize = PAL_COLS * PAL_ROWS;
+pub fn creative_palette_rects(width: u32, height: u32) -> Vec<(usize, f32, f32)> {
+    let step = INV_SLOT + 4.0;
+    let inv_top = inventory_slot_rects(width, height)[0].2;
+    let grid_w = PAL_COLS as f32 * step - 4.0;
+    let ox = (width as f32 - grid_w) * 0.5;
+    let oy = inv_top - PAL_ROWS as f32 * step - 34.0;
+    let mut rects = Vec::with_capacity(PAL_PER_PAGE);
+    for r in 0..PAL_ROWS {
+        for c in 0..PAL_COLS {
+            rects.push((r * PAL_COLS + c, ox + c as f32 * step, oy + r as f32 * step));
+        }
+    }
+    rects
+}
+
 /// Craft-grid cell rects: (craft cell index 0..9, x, y) for a `size`x`size` grid above the inventory.
 /// Cells map into the top-left of the 9-cell craft array (so size=2 uses 0,1,3,4).
 pub fn craft_cell_rects(width: u32, height: u32, size: usize) -> Vec<(usize, f32, f32)> {
@@ -276,6 +296,8 @@ pub fn build_inventory_screen(
     craft: &[Option<item::ItemStack>; 9],
     size: usize,
     cursor: (f32, f32),
+    // F1: in creative, the craft grid is replaced by a paged block/tool/material palette (list, page).
+    creative_palette: Option<(&[item::ItemId], usize)>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
     let sh = height as f32;
@@ -303,21 +325,45 @@ pub fn build_inventory_screen(
             draw_stack(&mut v, sw, sh, x, y, stack);
         }
     }
-    // Craft grid + output preview, on its own backing panel above the inventory grid.
-    let cells = craft_cell_rects(width, height, size);
-    let (out_x, out_y) = craft_output_rect(width, height, size);
-    let (cox, coy) = (cells[0].1, cells[0].2);
-    let cpw = out_x + INV_SLOT + 8.0 - (cox - 8.0);
-    let cph = size as f32 * step + 16.0;
-    push_px_rect(&mut v, sw, sh, cox - 8.0, coy - 8.0, cpw, cph, [0.12, 0.12, 0.14, 0.97]);
-    let mut grid_ids = [0u16; 9];
-    for &(cell, cx, cy) in &cells {
-        slot_item(&mut v, sw, sh, cx, cy, craft[cell]);
-        grid_ids[cell] = craft[cell].map(|s| s.item).unwrap_or(0);
+    let mut hovered_pal: Option<item::ItemId> = None;
+    if let Some((palette, page)) = creative_palette {
+        // F1 creative palette: a paged grid of every block/tool/material/armor (click to grab a stack).
+        let prects = creative_palette_rects(width, height);
+        let pages = palette.len().div_ceil(PAL_PER_PAGE).max(1);
+        let (pox, poy) = (prects[0].1, prects[0].2);
+        let pw = PAL_COLS as f32 * step - 4.0;
+        let ph = PAL_ROWS as f32 * step - 4.0;
+        push_px_rect(&mut v, sw, sh, pox - 8.0, poy - 8.0 - 22.0, pw + 16.0, ph + 16.0 + 22.0, [0.12, 0.12, 0.14, 0.97]);
+        push_text(&mut v, sw, sh, pox, poy - 8.0 - 16.0, 2.0, &format!("Creative   page {}/{}  (scroll)", page + 1, pages), [0.95, 0.95, 0.95, 1.0]);
+        for &(i, x, y) in &prects {
+            let hover = cursor.0 >= x && cursor.0 < x + INV_SLOT && cursor.1 >= y && cursor.1 < y + INV_SLOT;
+            let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.22, 0.22, 0.27, 1.0] };
+            push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
+            let idx = page * PAL_PER_PAGE + i;
+            if idx < palette.len() {
+                item_icon(&mut v, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, palette[idx]);
+                if hover {
+                    hovered_pal = Some(palette[idx]);
+                }
+            }
+        }
+    } else {
+        // Craft grid + output preview, on its own backing panel above the inventory grid.
+        let cells = craft_cell_rects(width, height, size);
+        let (out_x, out_y) = craft_output_rect(width, height, size);
+        let (cox, coy) = (cells[0].1, cells[0].2);
+        let cpw = out_x + INV_SLOT + 8.0 - (cox - 8.0);
+        let cph = size as f32 * step + 16.0;
+        push_px_rect(&mut v, sw, sh, cox - 8.0, coy - 8.0, cpw, cph, [0.12, 0.12, 0.14, 0.97]);
+        let mut grid_ids = [0u16; 9];
+        for &(cell, cx, cy) in &cells {
+            slot_item(&mut v, sw, sh, cx, cy, craft[cell]);
+            grid_ids[cell] = craft[cell].map(|s| s.item).unwrap_or(0);
+        }
+        push_px_rect(&mut v, sw, sh, out_x - 40.0, out_y + INV_SLOT * 0.5 - 2.0, 28.0, 4.0, [0.8, 0.8, 0.8, 0.9]);
+        let result = crafting::match_grid(&grid_ids).map(|(it, n)| item::ItemStack::new(it, n));
+        slot_item(&mut v, sw, sh, out_x, out_y, result);
     }
-    push_px_rect(&mut v, sw, sh, out_x - 40.0, out_y + INV_SLOT * 0.5 - 2.0, 28.0, 4.0, [0.8, 0.8, 0.8, 0.9]);
-    let result = crafting::match_grid(&grid_ids).map(|(it, n)| item::ItemStack::new(it, n));
-    slot_item(&mut v, sw, sh, out_x, out_y, result);
 
     // Equipped-armor column (helmet→boots) on its own backing panel, left of the main grid.
     let armor = armor_slot_rects(width, height);
@@ -346,10 +392,13 @@ pub fn build_inventory_screen(
             push_text(&mut v, sw, sh, hx + sz - tw - 2.0, hy + sz - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
         }
         durability_bar(&mut v, sw, sh, hx - 4.0, hy, sz + 8.0, held);
-    } else if let Some(slot_i) = hovered {
-        // Tooltip when not dragging.
-        if let Some(stack) = inv.slots[slot_i] {
-            let name = item::item_name(stack.item);
+    } else {
+        // Tooltip when not dragging — hovered inventory slot, else hovered creative-palette item.
+        let name = hovered
+            .and_then(|i| inv.slots[i])
+            .map(|s| item::item_name(s.item))
+            .or_else(|| hovered_pal.map(item::item_name));
+        if let Some(name) = name {
             let tw = text_width(name, 2.0);
             push_px_rect(&mut v, sw, sh, cursor.0 + 12.0, cursor.1 - 4.0, tw + 8.0, 22.0, [0.05, 0.05, 0.07, 0.92]);
             push_text(&mut v, sw, sh, cursor.0 + 16.0, cursor.1, 2.0, name, [0.95, 0.95, 0.8, 1.0]);

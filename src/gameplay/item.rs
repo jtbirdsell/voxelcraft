@@ -457,6 +457,28 @@ pub fn item_name(item: ItemId) -> &'static str {
     TOOL_NAMES[(item - TOOL_BASE) as usize].get_or_init(|| format!("{tier} {class}"))
 }
 
+/// The full set of items reachable from the **creative menu** (F1): every block, then every tool,
+/// the defined materials, and all armor. The fixed 40-slot inventory can't hold the ~64
+/// underground-overhaul blocks, so the creative screen pages through this instead. Stable order.
+pub fn creative_palette() -> Vec<ItemId> {
+    let mut v = Vec::new();
+    for b in 1..=block::MAX_BLOCK {
+        v.push(b); // every block-item (id == BlockId)
+    }
+    for t in TOOL_BASE..TOOL_BASE + 25 {
+        v.push(t); // 5 tiers x 5 classes
+    }
+    for m in MATERIAL_BASE..MATERIAL_BASE + MATERIAL_COUNT {
+        if is_known(m) {
+            v.push(m); // only defined materials (skips the unpopulated tail)
+        }
+    }
+    for a in ARMOR_BASE..ARMOR_BASE + 16 {
+        v.push(a);
+    }
+    v
+}
+
 /// Atlas tile for a dropped item entity: the block's tile, or a generic tool tile.
 pub fn item_tile(item: ItemId) -> u32 {
     // Mob-drop materials get a flat-colored atlas tile so a dropped pile reads as its real item
@@ -1024,6 +1046,20 @@ mod tests {
         );
         // Glow berries are a small edible.
         assert!(crate::food::food(GLOW_BERRIES).is_some());
+    }
+
+    #[test]
+    fn f1_creative_palette_reaches_everything() {
+        let pal = creative_palette();
+        assert!(pal.iter().all(|&i| is_known(i)), "every palette entry must be a known item");
+        // The underground-overhaul blocks are now reachable in creative.
+        assert!(pal.contains(&block::COPPER_ORE) && pal.contains(&block::SCULK));
+        assert!(pal.contains(&block::AMETHYST_BLOCK) && pal.contains(&block::DEEPSLATE_DIAMOND_ORE));
+        assert!(pal.contains(&block::CUT_COPPER) && pal.contains(&block::POINTED_DRIPSTONE));
+        // Tools + materials + armor are reachable too.
+        assert!(pal.contains(&DIAMOND_PICKAXE) && pal.contains(&IRON_INGOT) && pal.contains(&armor_id(3, 0)));
+        // No AIR; far more than the 40-slot inventory could ever hold.
+        assert!(!pal.contains(&block::AIR) && pal.len() > 100);
     }
 
     #[test]
