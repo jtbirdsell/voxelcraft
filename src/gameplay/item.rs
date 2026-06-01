@@ -72,6 +72,16 @@ pub const COOKED_CHICKEN: ItemId = MATERIAL_BASE + 16;
 pub const COOKED_MUTTON: ItemId = MATERIAL_BASE + 17;
 pub const BREAD: ItemId = MATERIAL_BASE + 18;
 pub const APPLE: ItemId = MATERIAL_BASE + 19;
+// Ore materials (P5a): mined ores now drop these instead of the ore block, so they feed tools/armor/
+// fuel. Iron/gold drop raw ore that smelts to an ingot; coal/diamond/redstone/lapis drop directly.
+pub const COAL: ItemId = MATERIAL_BASE + 20;
+pub const CHARCOAL: ItemId = MATERIAL_BASE + 21;
+pub const DIAMOND: ItemId = MATERIAL_BASE + 22;
+pub const REDSTONE_DUST: ItemId = MATERIAL_BASE + 23;
+pub const LAPIS: ItemId = MATERIAL_BASE + 24;
+pub const RAW_IRON: ItemId = MATERIAL_BASE + 25;
+pub const RAW_GOLD: ItemId = MATERIAL_BASE + 26;
+pub const FLINT: ItemId = MATERIAL_BASE + 27;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -98,6 +108,14 @@ fn material_name(item: ItemId) -> &'static str {
         COOKED_MUTTON => "Cooked Mutton",
         BREAD => "Bread",
         APPLE => "Apple",
+        COAL => "Coal",
+        CHARCOAL => "Charcoal",
+        DIAMOND => "Diamond",
+        REDSTONE_DUST => "Redstone Dust",
+        LAPIS => "Lapis Lazuli",
+        RAW_IRON => "Raw Iron",
+        RAW_GOLD => "Raw Gold",
+        FLINT => "Flint",
         _ => "Material",
     }
 }
@@ -124,6 +142,14 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         COOKED_MUTTON => [0.62, 0.34, 0.28],
         BREAD => [0.75, 0.58, 0.30],
         APPLE => [0.82, 0.18, 0.18],
+        COAL => [0.13, 0.13, 0.14],
+        CHARCOAL => [0.24, 0.20, 0.17],
+        DIAMOND => [0.45, 0.92, 0.90],
+        REDSTONE_DUST => [0.80, 0.10, 0.10],
+        LAPIS => [0.18, 0.30, 0.78],
+        RAW_IRON => [0.78, 0.62, 0.50],
+        RAW_GOLD => [0.85, 0.70, 0.30],
+        FLINT => [0.30, 0.28, 0.28],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -759,10 +785,15 @@ mod tests {
 
     #[test]
     fn block_drops_table() {
-        assert_eq!(block::drops(block::STONE), Some(block::COBBLESTONE));
-        assert_eq!(block::drops(block::GRASS), Some(block::DIRT));
+        assert_eq!(block::drops(block::STONE), Some((block::COBBLESTONE, 1)));
+        assert_eq!(block::drops(block::GRASS), Some((block::DIRT, 1)));
         assert_eq!(block::drops(block::LEAVES), None);
-        assert_eq!(block::drops(block::DIRT), Some(block::DIRT));
+        assert_eq!(block::drops(block::DIRT), Some((block::DIRT, 1)));
+        // Ores drop their material item (not the ore block).
+        assert_eq!(block::drops(block::COAL_ORE), Some((COAL, 1)));
+        assert_eq!(block::drops(block::DIAMOND_ORE), Some((DIAMOND, 1)));
+        assert_eq!(block::drops(block::IRON_ORE), Some((RAW_IRON, 1)));
+        assert_eq!(block::drops(block::REDSTONE_ORE), Some((REDSTONE_DUST, 4)));
     }
 
     #[test]

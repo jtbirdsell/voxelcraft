@@ -444,18 +444,28 @@ pub fn breakable(id: BlockId) -> bool {
     id != AIR && hardness(id).is_finite()
 }
 
-/// What a broken block yields as an item drop (None = nothing). Stone yields cobblestone, grass
-/// yields dirt, leaves drop nothing; most blocks drop themselves. (Tool gating arrives in M19.)
-pub fn drops(id: BlockId) -> Option<BlockId> {
-    match id {
-        AIR => None,
-        STONE => Some(COBBLESTONE),
-        GRASS => Some(DIRT),
-        LEAVES => None,
-        ICE => None,   // melts away (no silk touch yet)
-        GLASS => None, // shatters
-        _ => Some(id),
-    }
+/// What a broken block yields as an item drop + count (None = nothing). Ores drop their MATERIAL
+/// item (coal/diamond/redstone/lapis directly; iron/gold as raw ore that smelts to an ingot); stone
+/// yields cobblestone; grass yields dirt; leaves/ice/glass drop nothing; most blocks drop themselves.
+/// Tool gating (the right pickaxe tier) is enforced by the caller. Note: `ItemId == BlockId == u16`,
+/// so block-item and material ids mix freely here.
+pub fn drops(id: BlockId) -> Option<(crate::item::ItemId, u8)> {
+    use crate::item;
+    Some(match id {
+        AIR => return None,
+        STONE => (COBBLESTONE, 1),
+        GRASS => (DIRT, 1),
+        LEAVES => return None, // saplings/apples arrive with tree variety + farming
+        ICE => return None,    // melts away (no silk touch yet)
+        GLASS => return None,  // shatters
+        COAL_ORE => (item::COAL, 1),
+        IRON_ORE => (item::RAW_IRON, 1),
+        GOLD_ORE => (item::RAW_GOLD, 1),
+        DIAMOND_ORE => (item::DIAMOND, 1),
+        REDSTONE_ORE => (item::REDSTONE_DUST, 4),
+        LAPIS_ORE => (item::LAPIS, 6),
+        _ => (id, 1),
+    })
 }
 
 /// Experience awarded for mining a block (the ores that drop XP in Minecraft). Iron/gold give none

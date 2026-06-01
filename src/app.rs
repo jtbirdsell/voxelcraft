@@ -529,8 +529,8 @@ impl App {
                             };
                             if harvest_ok {
                                 let center = hit.as_vec3() + Vec3::splat(0.5);
-                                if let Some(drop) = block::drops(id) {
-                                    let stack = item::ItemStack::new(item::item_of_block(drop), 1);
+                                if let Some((drop_item, count)) = block::drops(id) {
+                                    let stack = item::ItemStack::new(drop_item, count);
                                     state.game.spawn_item(center, stack);
                                 }
                                 // Some ores release experience orbs when mined.

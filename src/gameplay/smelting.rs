@@ -12,9 +12,12 @@ pub const SMELT_TIME: f32 = 6.0;
 /// The item a furnace produces from one unit of `input`, or `None` if it can't be smelted.
 pub fn smelt_output(input: ItemId) -> Option<ItemId> {
     Some(match input {
-        block::IRON_ORE => item::IRON_INGOT,
-        block::GOLD_ORE => item::GOLD_INGOT,
+        // Ores + raw ore -> ingots (P5a: mining drops raw ore; the block also smelts for convenience).
+        block::IRON_ORE | item::RAW_IRON => item::IRON_INGOT,
+        block::GOLD_ORE | item::RAW_GOLD => item::GOLD_INGOT,
         block::COBBLESTONE => block::STONE, // cobble re-smelts to smooth stone
+        block::SAND => block::GLASS,        // sand -> glass
+        block::WOOD => item::CHARCOAL,      // a log (in the input slot) chars to charcoal
         // Cooking raw mob drops (P4).
         item::BEEF => item::COOKED_BEEF,
         item::PORK => item::COOKED_PORK,
@@ -27,9 +30,10 @@ pub fn smelt_output(input: ItemId) -> Option<ItemId> {
 /// Seconds of burn time one unit of `fuel` provides, or `None` if it isn't a fuel.
 pub fn fuel_value(fuel: ItemId) -> Option<f32> {
     Some(match fuel {
-        block::PLANKS => 9.0, // 1.5 items
-        block::WOOD => 18.0,  // 3 items — a whole log
-        item::STICK => 3.0,   // 0.5 items
+        item::COAL | item::CHARCOAL => 8.0 * SMELT_TIME, // a coal smelts 8 items (Minecraft)
+        block::PLANKS => 9.0,                            // 1.5 items
+        block::WOOD => 18.0,                             // 3 items — a whole log
+        item::STICK => 3.0,                              // 0.5 items
         _ => return None,
     })
 }
@@ -54,6 +58,16 @@ mod tests {
         assert_eq!(smelt_output(item::BEEF), Some(item::COOKED_BEEF));
         assert_eq!(smelt_output(item::CHICKEN_MEAT), Some(item::COOKED_CHICKEN));
         assert_eq!(smelt_output(item::COOKED_BEEF), None); // already cooked
+    }
+
+    #[test]
+    fn raw_ore_and_materials_smelt() {
+        assert_eq!(smelt_output(item::RAW_IRON), Some(item::IRON_INGOT));
+        assert_eq!(smelt_output(item::RAW_GOLD), Some(item::GOLD_INGOT));
+        assert_eq!(smelt_output(block::SAND), Some(block::GLASS));
+        assert_eq!(smelt_output(block::WOOD), Some(item::CHARCOAL));
+        // Coal is a strong fuel (smelts more than a plank).
+        assert!(fuel_value(item::COAL).unwrap() > fuel_value(block::PLANKS).unwrap());
     }
 
     #[test]
