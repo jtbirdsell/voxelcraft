@@ -135,7 +135,10 @@ impl VoxelVolume {
             origin_chunk: IVec3::new(i32::MIN, 0, i32::MIN),
             occupant: FxHashMap::default(),
             rtx_mode: RTX_GI,
-            gi_rays: 4,
+            // 8 hemisphere samples/pixel (was 4): the GI trace has no in-engine temporal accumulation,
+            // so DLSS-RR denoises this raw — more samples = less grain. Linear cost; the GPU has
+            // headroom. Override with VOXELCRAFT_GI_RAYS. (M33-G9)
+            gi_rays: 8,
             gi_dist: 22.0,
             gi_strength: 1.0,
             sky_boost: 0.55,

@@ -953,7 +953,12 @@ impl ApplicationHandler for App {
                 FxHashMap::default(),
             );
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
-            game.set_rtx_quality(64);
+            // VOXELCRAFT_GI_RAYS overrides (e.g. to match an interactive setting for A/B).
+            let shot_rays = std::env::var("VOXELCRAFT_GI_RAYS")
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(64);
+            game.set_rtx_quality(shot_rays.max(1));
             // Debug knob: VOXELCRAFT_WSMOOTH overrides the water depth-clarity smoothing radius
             // in blocks (0 = single-tap, the pre-fix stepped look) for ad-hoc tuning/verification.
             if let Ok(s) = std::env::var("VOXELCRAFT_WSMOOTH") {
@@ -1248,6 +1253,13 @@ impl ApplicationHandler for App {
         let (inventory, saved_furnaces) = persistence::load_state(&dir, flying);
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
         game.restore_furnaces(saved_furnaces);
+        // VOXELCRAFT_GI_RAYS overrides the hemisphere GI sample count (default 8) — more samples =
+        // less grain for DLSS-RR to denoise; the GPU has headroom. (M33-G9)
+        if let Ok(n) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
+            if let Ok(rays) = n {
+                game.set_rtx_quality(rays.max(1));
+            }
+        }
         // One of each species near spawn; they fall onto terrain as it streams in.
         let ring = [(-4, -6), (4, -6), (7, 0), (4, 6), (-4, 6), (-7, 0), (0, 8), (0, -8)];
         for (species, &(dx, dz)) in crate::entity::Species::ALL.iter().zip(ring.iter()) {
