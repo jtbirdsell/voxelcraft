@@ -63,6 +63,8 @@ pub struct Input {
     pub pitch_delta: f32,
     pub break_held: bool,
     pub place_pressed: bool,
+    /// Right mouse button held (place / eat-hold / use); `place_pressed` is the press edge.
+    pub place_held: bool,
     pub drop_pressed: bool,
 }
 
@@ -197,6 +199,18 @@ impl Player {
 
     pub fn is_dead(&self) -> bool {
         self.health <= 0.0
+    }
+
+    /// Can the player eat this food now? (Always-edible foods can be eaten at full hunger.)
+    pub fn can_eat(&self, always_edible: bool) -> bool {
+        always_edible || self.hunger < MAX_HUNGER
+    }
+
+    /// Eat a food: restore hunger, then saturation (capped at the new hunger level + the reserve cap,
+    /// per Minecraft — saturation never exceeds the current food level).
+    pub fn eat(&mut self, hunger: u32, saturation: f32) {
+        self.hunger = (self.hunger + hunger as f32).min(MAX_HUNGER);
+        self.saturation = (self.saturation + saturation).min(self.hunger).min(MAX_SATURATION);
     }
 
     /// Reset to the spawn point with full health and hunger (called on death).
@@ -621,6 +635,22 @@ mod tests {
         p.add_xp(100);
         assert!(p.level > 1);
         assert!((0.0..=1.0).contains(&p.xp_fraction()));
+    }
+
+    #[test]
+    fn eating_refills_hunger() {
+        let mut p = Player::new(Vec3::ZERO, false);
+        p.hunger = 6.0;
+        p.saturation = 0.0;
+        assert!(p.can_eat(false));
+        p.eat(8, 12.8); // a steak
+        assert_eq!(p.hunger, 14.0, "hunger restored by the food value");
+        assert!(p.saturation > 0.0, "saturation gained");
+        assert!(p.saturation <= p.hunger, "saturation never exceeds the food level");
+        // Full hunger: a normal food can't be eaten.
+        p.hunger = MAX_HUNGER;
+        assert!(!p.can_eat(false));
+        assert!(p.can_eat(true), "always-edible foods ignore the full-hunger gate");
     }
 
     #[test]

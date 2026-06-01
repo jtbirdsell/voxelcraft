@@ -65,6 +65,16 @@ pub const GUNPOWDER: ItemId = MATERIAL_BASE + 10;
 pub const STRING: ItemId = MATERIAL_BASE + 11;
 pub const SPIDER_EYE: ItemId = MATERIAL_BASE + 12;
 pub const ROTTEN_FLESH: ItemId = MATERIAL_BASE + 13;
+// Foods (P4): cooked meats come from smelting the raw drops; bread/apple are early-game staples.
+pub const COOKED_BEEF: ItemId = MATERIAL_BASE + 14;
+pub const COOKED_PORK: ItemId = MATERIAL_BASE + 15;
+pub const COOKED_CHICKEN: ItemId = MATERIAL_BASE + 16;
+pub const COOKED_MUTTON: ItemId = MATERIAL_BASE + 17;
+pub const BREAD: ItemId = MATERIAL_BASE + 18;
+pub const APPLE: ItemId = MATERIAL_BASE + 19;
+
+/// Size of the material id window (room for foods, dyes, and other crafting materials to come).
+pub const MATERIAL_COUNT: ItemId = 64;
 
 fn material_name(item: ItemId) -> &'static str {
     match item {
@@ -82,6 +92,12 @@ fn material_name(item: ItemId) -> &'static str {
         STRING => "String",
         SPIDER_EYE => "Spider Eye",
         ROTTEN_FLESH => "Rotten Flesh",
+        COOKED_BEEF => "Steak",
+        COOKED_PORK => "Cooked Porkchop",
+        COOKED_CHICKEN => "Cooked Chicken",
+        COOKED_MUTTON => "Cooked Mutton",
+        BREAD => "Bread",
+        APPLE => "Apple",
         _ => "Material",
     }
 }
@@ -102,6 +118,12 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         STRING => [0.88, 0.88, 0.86],
         SPIDER_EYE => [0.55, 0.18, 0.20],
         ROTTEN_FLESH => [0.52, 0.36, 0.30],
+        COOKED_BEEF => [0.55, 0.32, 0.20],
+        COOKED_PORK => [0.80, 0.52, 0.45],
+        COOKED_CHICKEN => [0.78, 0.60, 0.40],
+        COOKED_MUTTON => [0.62, 0.34, 0.28],
+        BREAD => [0.75, 0.58, 0.30],
+        APPLE => [0.82, 0.18, 0.18],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -172,7 +194,7 @@ pub fn is_tool(item: ItemId) -> bool {
 
 #[inline]
 pub fn is_material(item: ItemId) -> bool {
-    (MATERIAL_BASE..MATERIAL_BASE + 16).contains(&item)
+    (MATERIAL_BASE..MATERIAL_BASE + MATERIAL_COUNT).contains(&item)
 }
 
 #[inline]
@@ -683,8 +705,9 @@ mod tests {
     fn unknown_material_ids_rejected() {
         assert!(is_known(STICK) && is_known(IRON_INGOT) && is_known(GOLD_INGOT));
         assert!(is_known(LEATHER) && is_known(GUNPOWDER)); // defined mob-drop materials
-        // The unpopulated tail of the material range (515..528 minus the defined ids) is rejected.
-        assert!(!is_known(MATERIAL_BASE + 15), "undefined material id should be rejected");
+        assert!(is_known(COOKED_BEEF) && is_known(BREAD)); // defined foods
+        // The unpopulated tail of the material range is still rejected (name falls back to "Material").
+        assert!(!is_known(MATERIAL_BASE + 40), "undefined material id should be rejected");
     }
 
     #[test]

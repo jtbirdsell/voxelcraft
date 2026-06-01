@@ -3,6 +3,7 @@
 pub(crate) mod container;
 pub(crate) mod crafting;
 pub(crate) mod entity;
+pub(crate) mod food;
 pub(crate) mod item;
 pub(crate) mod player;
 pub(crate) mod raycast;

@@ -52,7 +52,7 @@ GL has no hardware RT (software DDA tracer only).
 | **Left-Ctrl** | Sprint (widens FOV) / fly boost |
 | **F** | Toggle fly / walk |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
-| **Right-click** | Place block, or open a crafting table / furnace / chest |
+| **Right-click** | Place block; open a crafting table / furnace / chest; **hold to eat** the selected food |
 | **Q** | Drop one of the selected item |
 | **1–9 / scroll** | Select hotbar slot |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
@@ -134,6 +134,9 @@ position, albedo + skylight) and an ACES tonemap.
 - **Survival depth**: health + hunger with saturation-fueled regen and starvation; fall damage;
   **swimming** (buoyancy + paddle up) with an **air/drowning** bubble meter; **lava contact damage**;
   **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.
+- **Eating**: hold right-click on a food to eat it (~1.6 s), restoring hunger + saturation. Raw mob
+  drops (beef/pork/chicken/mutton) are edible but weak; **cook them in a furnace** (→ steak, cooked
+  porkchop/chicken/mutton) for far more, plus bread and apples.
 - **Experience**: mining ores (coal/redstone/lapis/diamond) drops glowing **XP orbs** that home in and
   grant points; an XP bar + level counter on the HUD.
 - **Armor**: 4 equip slots (helmet/chestplate/leggings/boots) × leather/iron/gold/diamond, drag-to-equip

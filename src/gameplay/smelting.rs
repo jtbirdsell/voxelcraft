@@ -15,6 +15,11 @@ pub fn smelt_output(input: ItemId) -> Option<ItemId> {
         block::IRON_ORE => item::IRON_INGOT,
         block::GOLD_ORE => item::GOLD_INGOT,
         block::COBBLESTONE => block::STONE, // cobble re-smelts to smooth stone
+        // Cooking raw mob drops (P4).
+        item::BEEF => item::COOKED_BEEF,
+        item::PORK => item::COOKED_PORK,
+        item::CHICKEN_MEAT => item::COOKED_CHICKEN,
+        item::MUTTON => item::COOKED_MUTTON,
         _ => return None,
     })
 }
@@ -41,6 +46,14 @@ mod tests {
         assert_eq!(smelt_output(block::STONE), None); // already smelted
         assert_eq!(smelt_output(item::STICK), None); // sticks are fuel, not input
         assert_eq!(smelt_output(item::IRON_INGOT), None); // ingots don't re-smelt
+    }
+
+    #[test]
+    fn raw_meat_cooks() {
+        assert_eq!(smelt_output(block::IRON_ORE), Some(item::IRON_INGOT));
+        assert_eq!(smelt_output(item::BEEF), Some(item::COOKED_BEEF));
+        assert_eq!(smelt_output(item::CHICKEN_MEAT), Some(item::COOKED_CHICKEN));
+        assert_eq!(smelt_output(item::COOKED_BEEF), None); // already cooked
     }
 
     #[test]

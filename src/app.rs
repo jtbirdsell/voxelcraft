@@ -31,6 +31,7 @@ use crate::{block, capture, crafting, item, overlay, persistence, raycast, smelt
 const SEED: u64 = 0x5EED_C0FFEE;
 const RENDER_DISTANCE: i32 = 12;
 const REACH: f32 = 6.0;
+const EAT_TIME: f32 = 1.6; // seconds to eat a food (hold right-click)
 const SENSITIVITY: f32 = 0.0022;
 const FOG_END: f32 = (RENDER_DISTANCE as f32 - 1.0) * 32.0;
 const FOG_START: f32 = FOG_END * 0.68;
@@ -93,6 +94,9 @@ struct State {
     mine_progress: f32,
     /// Cooldown between melee swings (seconds).
     melee_cd: f32,
+    /// Eat-hold progress (seconds) and the food id being eaten (right-click-hold on a food).
+    eat_progress: f32,
+    eat_item: Option<item::ItemId>,
 }
 
 pub struct App {
@@ -548,6 +552,33 @@ impl App {
             state.mine_target = None;
             state.mine_progress = 0.0;
         }
+
+        // Eating: hold right-click while a food item is selected to eat it over EAT_TIME, then
+        // restore hunger/saturation and consume one. (Foods place nothing, so the place edge below
+        // is a no-op for them.) Gameplay-only — suppressed while any screen is open.
+        let sel_item = state.inventory.selected_item();
+        let edible = state.screen == Screen::None
+            && state.input.place_held
+            && crate::food::food(sel_item).is_some_and(|f| state.player.can_eat(f.always_edible));
+        if edible {
+            if state.eat_item != Some(sel_item) {
+                state.eat_item = Some(sel_item);
+                state.eat_progress = 0.0;
+            }
+            state.eat_progress += dt;
+            if state.eat_progress >= EAT_TIME {
+                if let Some(f) = crate::food::food(sel_item) {
+                    state.player.eat(f.hunger, f.saturation);
+                    state.inventory.consume_selected();
+                }
+                state.eat_progress = 0.0;
+                state.eat_item = None;
+            }
+        } else {
+            state.eat_progress = 0.0;
+            state.eat_item = None;
+        }
+
         if state.input.place_pressed {
             state.input.place_pressed = false;
             if let Some(hit) = &target {
@@ -1415,6 +1446,8 @@ impl ApplicationHandler for App {
             mine_target: None,
             mine_progress: 0.0,
             melee_cd: 0.0,
+            eat_progress: 0.0,
+            eat_item: None,
         });
         self.set_grab(true);
     }
@@ -1465,6 +1498,7 @@ impl ApplicationHandler for App {
                     match button {
                         MouseButton::Left => state.input.break_held = pressed, // hold to break
                         MouseButton::Right => {
+                            state.input.place_held = pressed; // hold to eat / use
                             if pressed {
                                 state.input.place_pressed = true;
                             }
