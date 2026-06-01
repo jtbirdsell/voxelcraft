@@ -7,8 +7,20 @@
 // (Streamline) as separate features we do it ourselves. `textureLoad` (no sampler) gives a true point
 // upscale and sidesteps R32Float's non-filterability.
 
-@group(0) @binding(0) var src_depth: texture_2d<f32>;   // R32Float  (linear view depth)
+@group(0) @binding(0) var src_depth: texture_2d<f32>;   // R32Float  (linear view depth = clip.w)
 @group(0) @binding(1) var src_motion: texture_2d<f32>;  // Rg16Float (screen-space UV motion)
+
+// Camera near/far — MUST match Camera::new in src/gfx/camera.rs (znear/zfar). The G-buffer depth is
+// LINEAR view depth (clip.w, for DLSS Ray Reconstruction's DepthType::Linear), but DLSS Frame
+// Generation expects a standard projected [0,1] NDC depth (depth_inverted=false), so reproject here.
+const NEAR: f32 = 0.1;
+const FAR: f32 = 4000.0;
+
+// Linear view depth d (= clip.w) -> [0,1] NDC depth, the inverse of glam::Mat4::perspective_rh:
+// z_ndc = (far/(far-near)) * (1 - near/d). Clamped (the sky clear is beyond far).
+fn linear_to_ndc_depth(d: f32) -> f32 {
+    return clamp((FAR / (FAR - NEAR)) * (1.0 - NEAR / max(d, NEAR)), 0.0, 1.0);
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -37,7 +49,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let dims = vec2<f32>(textureDimensions(src_depth));
     let st = vec2<i32>(clamp(in.uv * dims, vec2<f32>(0.0), dims - vec2<f32>(1.0)));
     var out: FsOut;
-    out.depth = textureLoad(src_depth, st, 0).r;
+    out.depth = linear_to_ndc_depth(textureLoad(src_depth, st, 0).r);
     out.motion = textureLoad(src_motion, st, 0).xy;
     return out;
 }

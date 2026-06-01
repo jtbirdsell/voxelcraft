@@ -688,18 +688,27 @@ impl App {
         );
 
         // FG self-test: after N frames, log the max generated-frame count and exit (DLSS-G generates
-        // an interpolated frame between each rendered one => max presented == 2).
+        // an interpolated frame between each rendered one => max presented == 2). Driven by a local
+        // frame counter, NOT frame_gen.is_some(), so it still terminates + reports when FG is
+        // unavailable (no SDK / non-Ada GPU) instead of spinning forever (review #1/#6). The throwaway
+        // run exits WITHOUT save_world so the auto-panned camera yaw is never persisted (review #2/#6).
         if let Some(n) = fg_test {
-            if let Some(fg) = &state.frame_gen {
-                if fg.frames() >= n {
-                    log::info!(
-                        "FG SELF-TEST: max presented = {} over {} frames => generating = {}",
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static TEST_FRAMES: AtomicU32 = AtomicU32::new(0);
+            let count = TEST_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+            if count >= n {
+                match &state.frame_gen {
+                    Some(fg) => log::info!(
+                        "FG SELF-TEST: max presented = {} over {count} frames => generating = {}",
                         fg.max_presented(),
-                        fg.frames(),
                         fg.max_presented() >= 2
-                    );
-                    std::process::exit(0);
+                    ),
+                    None => log::warn!(
+                        "FG SELF-TEST: Frame Generation unavailable (no DLSS-G context) — ran {count} \
+                         frames, cannot verify generation"
+                    ),
                 }
+                std::process::exit(0);
             }
         }
 

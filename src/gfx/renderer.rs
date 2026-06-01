@@ -1758,7 +1758,7 @@ impl ChunkRenderer {
         as_bg: Option<&wgpu::BindGroup>,
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
-        dlss: Option<&mut crate::dlss::DlssRender>,
+        mut dlss: Option<&mut crate::dlss::DlssRender>,
         fg: Option<&mut crate::frame_gen::FrameGen>,
     ) {
         // M33-G8-FG: present through DLSS Frame Generation when active — the scene renders into the
@@ -1780,13 +1780,19 @@ impl ChunkRenderer {
             let ui = fg.ui_tex().clone();
             let hudless_view = hudless.create_view(&wgpu::TextureViewDescriptor::default());
             let ui_view = ui.create_view(&wgpu::TextureViewDescriptor::default());
-            fg.present_frame(gpu, aspect, &depth, &motion, &hudless, &ui, |view| {
+            // Reborrow dlss into the closure so it stays usable for the plain-present fallback if FG
+            // fails to present this frame — keeps the window alive instead of freezing (review #7).
+            let presented = fg.present_frame(gpu, aspect, &depth, &motion, &hudless, &ui, |view| {
                 self.render_into(
                     gpu, targets, view, &gpu.depth_view, meshes, volume_bg, as_bg, highlight,
-                    ui_verts, Some(&hudless_view), Some(&ui_view), dlss,
+                    ui_verts, Some(&hudless_view), Some(&ui_view), dlss.as_deref_mut(),
                 );
             });
-            return;
+            if presented {
+                return;
+            }
+            // FG did not present (begin_frame/set_constants/acquire/tag failure) — fall through to the
+            // ordinary swapchain present below so the frame is still shown (RR still applies).
         }
 
         let frame = match gpu.surface.get_current_texture() {

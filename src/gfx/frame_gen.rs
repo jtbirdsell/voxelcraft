@@ -22,9 +22,19 @@ use glam029::Vec2;
 
 use crate::gpu::Gpu;
 
-/// Whether Frame Generation is requested (`VOXELCRAFT_FG` set).
+/// `D3D12_RESOURCE_STATE_RENDER_TARGET` — the state wgpu leaves a colour render attachment in. The
+/// FG guides are all written as colour attachments and never sampled afterward, so we declare this
+/// (overriding the crate's `PIXEL_SHADER_RESOURCE` default) so Streamline barriers them correctly
+/// (it runs with wgpu's command-list state tracking disabled and trusts the declared state).
+const RENDER_TARGET: u32 = 0x4;
+
+/// Whether Frame Generation is requested. `VOXELCRAFT_FG=1|on|true` enables it; `0|false|off|empty`
+/// (or unset) disables — a value check, not a bare presence test, so `VOXELCRAFT_FG=0` means OFF.
 pub fn requested() -> bool {
-    std::env::var("VOXELCRAFT_FG").is_ok()
+    match std::env::var("VOXELCRAFT_FG").ok().as_deref() {
+        Some("0") | Some("false") | Some("off") | Some("") | None => false,
+        Some(_) => true,
+    }
 }
 
 /// Load + initialize Streamline (signature-verified `sl.interposer.dll` + `slInit`) **before** the
@@ -61,6 +71,9 @@ pub struct FrameGen {
     max_presented: u32,
     /// Swapchain colour format — used to rebuild the recomposition textures on resize.
     color_format: wgpu::TextureFormat,
+    /// Request a DLSS-G history reset on the next frame (set on resize — a guide discontinuity — so
+    /// the first frame after a surface reconfigure rebuilds reprojection history instead of ghosting).
+    pending_reset: bool,
     /// M33-G8-FG (Phase 4) UI recomposition: the scene is tonemapped (HUD-less) into `hudless_tex`
     /// and the HUD alone into `ui_tex` (transparent elsewhere). DLSS-G interpolates the HUD-less
     /// scene and recomposites the crisp UI on generated frames, so the HUD never shimmers. Both are
@@ -134,6 +147,7 @@ impl FrameGen {
                     frame: 0,
                     max_presented: 0,
                     color_format,
+                    pending_reset: true,
                     hudless_tex,
                     ui_tex,
                 })
@@ -163,17 +177,21 @@ impl FrameGen {
         hudless: &wgpu::Texture,
         ui: &wgpu::Texture,
         render: F,
-    ) where
+    ) -> bool
+    where
         F: FnOnce(&wgpu::TextureView),
     {
         let idx = self.frame;
         self.frame = self.frame.wrapping_add(1);
+        // Reset DLSS-G temporal history on the first frame + after a resize (a guide discontinuity).
+        let reset = idx == 0 || self.pending_reset;
+        self.pending_reset = false;
 
         let frame = match self.ctx.begin_frame(idx) {
             Ok(f) => f,
             Err(e) => {
                 log::error!("FG: begin_frame failed: {e}");
-                return;
+                return false;
             }
         };
 
@@ -185,9 +203,10 @@ impl FrameGen {
         consts.mvec_scale = Vec2::new(1.0, 1.0);
         consts.camera_motion_included = true;
         consts.camera_aspect_ratio = aspect;
+        consts.reset = reset;
         if let Err(e) = frame.set_constants(&consts) {
             log::error!("FG: set_constants failed: {e}");
-            return;
+            return false;
         }
 
         // acquire performs the mandatory GetCurrentBackBufferIndex; reconfigure + skip on a transient
@@ -196,11 +215,11 @@ impl FrameGen {
             Ok((tex, _bbi)) => tex,
             Err(StreamlineError::SurfaceUnavailable { .. }) => {
                 gpu.surface.configure(&gpu.device, &gpu.config);
-                return;
+                return false;
             }
             Err(e) => {
                 log::error!("FG: acquire failed: {e}");
-                return;
+                return false;
             }
         };
         let view = surface_tex
@@ -218,16 +237,19 @@ impl FrameGen {
         if let Err(e) = frame.tag(
             &mut tag_enc,
             &FgResources {
-                depth: FgResource::new(depth),
-                motion_vectors: FgResource::new(motion),
+                // All four guides were last written as colour attachments → RENDER_TARGET state.
+                depth: FgResource::new(depth).with_resource_state(RENDER_TARGET),
+                motion_vectors: FgResource::new(motion).with_resource_state(RENDER_TARGET),
                 // Phase 4: HUD-less scene colour + the UI layer (colour+alpha) for recomposition, so
                 // DLSS-G interpolates the scene and keeps the HUD crisp on generated frames.
-                hudless_color: Some(FgResource::new(hudless)),
-                ui: Some(FgUi::ColorAndAlpha(FgResource::new(ui))),
+                hudless_color: Some(FgResource::new(hudless).with_resource_state(RENDER_TARGET)),
+                ui: Some(FgUi::ColorAndAlpha(
+                    FgResource::new(ui).with_resource_state(RENDER_TARGET),
+                )),
             },
         ) {
             log::error!("FG: tag failed: {e}");
-            return;
+            return false;
         }
         gpu.queue.submit([tag_enc.finish()]);
 
@@ -250,11 +272,7 @@ impl FrameGen {
                 Err(e) => log::warn!("FG: query_state failed: {e}"),
             }
         }
-    }
-
-    /// Number of frames driven through `present_frame` so far (the per-frame token index).
-    pub fn frames(&self) -> u32 {
-        self.frame
+        true
     }
 
     /// Max `num_frames_actually_presented` observed (>= 2 means DLSS-G is generating).
@@ -277,5 +295,7 @@ impl FrameGen {
         let (hudless, ui) = make_recomp_textures(device, self.color_format, width, height);
         self.hudless_tex = hudless;
         self.ui_tex = ui;
+        // The new-resolution guides have no valid reprojection history — reset DLSS-G next frame.
+        self.pending_reset = true;
     }
 }
