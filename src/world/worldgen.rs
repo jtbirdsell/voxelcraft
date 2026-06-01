@@ -17,7 +17,18 @@ const MAX_TREE_HEIGHT: i32 = 9;
 const TREE_MARGIN: i32 = 2;
 const TREE_SALT: u64 = 0x7265655F_5345_4544;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+// Climate classifier thresholds (P20). These reproduce the current biome boundaries
+// byte-for-byte; lifting them to named consts is the extensibility seam for P21 (which
+// edits this data, not the control flow). Copied verbatim from the pre-P20 `biome()` ladder.
+const OCEAN_MAX_H: i32 = SEA_LEVEL - 1; // height <= 63  -> Ocean
+const BEACH_MAX_H: i32 = SEA_LEVEL + 1; // height <= 65  -> Beach
+const MOUNTAIN_MIN_H: i32 = 104; // height >= 104 -> Mountains
+const SNOWY_TEMP_MAX: f32 = -0.35; // temperature <  -0.35 -> Snowy
+const DESERT_TEMP_MIN: f32 = 0.33; // temperature > 0.33 (and dry) -> Desert
+const DESERT_HUM_MAX: f32 = -0.05; // humidity < -0.05 (with hot temp) -> Desert
+const FOREST_HUM_MIN: f32 = 0.12; // humidity > 0.12 -> Forest, else Plains
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Biome {
     Ocean,
     Beach,
@@ -26,6 +37,39 @@ enum Biome {
     Forest,
     Snowy,
     Mountains,
+}
+
+/// The continuous climate axes a column is classified by (P20). Two of the three already
+/// existed as first-class noise fields; `continentalness` names the elevation axis that
+/// today is consumed implicitly via `height()`. P21 will add biomes that branch on all
+/// three; in P20 only `temperature`/`humidity` drive the decision (the altitude tier is
+/// handled by the short-circuits in `biome()`), so `continentalness` is inert plumbing.
+#[derive(Clone, Copy)]
+struct Climate {
+    temperature: f32,     // [-1, 1] from the `temperature` noise
+    humidity: f32,        // [-1, 1] from the `humidity` noise
+    // Raw [-1, 1] continent noise. NOTE: `height()` applies `signum * abs.powf(1.15)`
+    // shaping (worldgen.rs) before use — P21 must decide whether to branch on raw or shaped.
+    continentalness: f32,
+}
+
+/// Pure climate classifier: maps continuous climate to a discrete `Biome`. Reproduces the
+/// pre-P20 temperature/humidity ladder exactly. `height` is retained for P21 altitude-aware
+/// rows; in P20 the altitude tier is resolved by `biome()`'s short-circuits before this is
+/// reached, so only temperature/humidity are read here. `continentalness` is intentionally
+/// not consulted in P20 — wiring it into a decision would change outputs and break the
+/// byte-identity gate; it is reserved for P21.
+fn classify(c: Climate, _height: i32) -> Biome {
+    let _ = c.continentalness; // reserved for P21; must not influence the P20 decision
+    if c.temperature < SNOWY_TEMP_MAX {
+        Biome::Snowy
+    } else if c.temperature > DESERT_TEMP_MIN && c.humidity < DESERT_HUM_MAX {
+        Biome::Desert
+    } else if c.humidity > FOREST_HUM_MIN {
+        Biome::Forest
+    } else {
+        Biome::Plains
+    }
 }
 
 pub struct Worldgen {
@@ -75,27 +119,32 @@ impl Worldgen {
         ((base + h + d).round() as i32).clamp(3, WORLD_HEIGHT - 12)
     }
 
+    /// The three continuous climate axes at a world column. Sampled identically to the way
+    /// `height()` reads `continent`, so P21 can branch on the elevation axis without re-deriving it.
+    fn sample_climate(&self, wx: i32, wz: i32) -> Climate {
+        let (fx, fz) = (wx as f32, wz as f32);
+        Climate {
+            temperature: self.temperature.get_noise_2d(fx, fz),
+            humidity: self.humidity.get_noise_2d(fx, fz),
+            continentalness: self.continent.get_noise_2d(fx, fz),
+        }
+    }
+
     fn biome(&self, wx: i32, wz: i32, height: i32) -> Biome {
-        if height <= SEA_LEVEL - 1 {
+        // Altitude tier — short-circuits BEFORE climate sampling, exactly as before. This keeps
+        // temperature/humidity sampled at the same call sites/columns/order as the pre-P20 code,
+        // so the result is byte-trivially identical (the climate columns also sample `continent`
+        // now, but its value is unused, so no output changes).
+        if height <= OCEAN_MAX_H {
             return Biome::Ocean;
         }
-        if height <= SEA_LEVEL + 1 {
+        if height <= BEACH_MAX_H {
             return Biome::Beach;
         }
-        if height >= 104 {
+        if height >= MOUNTAIN_MIN_H {
             return Biome::Mountains;
         }
-        let t = self.temperature.get_noise_2d(wx as f32, wz as f32);
-        let hum = self.humidity.get_noise_2d(wx as f32, wz as f32);
-        if t < -0.35 {
-            Biome::Snowy
-        } else if t > 0.33 && hum < -0.05 {
-            Biome::Desert
-        } else if hum > 0.12 {
-            Biome::Forest
-        } else {
-            Biome::Plains
-        }
+        classify(self.sample_climate(wx, wz), height)
     }
 
     /// Passive species that may spawn on the surface at this column (empty = none here). Only the
@@ -494,6 +543,98 @@ fn hash3(seed: u64, x: i32, y: i32, z: i32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    impl Worldgen {
+        /// Verbatim copy of the PRE-P20 `biome()` body — an independent oracle for the
+        /// byte-identity gate. It samples the same noise the same way and uses the original
+        /// hardcoded literals (NOT the new named consts), so asserting `biome == biome_old`
+        /// over a dense grid proves the climate-struct refactor changed no output. This is
+        /// non-circular: the oracle is the old logic, the subject is the new classifier path.
+        fn biome_old(&self, wx: i32, wz: i32, height: i32) -> Biome {
+            if height <= SEA_LEVEL - 1 {
+                return Biome::Ocean;
+            }
+            if height <= SEA_LEVEL + 1 {
+                return Biome::Beach;
+            }
+            if height >= 104 {
+                return Biome::Mountains;
+            }
+            let t = self.temperature.get_noise_2d(wx as f32, wz as f32);
+            let hum = self.humidity.get_noise_2d(wx as f32, wz as f32);
+            if t < -0.35 {
+                Biome::Snowy
+            } else if t > 0.33 && hum < -0.05 {
+                Biome::Desert
+            } else if hum > 0.12 {
+                Biome::Forest
+            } else {
+                Biome::Plains
+            }
+        }
+    }
+
+    /// Gate A: the P20 refactor is byte-identical to the pre-refactor logic. Since `biome()`
+    /// is the ONLY changed function and every downstream consumer (surface_top, subsurface,
+    /// decoration, trees, …) is a pure function of the returned `Biome` (height/noise/ore/
+    /// ice-freeze are all untouched), `biome == biome_old` over real terrain ⇒ byte-identical
+    /// chunks. Uses the real world seed and a dense grid that exercises every biome.
+    #[test]
+    fn p20_biome_refactor_is_byte_identical() {
+        let wg = Worldgen::new(0x5EED_C0FFEE);
+        let mut seen = HashSet::new();
+        let mut n = 0u32;
+        let mut wx = -4096;
+        while wx <= 4096 {
+            let mut wz = -4096;
+            while wz <= 4096 {
+                let h = wg.height(wx, wz);
+                let new = wg.biome(wx, wz, h);
+                assert_eq!(
+                    new,
+                    wg.biome_old(wx, wz, h),
+                    "P20 biome diverged at ({wx},{wz}) height {h}: {new:?} != old"
+                );
+                seen.insert(new);
+                n += 1;
+                wz += 48;
+            }
+            wx += 48;
+        }
+        assert!(n > 10_000, "grid too sparse ({n} columns)");
+        // The grid must actually exercise the rare arms (Desert/Snowy) over real noise, or
+        // the equivalence proof has untested classifier branches.
+        assert!(
+            seen.len() >= 6,
+            "grid only hit {} of 7 biomes: {:?}",
+            seen.len(),
+            seen
+        );
+    }
+
+    /// Gate B: the classifier arms + altitude short-circuits each map to the right biome.
+    /// Synthetic climates guarantee every branch is exercised (including the rare Desert/Snowy
+    /// arms) regardless of which biomes the noise grid happens to surface.
+    #[test]
+    fn p20_classifier_arms_and_short_circuits() {
+        let wg = Worldgen::new(0x5EED_C0FFEE);
+        // Altitude tier dominates regardless of climate at that column.
+        assert_eq!(wg.biome(0, 0, SEA_LEVEL - 1), Biome::Ocean);
+        assert_eq!(wg.biome(0, 0, SEA_LEVEL + 1), Biome::Beach);
+        assert_eq!(wg.biome(0, 0, MOUNTAIN_MIN_H), Biome::Mountains);
+        // Climate ladder (climate-tier height, synthetic climates straddling each threshold).
+        let h = (SEA_LEVEL + 20) as i32; // a non-short-circuited height
+        let c = |t, hum| Climate { temperature: t, humidity: hum, continentalness: 0.0 };
+        assert_eq!(classify(c(-0.5, 0.0), h), Biome::Snowy);
+        assert_eq!(classify(c(0.5, -0.2), h), Biome::Desert);
+        assert_eq!(classify(c(0.5, 0.5), h), Biome::Forest); // hot+wet is NOT desert
+        assert_eq!(classify(c(0.0, 0.5), h), Biome::Forest);
+        assert_eq!(classify(c(0.0, 0.0), h), Biome::Plains);
+        // Boundary exactness: thresholds are strict `<`/`>`, so the boundary value falls through.
+        assert_eq!(classify(c(SNOWY_TEMP_MAX, 0.0), h), Biome::Plains);
+        assert_eq!(classify(c(0.0, FOREST_HUM_MIN), h), Biome::Plains);
+    }
 
     #[test]
     fn generation_is_deterministic() {
