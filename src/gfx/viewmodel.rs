@@ -44,9 +44,18 @@ impl ViewModelUniform {
     }
 }
 
+/// The active "use" animation this frame, as normalized 0..1 progress per kind (mutually exclusive in
+/// the action system, so at most one is non-zero). Drives the eat / bow-draw / shield-raise poses.
+#[derive(Clone, Copy, Default)]
+pub struct UsePose {
+    pub eat: f32,    // eat_progress / EAT_TIME
+    pub draw: f32,   // draw_progress / BOW_DRAW_TIME
+    pub shield: f32, // shield_progress / SHIELD_RAISE_DELAY
+}
+
 /// Animation state for the first-person view-model. Fields beyond the rest pose are filled in by the
 /// later milestones (swing/use/bob/sway/equip); VM1 renders the static rest pose only.
-#[allow(dead_code)] // swing/equip/bob/sway are consumed by VM3–VM5; staged here so the struct is stable.
+#[allow(dead_code)] // equip/bob/sway are consumed by VM5; staged here so the struct is stable.
 pub struct ViewModel {
     /// Swing arc progress 0..1 (one-shot, retriggerable) and whether one is playing.
     pub swing: f32,
@@ -59,6 +68,8 @@ pub struct ViewModel {
     pub bob_strength: f32,
     /// Smoothed look-sway offset (view-space x,y).
     pub sway: glam::Vec2,
+    /// The active use animation this frame (eat / bow-draw / shield-raise).
+    pub use_pose: UsePose,
 }
 
 impl Default for ViewModel {
@@ -71,15 +82,17 @@ impl Default for ViewModel {
             bob_phase: 0.0,
             bob_strength: 0.0,
             sway: glam::Vec2::ZERO,
+            use_pose: UsePose::default(),
         }
     }
 }
 
 impl ViewModel {
     /// Advance the animation. `swing_start` is a one-shot trigger (an attack landed / a block was
-    /// placed); `swing_loop` keeps the arc repeating while the player mines/attacks. Later milestones
-    /// extend this with equip / bob / sway.
-    pub fn update(&mut self, dt: f32, swing_start: bool, swing_loop: bool) {
+    /// placed); `swing_loop` keeps the arc repeating while the player mines/attacks; `use_pose` carries
+    /// the active eat/draw/shield progress. Later milestones extend this with equip / bob / sway.
+    pub fn update(&mut self, dt: f32, swing_start: bool, swing_loop: bool, use_pose: UsePose) {
+        self.use_pose = use_pose;
         if swing_start {
             self.swing = 0.0;
             self.swinging = true;
@@ -116,13 +129,40 @@ impl ViewModel {
         (trans, 1.1 * a, 0.5 * a)
     }
 
-    /// Compose a pose from a base anchor + orientation plus the current swing arc.
+    /// The active use-pose contribution: (translation, extra pitch, extra yaw, weight). A use pose
+    /// overrides the swing by its weight. Mutually exclusive (only one progress is non-zero).
+    fn use_offset(&self) -> (Vec3, f32, f32, f32) {
+        let u = self.use_pose;
+        if u.eat > 0.0 {
+            // Food rises toward the mouth (up + toward camera) with a chewing wobble.
+            let w = smoothstep(0.0, 0.3, u.eat);
+            let chew = (u.eat * 28.0).sin() * 0.015 * w;
+            return (Vec3::new(-0.16 * w, 0.20 * w + chew, 0.12 * w), 0.55 * w, 0.0, w);
+        }
+        if u.draw > 0.0 {
+            // The bow rises up toward the aiming centre as it charges, with a hold-shake at full draw.
+            let t = u.draw;
+            let shake = if t > 0.95 { (t * 70.0).sin() * 0.006 } else { 0.0 };
+            return (Vec3::new(-0.20 * t + shake, 0.12 * t, 0.10 * t), -0.10 * t, 0.35 * t, 1.0);
+        }
+        if u.shield > 0.0 {
+            // The shield slides toward the centre into a blocking pose.
+            let t = u.shield;
+            return (Vec3::new(-0.28 * t, 0.16 * t, 0.10 * t), 0.10 * t, 0.40 * t, t);
+        }
+        (Vec3::ZERO, 0.0, 0.0, 0.0)
+    }
+
+    /// Compose a pose from a base anchor + orientation plus the swing arc and any active use pose
+    /// (the use pose damps the swing/idle motion by its weight).
     fn pose(&self, base_t: Vec3, yaw: f32, base_pitch: f32, base_roll: f32) -> Mat4 {
         let (st, sp, sr) = self.swing_pose();
-        Mat4::from_translation(base_t + st)
-            * Mat4::from_rotation_y(yaw)
-            * Mat4::from_rotation_x(base_pitch + sp)
-            * Mat4::from_rotation_z(base_roll + sr)
+        let (ut, up, uy, uw) = self.use_offset();
+        let damp = 1.0 - uw;
+        Mat4::from_translation(base_t + st * damp + ut)
+            * Mat4::from_rotation_y(yaw + uy)
+            * Mat4::from_rotation_x(base_pitch + sp * damp + up)
+            * Mat4::from_rotation_z(base_roll + sr * damp)
     }
 
     /// The view-space pose transform for a 3D held item (block cube / arm). A noticeable tilt shows
@@ -158,6 +198,12 @@ impl ViewModel {
         }
         Some(geom)
     }
+}
+
+/// Hermite smoothstep, for easing the use-pose weight in.
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// A flat, camera-facing sprite card textured with one atlas tile (an item sprite), upright (tile row
