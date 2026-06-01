@@ -100,10 +100,15 @@ position, albedo + skylight) and an ACES tonemap.
   gracefully to native resolution when unavailable.
 - **DLSS Frame Generation** (`VOXELCRAFT_FG=1`, NVIDIA RTX 40+): stacks on Ray Reconstruction — DLSS-G
   (via NVIDIA **Streamline**) interpolates an extra frame between each rendered one (~2× FPS) on the
-  Optical-Flow hardware. The render-resolution depth/motion guides are point-upscaled to output res,
-  and the HUD is tagged as a separate UI layer so DLSS-G recomposites it crisply instead of
-  interpolating it. Needs the Streamline DLLs staged beside the exe (`STREAMLINE_SDK` set), a
-  composited/focused window, and a non-vsync present mode; degrades gracefully to no frame generation.
+  Optical-Flow hardware. The render-resolution depth/motion guides are resized to output res, and the
+  HUD is tagged as a separate UI layer so DLSS-G recomposites it crisply instead of interpolating it.
+  Needs the Streamline DLLs staged beside the exe (`STREAMLINE_SDK` set), a composited/focused window,
+  and a non-vsync present mode; degrades gracefully to no frame generation.
+- **Supersampling / DLDSR-style** (`VOXELCRAFT_SS=1.5`, NVIDIA RTX): render the scene *above* the
+  window (×SS) with DLSS in DLAA mode, then a sharp Catmull-Rom pass downscales to the window — the
+  documented best practice for spare GPU headroom (renders the noisy GI at super-res too, so it
+  doubles as a GI denoiser). Clamped 1.0–4.0; 1.0 = off. Also `VOXELCRAFT_GI_RAYS=N` (hemisphere GI
+  samples, default 8) and `VOXELCRAFT_GI_ACCUM=1` (opt-in motion-reprojected GI temporal accumulation).
 - **Water reflections** via a Schlick-Fresnel mirror ray, with depth-based clarity (Beer–Lambert).
 - **Emissive blocks** (lava, glowstone, torches) that cast colored light into the scene and reflect.
 
@@ -197,8 +202,10 @@ verify each change without a human in the loop. Companion debug knobs: `VOXELCRA
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
 armor bars). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
 (software DDA vs hardware ray query), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
-`VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_DLSS=off|rr` +
+`VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_GI_RAYS=N` (GI samples/pixel,
+default 8), `VOXELCRAFT_GI_ACCUM=1` (opt-in GI temporal accumulation), `VOXELCRAFT_DLSS=off|rr` +
 `VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance` (DLSS Ray Reconstruction),
+`VOXELCRAFT_SS=1.5` (supersample ×SS then downscale — render above native; clamped 1–4),
 `VOXELCRAFT_FG=1` (DLSS Frame Generation on top of RR; needs `STREAMLINE_SDK` set + a focused window).
 DLSS needs `DLSS_SDK` + `LIBCLANG_PATH` set at build time (see the dlss section). Frame Generation can
 be smoke-tested headlessly with `VOXELCRAFT_FG_TEST=N` (auto-pans the camera for N frames, logs the

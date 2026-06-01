@@ -48,21 +48,25 @@ fn fs_main(in: VsOut) -> FsOut {
     let center = in.uv * dims - 0.5;
     let lo = dims - vec2<f32>(1.0);
 
+    // Take the nearest-camera (MIN-depth) texel in the footprint and emit ITS motion, so depth and
+    // motion describe the SAME surface at silhouettes. (Averaging motion across an edge while taking
+    // foreground depth mis-reprojects DLSS-G's history — review finding.)
     var min_d = 1.0e30;
-    var mot = vec2<f32>(0.0);
-    var cnt = 0.0;
+    var best_mot = vec2<f32>(0.0);
     for (var y = 0; y < n.y; y = y + 1) {
         for (var x = 0; x < n.x; x = x + 1) {
             // Sample points spread across the footprint, centered on `center`.
             let off = vec2<f32>(f32(x), f32(y)) - 0.5 * (vec2<f32>(n) - vec2<f32>(1.0));
             let st = vec2<i32>(clamp(center + off, vec2<f32>(0.0), lo));
-            min_d = min(min_d, textureLoad(src_depth, st, 0).r);
-            mot = mot + textureLoad(src_motion, st, 0).xy;
-            cnt = cnt + 1.0;
+            let d = textureLoad(src_depth, st, 0).r;
+            if (d < min_d) {
+                min_d = d;
+                best_mot = textureLoad(src_motion, st, 0).xy;
+            }
         }
     }
     var out: FsOut;
     out.depth = linear_to_ndc_depth(min_d);
-    out.motion = mot / cnt;
+    out.motion = best_mot;
     return out;
 }
