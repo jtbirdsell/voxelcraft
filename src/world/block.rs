@@ -844,7 +844,8 @@ pub fn mining_xp(id: BlockId) -> u32 {
 
 /// Atlas tile ids (M13). Index = `row*ATLAS_COLS + col` into the procedural texture atlas. Kept
 /// beside `face_color`/`face_tile` so the painters (texture.rs) and the WGSL `tile_average()` stay
-/// in lockstep. The 0..63 space leaves ample room for the block expansion in M16.
+/// in lockstep. P19 grew the atlas to a 16x16=256 grid, so the 0..255 space has ample room for the
+/// Phase-5 biome/wood/ore/ground-cover tiles.
 pub mod tile {
     pub const STONE: u32 = 0;
     pub const DIRT: u32 = 1;
@@ -901,8 +902,9 @@ pub mod tile {
     /// Base of 11 flat-color tiles (51..=61) for mob-drop materials (item.rs BEEF..=ROTTEN_FLESH),
     /// so dropped loot renders in its real color instead of a generic wooden box.
     pub const MATERIAL_DROP: u32 = 51;
-    // P18 mob tiles. Tile 62 is the last free atlas slot (the grid is a fixed 8×8=64); the other three
-    // reuse existing distinct flat-color tiles (silhouette separates them) so the atlas isn't resized.
+    // P18 mob tiles. MOB_WOLF took tile 62 (the last slot of the old 8×8 grid); the other three are
+    // intentional ALIASES of existing tiles (silhouette distinguishes them), NOT free slots. P19 then
+    // grew the grid to 16x16=256, so 64..=255 are now free real estate (all read MAGENTA until painted).
     pub const MOB_WOLF: u32 = 62; // new flat grey
     pub const MOB_ENDERMAN: u32 = OBSIDIAN; // near-black
     pub const MOB_SLIME: u32 = SUGAR_CANE; // gel green

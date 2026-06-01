@@ -1,15 +1,17 @@
-//! Procedural texture atlas (M13). A deterministic 8x8 grid of 16x16-px tiles painted in code at
-//! startup (no external assets). Authored as `Rgba8Unorm` with per-tile base colors equal to the
-//! WGSL `tile_average()` values, so switching the surface shaders from the flat average to atlas
-//! sampling is a detail-only upgrade (same mean brightness, no GI mismatch). Mips arrive in M13c.
+//! Procedural texture atlas (M13). A deterministic 16x16 grid of 16x16-px tiles painted in code at
+//! startup (no external assets). Authored as `Rgba8Unorm` with per-tile flat base colors (the single
+//! source of truth for a tile's color, mirrored only by item::material_color for UI swatches).
+//! P19 (Phase 5): grew the grid 8x8=64 → 16x16=256 — the per-tile pixel content is unchanged (TILE_PX
+//! and paint() are grid-independent), only the grid gained free slots for new biome/wood/ore tiles.
+//! No mip chain (mip_level_count=1); nearest-sampled at full res.
 
 use crate::block::tile as T;
 
 pub const TILE_PX: u32 = 16;
-pub const ATLAS_COLS: u32 = 8;
-pub const ATLAS_ROWS: u32 = 8;
-pub const ATLAS_W: u32 = ATLAS_COLS * TILE_PX; // 128
-pub const ATLAS_H: u32 = ATLAS_ROWS * TILE_PX; // 128
+pub const ATLAS_COLS: u32 = 16;
+pub const ATLAS_ROWS: u32 = 16;
+pub const ATLAS_W: u32 = ATLAS_COLS * TILE_PX; // 256
+pub const ATLAS_H: u32 = ATLAS_ROWS * TILE_PX; // 256
 
 /// Bake the full atlas to a tightly-packed `Rgba8Unorm` image (`y*ATLAS_W + x`, 4 bytes/texel).
 pub fn build_atlas() -> Vec<u8> {
@@ -469,4 +471,34 @@ fn hashf(x: u32, y: u32, salt: u32) -> f32 {
     h = h.wrapping_mul(1274126177);
     h ^= h >> 16;
     (h & 0xffff) as f32 / 65535.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_dimensions_power_of_two() {
+        // P19: 16x16 grid of 16px tiles = 256x256.
+        assert_eq!((ATLAS_COLS, ATLAS_ROWS), (16, 16));
+        assert_eq!((ATLAS_W, ATLAS_H), (256, 256));
+        assert_eq!(build_atlas().len(), (ATLAS_W * ATLAS_H * 4) as usize);
+        assert!(ATLAS_W.is_power_of_two() && ATLAS_H.is_power_of_two(), "PoT for any future mips");
+        // An unassigned slot reads the magenta missing-texture color (the base_color `_` fallback).
+        assert_eq!(crate::block::tile::MAGENTA, 63);
+        assert_eq!(base_color(64), [1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn shader_grid_matches_cpu() {
+        // The grid dimension is duplicated in atlas.wgsl as a WGSL const (no uniform plumbing). Guard
+        // against the two drifting: a resize that updates one file but not the other garbles every tile.
+        let wgsl = include_str!("../../assets/shaders/atlas.wgsl");
+        assert!(
+            wgsl.contains(&format!("ATLAS_COLS: u32 = {}u", ATLAS_COLS)),
+            "atlas.wgsl ATLAS_COLS must equal texture.rs ATLAS_COLS ({ATLAS_COLS})"
+        );
+        assert!(wgsl.contains(&format!("ATLAS_COLS_F: f32 = {:.1}", ATLAS_COLS as f32)));
+        assert!(wgsl.contains(&format!("ATLAS_ROWS_F: f32 = {:.1}", ATLAS_ROWS as f32)));
+    }
 }

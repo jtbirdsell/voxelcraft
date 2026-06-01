@@ -121,8 +121,8 @@ fn push_px_rect(
     }
 }
 
-/// Atlas UV rect for a block-atlas tile (8x8 grid), inset half a texel so nearest sampling never
-/// bleeds a neighbor tile at the icon edge.
+/// Atlas UV rect for a block-atlas tile (16x16 grid, P19), inset half a texel so nearest sampling
+/// never bleeds a neighbor tile at the icon edge.
 fn tile_uv(tile: u32) -> ([f32; 2], [f32; 2]) {
     let cols = crate::texture::ATLAS_COLS as f32;
     let rows = crate::texture::ATLAS_ROWS as f32;
