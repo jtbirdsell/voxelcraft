@@ -118,11 +118,15 @@ position, albedo + skylight) and an ACES tonemap.
 - **Progressive mining**: hold to break, timed by per-block hardness, with a crack overlay; bedrock is
   unbreakable. **Tools** (5 tiers × pickaxe/axe/shovel/sword/hoe) speed up mining, gate ore drops by
   harvest level, and wear down with **durability**.
-- **Crafting**: a data-driven shaped + shapeless recipe registry; a 2×2 grid in the inventory and a
-  3×3 grid at a crafting table, with a live result preview (planks, sticks, tools, furnace, chest, …).
+- **Crafting**: a data-driven shaped + shapeless recipe registry built from family generators (so it
+  scales); a 2×2 grid in the inventory and a 3×3 grid at a crafting table, with a live result preview.
+  Covers the **full tool + armor progression** (all five tool classes and four armor pieces across
+  wood/stone/iron/gold/diamond), torches, slabs/stairs, table/furnace/chest, planks and sticks.
 - **Smelting**: right-click a furnace for an input/fuel/output screen with a live burning-fuel flame
-  gauge and smelt-progress arrow; a `step_furnaces` tick consumes fuel (planks/logs/sticks) to smelt
-  ores into **iron / gold ingots** (and cobblestone back to stone). Breaking a lit furnace spills it.
+  gauge and smelt-progress arrow; a `step_furnaces` tick burns fuel (coal/charcoal/logs/planks/sticks)
+  to smelt **raw iron/gold → ingots**, **sand → glass**, **logs → charcoal**, cobblestone → stone, and
+  **raw meat → cooked food**. Mined ores drop their material (coal/diamond/redstone/lapis directly;
+  iron/gold as raw ore). Breaking a lit furnace spills it.
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
   screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities. Block items
   render as **textured icons** (sampled from the block atlas) in every slot, not flat color swatches.

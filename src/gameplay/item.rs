@@ -33,15 +33,10 @@ pub const fn tool_id(tier: Tier, class_idx: u16) -> ItemId {
     TOOL_BASE + (tier as u16) * 5 + class_idx
 }
 
-// Named tool ids for the creative palette + recipes.
+// Named tool ids used by the creative palette + tests (the recipe builder generates the rest via
+// `tool_id(tier, class)`).
 pub const WOOD_PICKAXE: ItemId = tool_id(Tier::Wood, 0);
-pub const WOOD_AXE: ItemId = tool_id(Tier::Wood, 1);
-pub const WOOD_SHOVEL: ItemId = tool_id(Tier::Wood, 2);
-pub const WOOD_SWORD: ItemId = tool_id(Tier::Wood, 3);
 pub const STONE_PICKAXE: ItemId = tool_id(Tier::Stone, 0);
-pub const STONE_AXE: ItemId = tool_id(Tier::Stone, 1);
-pub const STONE_SHOVEL: ItemId = tool_id(Tier::Stone, 2);
-pub const STONE_SWORD: ItemId = tool_id(Tier::Stone, 3);
 pub const DIAMOND_PICKAXE: ItemId = tool_id(Tier::Diamond, 0);
 pub const DIAMOND_AXE: ItemId = tool_id(Tier::Diamond, 1);
 pub const DIAMOND_SHOVEL: ItemId = tool_id(Tier::Diamond, 2);

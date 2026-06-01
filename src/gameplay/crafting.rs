@@ -2,8 +2,10 @@
 //! inventory grid maps into the top-left). Shaped recipes match a trimmed bounding box (so they
 //! work anywhere in the grid); shapeless recipes match the ingredient multiset.
 
+use std::sync::OnceLock;
+
 use crate::block;
-use crate::item::{self, ItemId};
+use crate::item::{self, ItemId, Tier};
 
 const EMPTY: ItemId = 0; // block::AIR
 
@@ -22,28 +24,82 @@ const P: ItemId = block::PLANKS;
 const C: ItemId = block::COBBLESTONE;
 const S: ItemId = item::STICK;
 
-#[rustfmt::skip]
-static RECIPES: &[Recipe] = &[
-    // Wood -> 4 planks (shapeless).
-    Recipe { shaped: false, cells: [W,0,0, 0,0,0, 0,0,0], output: P, count: 4 },
-    // 2 planks stacked -> 4 sticks.
-    Recipe { shaped: true,  cells: [P,0,0, P,0,0, 0,0,0], output: S, count: 4 },
-    // 2x2 planks -> crafting table.
-    Recipe { shaped: true,  cells: [P,P,0, P,P,0, 0,0,0], output: block::CRAFTING_TABLE, count: 1 },
-    // 8 cobblestone ring -> furnace.
-    Recipe { shaped: true,  cells: [C,C,C, C,0,C, C,C,C], output: block::FURNACE, count: 1 },
-    // 8 planks ring -> chest.
-    Recipe { shaped: true,  cells: [P,P,P, P,0,P, P,P,P], output: block::CHEST, count: 1 },
-    // Tools: top row material, sticks down the middle (pickaxe), L (axe), column (shovel/sword).
-    Recipe { shaped: true,  cells: [P,P,P, 0,S,0, 0,S,0], output: item::WOOD_PICKAXE,  count: 1 },
-    Recipe { shaped: true,  cells: [C,C,C, 0,S,0, 0,S,0], output: item::STONE_PICKAXE, count: 1 },
-    Recipe { shaped: true,  cells: [P,P,0, P,S,0, 0,S,0], output: item::WOOD_AXE,      count: 1 },
-    Recipe { shaped: true,  cells: [C,C,0, C,S,0, 0,S,0], output: item::STONE_AXE,     count: 1 },
-    Recipe { shaped: true,  cells: [P,0,0, S,0,0, S,0,0], output: item::WOOD_SHOVEL,   count: 1 },
-    Recipe { shaped: true,  cells: [C,0,0, S,0,0, S,0,0], output: item::STONE_SHOVEL,  count: 1 },
-    Recipe { shaped: true,  cells: [P,0,0, P,0,0, S,0,0], output: item::WOOD_SWORD,    count: 1 },
-    Recipe { shaped: true,  cells: [C,0,0, C,0,0, S,0,0], output: item::STONE_SWORD,   count: 1 },
-];
+/// Build a shaped recipe from up to three ASCII rows + a `(char -> item)` legend; ' ' / '.' = empty.
+/// The pattern is placed top-left; `match_grid` trims the bounding box so it's position-invariant.
+fn shaped(rows: &[&str], legend: &[(char, ItemId)], output: ItemId, count: u8) -> Recipe {
+    let mut cells = [EMPTY; 9];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, ch) in row.bytes().enumerate() {
+            if ch != b' ' && ch != b'.' {
+                let id = legend.iter().find(|&&(k, _)| k as u8 == ch).map_or(EMPTY, |&(_, v)| v);
+                cells[r * 3 + c] = id;
+            }
+        }
+    }
+    Recipe { shaped: true, cells, output, count }
+}
+
+/// A shapeless recipe (ingredient multiset; positions don't matter).
+fn shapeless(items: &[ItemId], output: ItemId, count: u8) -> Recipe {
+    let mut cells = [EMPTY; 9];
+    for (i, &it) in items.iter().enumerate().take(9) {
+        cells[i] = it;
+    }
+    Recipe { shaped: false, cells, output, count }
+}
+
+/// The 5 tools of a tier from a material `m` + sticks (pickaxe/axe/shovel/sword/hoe).
+fn tool_set(r: &mut Vec<Recipe>, m: ItemId, tier: Tier) {
+    let leg = &[('M', m), ('S', S)];
+    r.push(shaped(&["MMM", " S ", " S "], leg, item::tool_id(tier, 0), 1)); // pickaxe
+    r.push(shaped(&["MM ", "MS ", " S "], leg, item::tool_id(tier, 1), 1)); // axe
+    r.push(shaped(&["M", "S", "S"], leg, item::tool_id(tier, 2), 1)); // shovel
+    r.push(shaped(&["M", "M", "S"], leg, item::tool_id(tier, 3), 1)); // sword
+    r.push(shaped(&["MM ", " S ", " S "], leg, item::tool_id(tier, 4), 1)); // hoe
+}
+
+/// The 4 armor pieces of a tier from a material `m` (helmet/chestplate/leggings/boots).
+fn armor_set(r: &mut Vec<Recipe>, m: ItemId, tier: u16) {
+    let leg = &[('M', m)];
+    r.push(shaped(&["MMM", "M M"], leg, item::armor_id(tier, 0), 1)); // helmet
+    r.push(shaped(&["M M", "MMM", "MMM"], leg, item::armor_id(tier, 1), 1)); // chestplate
+    r.push(shaped(&["MMM", "M M", "M M"], leg, item::armor_id(tier, 2), 1)); // leggings
+    r.push(shaped(&["M M", "M M"], leg, item::armor_id(tier, 3), 1)); // boots
+}
+
+/// The full crafting registry, built once. Families (tools/armor) are generated; the rest are
+/// declared with the `shaped`/`shapeless` helpers. Wood-variant / door / fence / dye families arrive
+/// once their block ids land (the recipe builder scales to them then).
+fn build_recipes() -> Vec<Recipe> {
+    let mut r = Vec::new();
+    // Basics.
+    r.push(shapeless(&[W], P, 4)); // a log -> 4 planks
+    r.push(shaped(&["P", "P"], &[('P', P)], S, 4)); // 2 planks -> 4 sticks
+    r.push(shaped(&["PP", "PP"], &[('P', P)], block::CRAFTING_TABLE, 1));
+    r.push(shaped(&["CCC", "C C", "CCC"], &[('C', C)], block::FURNACE, 1));
+    r.push(shaped(&["PPP", "P P", "PPP"], &[('P', P)], block::CHEST, 1));
+    // Torches: coal or charcoal over a stick -> 4 torches.
+    r.push(shaped(&["O", "S"], &[('O', item::COAL), ('S', S)], block::TORCH, 4));
+    r.push(shaped(&["O", "S"], &[('O', item::CHARCOAL), ('S', S)], block::TORCH, 4));
+    // Slabs + stairs (cobblestone + planks; per-material variants come with wood types).
+    r.push(shaped(&["CCC"], &[('C', C)], block::STONE_SLAB, 6));
+    r.push(shaped(&["PPP"], &[('P', P)], block::WOOD_SLAB, 6));
+    r.push(shaped(&["C  ", "CC ", "CCC"], &[('C', C)], block::STONE_STAIRS, 4));
+    // Full tool set.
+    tool_set(&mut r, P, Tier::Wood);
+    tool_set(&mut r, C, Tier::Stone);
+    tool_set(&mut r, item::IRON_INGOT, Tier::Iron);
+    tool_set(&mut r, item::GOLD_INGOT, Tier::Gold);
+    tool_set(&mut r, item::DIAMOND, Tier::Diamond);
+    // Full armor set (tiers: 0 leather, 1 iron, 2 gold, 3 diamond).
+    armor_set(&mut r, item::LEATHER, 0);
+    armor_set(&mut r, item::IRON_INGOT, 1);
+    armor_set(&mut r, item::GOLD_INGOT, 2);
+    armor_set(&mut r, item::DIAMOND, 3);
+    r
+}
+
+static RECIPES: OnceLock<Vec<Recipe>> = OnceLock::new();
 
 /// Bounding box (min_r, min_c, max_r, max_c) of the non-empty cells, or None if all empty.
 fn trim(g: &[ItemId; 9]) -> Option<(usize, usize, usize, usize)> {
@@ -94,7 +150,7 @@ fn shapeless_match(input: &[ItemId; 9], ingredients: &[ItemId; 9]) -> bool {
 
 /// The output (item, count) for a filled 3x3 grid of item ids (0 = empty), if any recipe matches.
 pub fn match_grid(grid: &[ItemId; 9]) -> Option<(ItemId, u8)> {
-    for r in RECIPES {
+    for r in RECIPES.get_or_init(build_recipes) {
         let hit = if r.shaped {
             shaped_match(grid, &r.cells)
         } else {
@@ -131,8 +187,8 @@ mod tests {
             0, 0, item::STICK,
             0, 0, item::STICK,
         ];
-        // only 2 wide -> not a pickaxe; should be None
-        assert_eq!(match_grid(&g), None);
+        // PP / .S / .S trims to a hoe shape (hoes are craftable now), not a pickaxe.
+        assert_eq!(match_grid(&g), Some((item::tool_id(Tier::Wood, 4), 1)));
         let g = [
             block::COBBLESTONE, block::COBBLESTONE, block::COBBLESTONE,
             0, item::STICK, 0,
@@ -156,5 +212,34 @@ mod tests {
     #[test]
     fn empty_grid_no_recipe() {
         assert_eq!(match_grid(&[0; 9]), None);
+    }
+
+    #[test]
+    fn registry_is_substantial_and_known() {
+        // The recipe set should cover the full tool/armor progression, and every ingredient/output
+        // must be a known item (catches id drift as new materials/blocks land).
+        let recipes = RECIPES.get_or_init(build_recipes);
+        assert!(recipes.len() >= 40, "expected a full recipe set, got {}", recipes.len());
+        for r in recipes {
+            assert!(item::is_known(r.output), "unknown recipe output {}", r.output);
+            for &c in &r.cells {
+                assert!(c == EMPTY || item::is_known(c), "unknown ingredient {c}");
+            }
+        }
+    }
+
+    #[test]
+    fn diamond_gear_craftable() {
+        let (d, s) = (item::DIAMOND, item::STICK);
+        // Diamond pickaxe: three diamonds on top, two sticks down the middle.
+        let g = [d, d, d, 0, s, 0, 0, s, 0];
+        assert_eq!(match_grid(&g), Some((item::DIAMOND_PICKAXE, 1)));
+        // Diamond chestplate.
+        let g = [d, 0, d, d, d, d, d, d, d];
+        assert_eq!(match_grid(&g), Some((item::armor_id(3, 1), 1)));
+        // Iron helmet.
+        let i = item::IRON_INGOT;
+        let g = [i, i, i, i, 0, i, 0, 0, 0];
+        assert_eq!(match_grid(&g), Some((item::armor_id(1, 0), 1)));
     }
 }
