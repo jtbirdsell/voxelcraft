@@ -93,6 +93,11 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   toward each adjacent fence/wall/pane or solid block, so a row reads as a continuous rail/wall/window
   (a lone pane is a flat sheet). The shape is derived from neighbors at mesh time; fences are 1.5 blocks
   tall so they can't be jumped.
+- **Torches, levers & buttons**: small **attached fixtures** — a thin 3D torch stick that stands on the
+  floor or angles off a wall (the attach face comes from the surface you click), and a lever / button
+  mounted the same way. All walk-through and non-occluding, but still breakable; the torch keeps its
+  block-light glow. **Right-click flips a lever / presses a button** (the on/pressed state drives redstone
+  later). The attach face + on bit live in the block-state byte.
 - **Day/night** cycle with a dynamic sky, distance fog, translucent **water**, and **flowing fluids**
   (water/lava cellular simulation). Animated water ripples and lava.
 - **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /

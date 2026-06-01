@@ -621,6 +621,12 @@ impl App {
                 } else if targeted == block::CHEST {
                     // Right-clicking a chest opens its 27-slot storage screen.
                     state.pending_open = Some(Screen::Chest(hit.block));
+                } else if targeted == block::LEVER || targeted == block::BUTTON {
+                    // Right-click flips a lever / presses a button. Cosmetic in P11 (it re-meshes the
+                    // on/pressed state); the bit drives redstone in P31. The attach face is preserved.
+                    let (_, st) = state.game.block_state_at(hit.block);
+                    let ns = block::attach_state(block::attach_face(st), !block::attach_on(st));
+                    state.game.set_block_state(&state.gpu, &state.renderer, hit.block, targeted, ns);
                 } else {
                     let id = state.inventory.selected_block();
                     if id == block::WOODEN_DOOR {
@@ -727,11 +733,31 @@ impl App {
                                 block::AXIS_Y
                             };
                             block::log_state(axis)
+                        } else if matches!(id, block::TORCH | block::LEVER | block::BUTTON) {
+                            // Attach face = the direction from the placed cell toward the support you
+                            // clicked (= -hit.normal). A top/bottom face mounts on the floor; a side
+                            // face mounts on that wall. (Clicking a block guarantees a support there.)
+                            let n = hit.normal;
+                            let face = if n.y != 0 {
+                                block::ATTACH_FLOOR
+                            } else if n.x > 0 {
+                                block::ATTACH_NX
+                            } else if n.x < 0 {
+                                block::ATTACH_PX
+                            } else if n.z > 0 {
+                                block::ATTACH_NZ
+                            } else {
+                                block::ATTACH_PZ
+                            };
+                            block::attach_state(face, false)
                         } else {
                             0
                         };
-                        let blocks_player =
-                            block::is_solid(id) && state.player.intersects_block(place);
+                        // Attach fixtures (torch/lever/button) are walk-through, so never reject their
+                        // placement for overlapping the player even though is_solid (targetable) is true.
+                        let blocks_player = block::is_solid(id)
+                            && !block::is_attach(id)
+                            && state.player.intersects_block(place);
                         if id != block::AIR
                             && !blocks_player
                             && state.game.set_block_state(

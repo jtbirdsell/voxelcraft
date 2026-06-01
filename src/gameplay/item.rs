@@ -523,6 +523,8 @@ impl Inventory {
                 block::WOODEN_FENCE,
                 block::COBBLESTONE_WALL,
                 block::GLASS_PANE,
+                block::LEVER,
+                block::BUTTON,
             ]
             .iter()
             .enumerate()
@@ -879,6 +881,32 @@ mod tests {
         assert!(!block::is_opaque(block::WOODEN_FENCE) && !block::is_volume_solid(block::WOODEN_FENCE));
         assert!(block::is_solid(block::WOODEN_FENCE) && block::is_solid(block::GLASS_PANE));
         assert_eq!(block::solid_boxes(block::WOODEN_FENCE, 0)[0][4], 1.5);
+    }
+
+    #[test]
+    fn attach_fixtures() {
+        use crate::block;
+        // Torch/lever/button are Attach: non-opaque, out of the voxel volume, walk-through, but still
+        // raycast-targetable (so they can be broken). The torch keeps its block-light emission.
+        for id in [block::TORCH, block::LEVER, block::BUTTON] {
+            assert!(block::is_attach(id), "id {id} should be an Attach fixture");
+            assert!(!block::is_opaque(id) && !block::is_volume_solid(id));
+            assert!(!block::is_cube(id) && !block::is_plant(id));
+            assert!(block::is_solid(id), "attach fixtures stay targetable");
+            assert!(block::solid_boxes(id, 0).is_empty(), "attach fixtures are walk-through");
+            assert!(!block::attach_boxes(id, 0).is_empty(), "attach fixtures have render geometry");
+        }
+        assert_eq!(block::light_emission(block::TORCH), 14, "torch glow survives RenderKind change");
+        // State round-trips face + on/pressed; bits 4-5 stay zero (reserved for P31 redstone).
+        let s = block::attach_state(block::ATTACH_PX, true);
+        assert_eq!(block::attach_face(s), block::ATTACH_PX);
+        assert!(block::attach_on(s));
+        assert_eq!(s >> 4, 0, "reserved redstone bits must be zero");
+        // The wall-torch box hugs its support wall: ATTACH_PZ (support at +Z) reaches z = 1.0; ATTACH_NX
+        // (support at -X) reaches x = 0.0. The floor torch is centered on the cell floor (y starts at 0).
+        assert_eq!(block::attach_boxes(block::TORCH, block::attach_state(block::ATTACH_PZ, false))[0][5], 1.0);
+        assert_eq!(block::attach_boxes(block::TORCH, block::attach_state(block::ATTACH_NX, false))[0][0], 0.0);
+        assert_eq!(block::attach_boxes(block::TORCH, block::ATTACH_FLOOR)[0][1], 0.0);
     }
 
     #[test]

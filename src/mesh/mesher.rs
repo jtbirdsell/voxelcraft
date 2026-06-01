@@ -290,6 +290,26 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     }
                 }
             }
+            // Torch/lever/button: small box(es) on a floor/wall attach face (per the state byte).
+            // Walk-through (solid_boxes = BOX_NONE); the torch's block-light glow is id-keyed and so
+            // survives the move off RenderKind::Cube. Per-cell, never greedy.
+            block::RenderKind::Attach => {
+                let st = neigh.state_at(x, y, z);
+                for b in block::attach_boxes(id, st) {
+                    emit_box(
+                        &mut mesh.opaque,
+                        origin,
+                        x,
+                        y,
+                        z,
+                        [b[0], b[1], b[2]],
+                        [b[3], b[4], b[5]],
+                        id,
+                        l,
+                        0,
+                    );
+                }
+            }
             block::RenderKind::Cube => {}
         }
     }

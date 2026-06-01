@@ -55,9 +55,13 @@ pub const WOODEN_TRAPDOOR: BlockId = 43; // 1x1 thin; state = facing+half+open
 pub const WOODEN_FENCE: BlockId = 44;
 pub const COBBLESTONE_WALL: BlockId = 45;
 pub const GLASS_PANE: BlockId = 46;
+// Attachment-face fixtures (P11): small per-cell models mounted on a floor or wall face. Walk-through
+// and non-occluding; the torch keeps its block-light glow (id-keyed). state = attach face + on/pressed.
+pub const LEVER: BlockId = 47;
+pub const BUTTON: BlockId = 48;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = GLASS_PANE;
+pub const MAX_BLOCK: BlockId = BUTTON;
 
 #[inline]
 pub fn is_fence(id: BlockId) -> bool {
@@ -235,6 +239,9 @@ pub enum RenderKind {
     Trapdoor,
     /// Fence / wall / glass-pane: a post + arms toward connecting neighbors (derived at mesh time).
     Connect,
+    /// Small attached fixture (torch/lever/button): a box (or two) on a floor/wall face. Walk-through,
+    /// non-occluding, emitted per-cell; the attach face lives in the block-state byte (P11).
+    Attach,
 }
 
 #[inline]
@@ -248,6 +255,7 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         WOODEN_DOOR => RenderKind::Door,
         WOODEN_TRAPDOOR => RenderKind::Trapdoor,
         WOODEN_FENCE | COBBLESTONE_WALL | GLASS_PANE => RenderKind::Connect,
+        TORCH | LEVER | BUTTON => RenderKind::Attach,
         _ => RenderKind::Cube,
     }
 }
@@ -256,6 +264,13 @@ pub fn render_kind(id: BlockId) -> RenderKind {
 #[inline]
 pub fn is_plant(id: BlockId) -> bool {
     matches!(render_kind(id), RenderKind::Cross)
+}
+
+/// A small attached fixture (torch/lever/button): walk-through and non-occluding (like a plant), but
+/// targetable (so it can be broken) and emitted as a 3D box rather than a cross-billboard.
+#[inline]
+pub fn is_attach(id: BlockId) -> bool {
+    matches!(render_kind(id), RenderKind::Attach)
 }
 
 /// A partial-geometry block (slab/stairs): solid for collision but emitted per-cell, not greedy.
@@ -337,6 +352,94 @@ const TRAP_OPEN: [[Aabb; 1]; 4] = [
 const FENCE_COLLIDE: [Aabb; 1] = [[0.25, 0.0, 0.25, 0.75, 1.5, 0.75]];
 const PANE_COLLIDE: [Aabb; 1] = [[0.25, 0.0, 0.25, 0.75, 1.0, 0.75]];
 
+// ── Attachment fixtures (torch/lever/button) ──────────────────────────────────────────────────────
+// state bits 0-2 select the attach face (the direction from the block's cell toward the support it
+// hangs on); bit 3 is on/pressed; bits 4-5 reserved for P31 redstone (powered / is-source).
+pub const ATTACH_FLOOR: u8 = 0; // support below (sits on a floor)
+pub const ATTACH_PZ: u8 = 1; // support wall at +Z (placed against a block's -Z face)
+pub const ATTACH_PX: u8 = 2; // support wall at +X
+pub const ATTACH_NZ: u8 = 3; // support wall at -Z
+pub const ATTACH_NX: u8 = 4; // support wall at -X
+
+#[inline]
+pub fn attach_face(state: u8) -> u8 {
+    state & 0b111
+}
+#[inline]
+pub fn attach_on(state: u8) -> bool {
+    (state >> 3) & 1 != 0
+}
+/// Pack an attach state (bits 4-5 left zero — reserved for P31 redstone).
+#[inline]
+pub fn attach_state(face: u8, on: bool) -> u8 {
+    (face & 0b111) | ((on as u8) << 3)
+}
+
+// Torch: a thin 2px stick. On the floor it stands centered; on a wall it sits raised against that
+// wall (a simple straightened approximation of Minecraft's angled wall torch — reads clearly at range).
+const TORCH_FLOOR: [Aabb; 1] = [[0.4375, 0.0, 0.4375, 0.5625, 0.625, 0.5625]];
+const TORCH_PZ: [Aabb; 1] = [[0.4375, 0.20, 0.75, 0.5625, 0.825, 1.0]];
+const TORCH_NZ: [Aabb; 1] = [[0.4375, 0.20, 0.0, 0.5625, 0.825, 0.25]];
+const TORCH_PX: [Aabb; 1] = [[0.75, 0.20, 0.4375, 1.0, 0.825, 0.5625]];
+const TORCH_NX: [Aabb; 1] = [[0.0, 0.20, 0.4375, 0.25, 0.825, 0.5625]];
+// Lever: a base plate flush to the attach face + a short handle stub rising out of it.
+const LEVER_FLOOR: [Aabb; 2] = [
+    [0.3125, 0.0, 0.375, 0.6875, 0.1875, 0.625],
+    [0.4375, 0.1875, 0.4375, 0.5625, 0.5, 0.5625],
+];
+const LEVER_PZ: [Aabb; 2] = [
+    [0.3125, 0.25, 0.8125, 0.6875, 0.75, 1.0],
+    [0.4375, 0.4375, 0.5, 0.5625, 0.5625, 0.8125],
+];
+const LEVER_NZ: [Aabb; 2] = [
+    [0.3125, 0.25, 0.0, 0.6875, 0.75, 0.1875],
+    [0.4375, 0.4375, 0.1875, 0.5625, 0.5625, 0.5],
+];
+const LEVER_PX: [Aabb; 2] = [
+    [0.8125, 0.25, 0.3125, 1.0, 0.75, 0.6875],
+    [0.5, 0.4375, 0.4375, 0.8125, 0.5625, 0.5625],
+];
+const LEVER_NX: [Aabb; 2] = [
+    [0.0, 0.25, 0.3125, 0.1875, 0.75, 0.6875],
+    [0.1875, 0.4375, 0.4375, 0.5, 0.5625, 0.5625],
+];
+// Button: a shallow pad proud of the attach face.
+const BUTTON_FLOOR: [Aabb; 1] = [[0.3125, 0.0, 0.375, 0.6875, 0.125, 0.625]];
+const BUTTON_PZ: [Aabb; 1] = [[0.3125, 0.375, 0.875, 0.6875, 0.625, 1.0]];
+const BUTTON_NZ: [Aabb; 1] = [[0.3125, 0.375, 0.0, 0.6875, 0.625, 0.125]];
+const BUTTON_PX: [Aabb; 1] = [[0.875, 0.375, 0.3125, 1.0, 0.625, 0.6875]];
+const BUTTON_NX: [Aabb; 1] = [[0.0, 0.375, 0.3125, 0.125, 0.625, 0.6875]];
+
+/// The render sub-boxes of an attach fixture (torch/lever/button) for its attach face. Render-only:
+/// collision is empty (solid_boxes returns BOX_NONE), so these boxes drive the mesher alone.
+pub fn attach_boxes(id: BlockId, state: u8) -> &'static [Aabb] {
+    let face = attach_face(state);
+    match id {
+        TORCH => match face {
+            ATTACH_PZ => &TORCH_PZ,
+            ATTACH_PX => &TORCH_PX,
+            ATTACH_NZ => &TORCH_NZ,
+            ATTACH_NX => &TORCH_NX,
+            _ => &TORCH_FLOOR,
+        },
+        LEVER => match face {
+            ATTACH_PZ => &LEVER_PZ,
+            ATTACH_PX => &LEVER_PX,
+            ATTACH_NZ => &LEVER_NZ,
+            ATTACH_NX => &LEVER_NX,
+            _ => &LEVER_FLOOR,
+        },
+        BUTTON => match face {
+            ATTACH_PZ => &BUTTON_PZ,
+            ATTACH_PX => &BUTTON_PX,
+            ATTACH_NZ => &BUTTON_NZ,
+            ATTACH_NX => &BUTTON_NX,
+            _ => &BUTTON_FLOOR,
+        },
+        _ => &BOX_NONE,
+    }
+}
+
 /// The upper-step box (above the bottom slab) of a stair, given its facing.
 #[inline]
 pub fn stair_upper_box(facing: u8) -> Aabb {
@@ -395,6 +498,9 @@ pub fn solid_boxes(id: BlockId, state: u8) -> &'static [Aabb] {
                 &FENCE_COLLIDE
             }
         }
+        // Attach fixtures (torch/lever/button): walk-through. Render geometry is the small box(es) in
+        // attach_boxes (emitted by the mesher); collision is empty so you can stand in a torch's cell.
+        RenderKind::Attach => &BOX_NONE,
         _ => &BOX_FULL,
     }
 }
@@ -418,6 +524,7 @@ pub fn is_opaque(id: BlockId) -> bool {
         && id != COBBLESTONE_WALL
         && id != GLASS_PANE
         && !is_plant(id)
+        && !is_attach(id)
         && !is_partial(id)
 }
 
@@ -496,6 +603,8 @@ pub fn display_name(id: BlockId) -> &'static str {
         WOODEN_FENCE => "Wooden Fence",
         COBBLESTONE_WALL => "Cobblestone Wall",
         GLASS_PANE => "Glass Pane",
+        LEVER => "Lever",
+        BUTTON => "Button",
         _ => "Unknown",
     }
 }
@@ -569,6 +678,8 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         COBBLESTONE_WALL => [0.42, 0.42, 0.44],                            // cobble
         GLASS_PANE => [0.82, 0.91, 0.98],                                  // glass
         WOOD_SLAB => [0.62, 0.48, 0.30], // planks
+        LEVER => [0.62, 0.48, 0.30],     // planks (matches tile::PLANKS average)
+        BUTTON => [0.49, 0.49, 0.52],    // stone (matches tile::STONE average)
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -668,6 +779,7 @@ pub fn hardness(id: BlockId) -> f32 {
         GLASS | GLASS_PANE => 0.3,
         STONE_SLAB | STONE_STAIRS => 1.5,
         WOOD_SLAB => 1.2,
+        LEVER | BUTTON => 0.5,
         _ if is_plant(id) => 0.0,
         _ => 1.0,
     }
@@ -681,7 +793,7 @@ pub fn tool_class(id: BlockId) -> ToolClass {
         ICE | STONE_SLAB | STONE_STAIRS => ToolClass::Pickaxe,
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB | WOODEN_DOOR
         | WOODEN_TRAPDOOR | WOODEN_FENCE => ToolClass::Axe,
-        COBBLESTONE_WALL => ToolClass::Pickaxe,
+        COBBLESTONE_WALL | BUTTON => ToolClass::Pickaxe,
         DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
         _ => ToolClass::None,
     }
@@ -870,6 +982,8 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         WOOD_SLAB | WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => tile::PLANKS,
         COBBLESTONE_WALL => tile::COBBLE,
         GLASS_PANE => tile::GLASS,
+        LEVER => tile::PLANKS,
+        BUTTON => tile::STONE,
         _ => tile::MAGENTA,
     }
 }
