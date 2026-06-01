@@ -31,11 +31,85 @@ const FLUID_BUDGET: usize = 96;
 const WATER_SPREAD: u8 = 7;
 const LAVA_SPREAD: u8 = 3;
 
-/// Natural-spawn tuning (M31).
+/// Natural-spawn tuning (P16: light + biome-gated, per-category caps, packs).
 const SPAWN_INTERVAL: f32 = 2.0; // seconds between spawn attempts
-const MOB_CAP: usize = 16; // stop spawning past this many live mobs
-const SPAWN_MIN: f32 = 8.0; // spawn ring around the player (blocks)
-const SPAWN_MAX: f32 = 24.0;
+const HOSTILE_CAP: usize = 12; // max live hostile mobs (continuous night spawning is MC-faithful)
+const PASSIVE_CAP: usize = 8; // max live passive animals
+const PASSIVE_MIN: f32 = 8.0; // animals may spawn close (8..24 ring)
+const PASSIVE_MAX: f32 = 24.0;
+const HOSTILE_MIN: f32 = 16.0; // a no-spawn bubble so hostiles don't appear point-blank (MC ~24)
+const HOSTILE_MAX: f32 = 32.0; // ...but inside DESPAWN_RADIUS(48) so they don't instantly vanish
+const PACK_SIZE: usize = 4; // animals spawn in clusters of this size
+const PACK_RADIUS: i32 = 3; // pack scatter radius (blocks)
+
+/// Binary sky-light at `wp` (0 or 15): 15 if no skylight-blocking block sits anywhere in the column
+/// above, up to `top`. Mirrors the mesher's open-to-sky model (light.rs) but reads live via `block_at`.
+/// Pure (closure-parameterized) so it is unit-testable without a GPU-backed Game.
+fn sky_light(wp: IVec3, top: i32, block_at: &impl Fn(IVec3) -> crate::block::BlockId) -> u8 {
+    let mut y = wp.y + 1;
+    while y < top {
+        if crate::block::blocks_skylight(block_at(IVec3::new(wp.x, y, wp.z))) {
+            return 0;
+        }
+        y += 1;
+    }
+    15
+}
+
+/// Block-light at `wp` (0..15): a bounded BFS from emitters within radius 15, stepping −1 per cell and
+/// stopping at `is_volume_solid` occluders — the same model the mesher's flood uses (light.rs), but
+/// wp-centered (so it is cleaner than the mesher's chunk-local approximation near chunk seams). Pure.
+fn block_light(wp: IVec3, block_at: &impl Fn(IVec3) -> crate::block::BlockId) -> u8 {
+    use crate::block;
+    const R: i32 = 15;
+    let mut sources: Vec<(IVec3, u8)> = Vec::new();
+    for dy in -R..=R {
+        for dz in -R..=R {
+            for dx in -R..=R {
+                let p = IVec3::new(wp.x + dx, wp.y + dy, wp.z + dz);
+                let e = block::light_emission(block_at(p));
+                if e > 0 {
+                    sources.push((p, e));
+                }
+            }
+        }
+    }
+    if sources.is_empty() {
+        return 0;
+    }
+    const N: i32 = 2 * R + 1;
+    let idx = |p: IVec3| (((p.x - wp.x + R)) + N * ((p.z - wp.z + R) + N * (p.y - wp.y + R))) as usize;
+    let mut level = vec![0u8; (N * N * N) as usize];
+    let mut q = std::collections::VecDeque::new();
+    for (p, e) in sources {
+        let i = idx(p);
+        if e > level[i] {
+            level[i] = e;
+            q.push_back(p);
+        }
+    }
+    while let Some(p) = q.pop_front() {
+        let l = level[idx(p)];
+        if l <= 1 {
+            continue;
+        }
+        for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+            let np = IVec3::new(p.x + dx, p.y + dy, p.z + dz);
+            if (np.x - wp.x).abs() > R || (np.y - wp.y).abs() > R || (np.z - wp.z).abs() > R {
+                continue;
+            }
+            if block::is_volume_solid(block_at(np)) {
+                continue;
+            }
+            let (nl, ni) = (l - 1, idx(np));
+            if nl > level[ni] {
+                level[ni] = nl;
+                q.push_back(np);
+            }
+        }
+    }
+    level[idx(wp)]
+}
 
 /// Creeper blast damage at distance `d` from the center: max at the center, linear falloff to 0 at
 /// `radius * 1.6`.
@@ -928,44 +1002,117 @@ impl Game {
         None
     }
 
-    /// One natural-spawn attempt around the player: hostiles at night, passives by day on grass.
-    /// `day` is the day factor (0 = night, 1 = full day). Capped + only on solid footing.
-    pub fn try_spawn(&mut self, day: f32, player_pos: Vec3) -> bool {
-        if self.entities.mob_count() >= MOB_CAP {
-            return false;
+    /// Sky-light at a world cell (0 or 15, binary like the mesher): 15 if open to the sky straight up.
+    fn sky_light_at(&self, wp: IVec3) -> u8 {
+        sky_light(wp, WORLD_HEIGHT_CHUNKS * CHUNK_SIZE_I, &|p| self.block_at(p))
+    }
+
+    /// Block-light at a world cell (0..15). A cheap chunk-`emitter_count` precheck skips the full
+    /// flood on the common no-emitter case (the open surface), so this is usually O(a few chunk reads).
+    fn block_light_at(&self, wp: IVec3) -> u8 {
+        const R: i32 = 15;
+        let (c0, c1) = (world::chunk_of(wp - IVec3::splat(R)), world::chunk_of(wp + IVec3::splat(R)));
+        let mut any = false;
+        'outer: for cx in c0.x..=c1.x {
+            for cy in c0.y..=c1.y {
+                for cz in c0.z..=c1.z {
+                    if self.world.get(IVec3::new(cx, cy, cz)).is_some_and(|c| c.emitter_count > 0) {
+                        any = true;
+                        break 'outer;
+                    }
+                }
+            }
         }
+        if !any {
+            return 0;
+        }
+        block_light(wp, &|p| self.block_at(p))
+    }
+
+    /// Live hostile / passive mob counts (P16 spawn caps).
+    pub fn hostile_count(&self) -> usize {
+        self.entities.hostile_count()
+    }
+    pub fn passive_count(&self) -> usize {
+        self.entities.passive_count()
+    }
+
+    /// Spawn a pack of `species` clustered near (wx,wz): each member re-scans for valid grass footing
+    /// (open to sky), skips already-used cells (no stacking), and respects PASSIVE_CAP. Returns how
+    /// many actually spawned (fewer near edges/obstacles). Deterministic via `spawn_rand`.
+    fn spawn_passive_pack(&mut self, species: crate::entity::Species, wx: i32, wz: i32) -> usize {
+        let mut spawned = 0;
+        let mut used: Vec<(i32, i32)> = Vec::new();
+        let mut attempts = 0;
+        while spawned < PACK_SIZE && attempts < PACK_SIZE * 4 {
+            attempts += 1;
+            if self.entities.passive_count() >= PASSIVE_CAP {
+                break;
+            }
+            let r = self.spawn_rand();
+            let (cx, cz) = (wx + (r % 7) as i32 - PACK_RADIUS, wz + ((r >> 8) % 7) as i32 - PACK_RADIUS);
+            if used.contains(&(cx, cz)) {
+                continue;
+            }
+            let Some((sy, surf)) = self.surface_at(cx, cz) else { continue };
+            if surf != block::GRASS || self.sky_light_at(IVec3::new(cx, sy + 1, cz)) < 15 {
+                continue;
+            }
+            used.push((cx, cz));
+            self.entities
+                .spawn_mob(Vec3::new(cx as f32 + 0.5, (sy + 1) as f32, cz as f32 + 0.5), species);
+            spawned += 1;
+        }
+        spawned
+    }
+
+    /// One natural-spawn attempt around the player (P16): at night, a HOSTILE on any solid surface in
+    /// the dark (block-light 0, MC 1.18+); by day, a biome-appropriate PASSIVE PACK on lit grass. Each
+    /// category has its own ring + cap. `day` is the day factor (0 = night, 1 = full day).
+    pub fn try_spawn(&mut self, day: f32, player_pos: Vec3) -> bool {
         use crate::entity::Species;
-        const HOSTILE: [Species; 4] = [
-            Species::Zombie,
-            Species::Skeleton,
-            Species::Creeper,
-            Species::Spider,
-        ];
-        const PASSIVE: [Species; 4] = [
-            Species::Cow,
-            Species::Pig,
-            Species::Sheep,
-            Species::Chicken,
-        ];
+        const HOSTILE: [Species; 4] =
+            [Species::Zombie, Species::Skeleton, Species::Creeper, Species::Spider];
+        let night = day < 0.35 && self.difficulty.spawns_hostiles();
+        let daytime = day > 0.6;
+        if !night && !daytime {
+            return false; // dawn/dusk: no spawns
+        }
         let r = self.spawn_rand();
+        let (rmin, rmax) = if night { (HOSTILE_MIN, HOSTILE_MAX) } else { (PASSIVE_MIN, PASSIVE_MAX) };
         let angle = (r & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
-        let dist = SPAWN_MIN + ((r >> 16) & 0xffff) as f32 / 65535.0 * (SPAWN_MAX - SPAWN_MIN);
+        let dist = rmin + ((r >> 16) & 0xffff) as f32 / 65535.0 * (rmax - rmin);
         let wx = (player_pos.x + angle.cos() * dist).floor() as i32;
         let wz = (player_pos.z + angle.sin() * dist).floor() as i32;
         let Some((sy, surf)) = self.surface_at(wx, wz) else {
             return false;
         };
-        let pos = Vec3::new(wx as f32 + 0.5, (sy + 1) as f32, wz as f32 + 0.5);
-        let pick = ((r >> 32) & 3) as usize;
-        if day < 0.35 && self.difficulty.spawns_hostiles() {
-            self.entities.spawn_mob(pos, HOSTILE[pick]);
-            true
-        } else if day > 0.6 && surf == block::GRASS {
-            self.entities.spawn_mob(pos, PASSIVE[pick]);
-            true
-        } else {
-            false
+        let feet = IVec3::new(wx, sy + 1, wz);
+
+        if night {
+            // Hostiles on any solid surface, only where it's genuinely dark (no nearby torch/glowstone).
+            if self.entities.hostile_count() >= HOSTILE_CAP || self.block_light_at(feet) > 0 {
+                return false;
+            }
+            let pick = ((r >> 32) & 3) as usize;
+            self.entities
+                .spawn_mob(Vec3::new(wx as f32 + 0.5, (sy + 1) as f32, wz as f32 + 0.5), HOSTILE[pick]);
+            return true;
         }
+
+        // Daytime passive pack on lit grass, species drawn from the biome's pool.
+        if surf != block::GRASS || self.entities.passive_count() >= PASSIVE_CAP {
+            return false;
+        }
+        if self.sky_light_at(feet) < 15 {
+            return false; // shaded/cave grass — animals need open sky
+        }
+        let pool = self.worldgen.passive_pool(wx, wz);
+        if pool.is_empty() {
+            return false;
+        }
+        let species = pool[((r >> 32) as usize) % pool.len()];
+        self.spawn_passive_pack(species, wx, wz) > 0
     }
 
     /// Furnace state at `pos`, creating an empty one (the player just opened it).
@@ -1070,12 +1217,9 @@ impl Game {
         self.entities.ai_summary()
     }
 
-    /// Passive/hostile mob tally + live mob count (headless spawn verification).
+    /// Passive/hostile mob tally (headless spawn verification).
     pub fn mob_species_summary(&self) -> String {
         self.entities.species_summary()
-    }
-    pub fn mob_count(&self) -> usize {
-        self.entities.mob_count()
     }
     pub fn despawn_all_mobs(&mut self) {
         self.entities.clear_mobs();
@@ -1204,6 +1348,39 @@ impl Game {
 mod furnace_tests {
     use super::*;
     use crate::item::ItemStack;
+    use std::collections::HashMap;
+
+    #[test]
+    fn sky_light_open_vs_roofed() {
+        // Open column → full sky-light; a solid block anywhere above → dark.
+        let open: HashMap<IVec3, block::BlockId> = HashMap::new();
+        assert_eq!(sky_light(IVec3::new(0, 64, 0), 256, &|p| *open.get(&p).unwrap_or(&block::AIR)), 15);
+        let mut roofed = HashMap::new();
+        roofed.insert(IVec3::new(0, 70, 0), block::STONE);
+        assert_eq!(sky_light(IVec3::new(0, 64, 0), 256, &|p| *roofed.get(&p).unwrap_or(&block::AIR)), 0);
+    }
+
+    #[test]
+    fn block_light_flood_and_occlusion() {
+        // A torch (emission 14) 3 cells away → 14 - 3 = 11; no emitter → 0.
+        let mut w = HashMap::new();
+        w.insert(IVec3::new(3, 64, 0), block::TORCH);
+        assert_eq!(block_light(IVec3::new(0, 64, 0), &|p| *w.get(&p).unwrap_or(&block::AIR)), 11);
+        let none: HashMap<IVec3, block::BlockId> = HashMap::new();
+        assert_eq!(block_light(IVec3::new(0, 64, 0), &|p| *none.get(&p).unwrap_or(&block::AIR)), 0);
+        // A solid wall between the torch and the target forces a longer detour → dimmer than 11.
+        let mut walled = HashMap::new();
+        walled.insert(IVec3::new(3, 64, 0), block::TORCH);
+        for dy in -2..=2 {
+            for dz in -2..=2 {
+                walled.insert(IVec3::new(1, 64 + dy, dz), block::STONE);
+            }
+        }
+        assert!(
+            block_light(IVec3::new(0, 64, 0), &|p| *walled.get(&p).unwrap_or(&block::AIR)) < 11,
+            "a wall attenuates the torch light"
+        );
+    }
 
     /// One full smelt cycle: ore + fuel → an ingot, the input drops by one, fuel keeps burning.
     #[test]

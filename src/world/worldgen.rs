@@ -98,6 +98,19 @@ impl Worldgen {
         }
     }
 
+    /// Passive species that may spawn on the surface at this column (empty = none here). Only the
+    /// grass biomes (Plains/Forest) have a walkable grass surface (see `surface_top`), and the spawn
+    /// code gates passives on grass — so the other biomes never reach this and correctly get none.
+    /// Desert/cold-biome fauna (husks, rabbits, …) are deferred until those mobs + surfaces exist.
+    pub fn passive_pool(&self, wx: i32, wz: i32) -> &'static [crate::entity::Species] {
+        use crate::entity::Species::*;
+        let h = self.height(wx, wz);
+        match self.biome(wx, wz, h) {
+            Biome::Plains | Biome::Forest => &[Cow, Pig, Sheep, Chicken],
+            _ => &[],
+        }
+    }
+
     /// Human-readable biome name at a world column (for the F3 debug overlay).
     pub fn biome_name(&self, wx: i32, wz: i32) -> &'static str {
         let h = self.height(wx, wz);

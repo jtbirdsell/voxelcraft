@@ -1500,21 +1500,30 @@ impl ApplicationHandler for App {
                 log::info!("M30 explosion: radial player damage {dmg:.1}");
             }
 
-            // Debug: VOXELCRAFT_SPAWN=1 exercises M31 natural spawning rules + cap + despawn.
+            // Debug: VOXELCRAFT_SPAWN=1 exercises P16 light/biome-gated spawning + per-category caps.
             if std::env::var("VOXELCRAFT_SPAWN").is_ok() {
-                for _ in 0..80 {
-                    game.try_spawn(1.0, player.position); // day → passives on grass only
+                for _ in 0..160 {
+                    game.try_spawn(1.0, player.position); // day → passive packs on lit grass
                 }
-                log::info!("M31 day spawns (passive on grass): {}", game.mob_species_summary());
+                log::info!(
+                    "P16 day spawns: {} (passive_count={})",
+                    game.mob_species_summary(),
+                    game.passive_count()
+                );
+                assert!(game.passive_count() <= 8, "passive cap holds");
                 game.despawn_all_mobs();
-                for _ in 0..80 {
-                    game.try_spawn(0.0, player.position); // night → hostiles
+                for _ in 0..160 {
+                    game.try_spawn(0.0, player.position); // night → hostiles in the dark
                 }
-                log::info!("M31 night spawns (hostile): {}", game.mob_species_summary());
-                log::info!("M31 cap held at {} mobs (cap 16)", game.mob_count());
+                log::info!(
+                    "P16 night spawns: {} (hostile_count={})",
+                    game.mob_species_summary(),
+                    game.hostile_count()
+                );
+                assert!(game.hostile_count() <= 12, "hostile cap holds");
                 // Despawn-radius: a tick with the player teleported far culls the distant mobs.
                 let _ = game.update(&gpu, &renderer, Vec3::splat(5000.0), 0.1, 0.0);
-                log::info!("M31 after far tick (despawn): {}", game.mob_species_summary());
+                log::info!("P16 after far tick (despawn): {}", game.mob_species_summary());
             }
 
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.

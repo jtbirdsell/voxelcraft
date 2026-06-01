@@ -350,12 +350,22 @@ impl Entities {
         self.list.len()
     }
 
-    /// Number of live mobs (excludes dropped items, XP orbs, arrows) — for the spawn cap.
+    /// Number of live mobs (excludes dropped items, XP orbs, arrows). Test-only since P16 replaced the
+    /// single spawn cap with per-category counts (hostile_count/passive_count).
+    #[cfg(test)]
     pub fn mob_count(&self) -> usize {
         self.list
             .iter()
             .filter(|e| matches!(e.kind, Kind::Mob(_)))
             .count()
+    }
+
+    /// Live hostile / passive mob counts (P16 per-category spawn caps).
+    pub fn hostile_count(&self) -> usize {
+        self.list.iter().filter(|e| matches!(e.kind, Kind::Mob(m) if m.species.hostile())).count()
+    }
+    pub fn passive_count(&self) -> usize {
+        self.list.iter().filter(|e| matches!(e.kind, Kind::Mob(m) if !m.species.hostile())).count()
     }
 
     /// Feet position of the i-th live mob (P15 navigation tests).
@@ -1600,5 +1610,17 @@ mod tests {
         }
         assert!(es.mob_pos(0).x > 3.0, "zombie advanced toward the player (x={})", es.mob_pos(0).x);
         assert!(es.mob_pos(0).y >= 1.9, "zombie climbed onto the plateau (y={})", es.mob_pos(0).y);
+    }
+
+    #[test]
+    fn per_category_mob_counts() {
+        // P16 spawn caps count hostiles and passives separately.
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::ZERO, Species::Cow);
+        es.spawn_mob(Vec3::ZERO, Species::Pig);
+        es.spawn_mob(Vec3::ZERO, Species::Zombie);
+        assert_eq!(es.mob_count(), 3);
+        assert_eq!(es.passive_count(), 2);
+        assert_eq!(es.hostile_count(), 1);
     }
 }
