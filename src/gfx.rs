@@ -26,4 +26,5 @@ pub(crate) mod rt;
 pub(crate) mod rt_probe;
 pub(crate) mod rt_spike;
 pub(crate) mod texture;
+pub(crate) mod viewmodel;
 pub(crate) mod voxel_volume;

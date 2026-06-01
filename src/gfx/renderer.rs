@@ -101,7 +101,37 @@ pub struct ChunkRenderer {
     gi_accum: bool,
     gi_temporal_bgl: Option<wgpu::BindGroupLayout>,
     gi_temporal_pipeline: Option<wgpu::ComputePipeline>,
+    /// M34-VM first-person view-model: a tiny LDR 3D pass drawn AFTER the DLSS resolve + ACES tonemap
+    /// (so it never touches the HDR scene / G-buffer / motion guides). Has its own output-resolution
+    /// depth, cleared each pass + recreated on resize.
+    viewmodel_pipeline: wgpu::RenderPipeline,
+    viewmodel_buffer: wgpu::Buffer,
+    viewmodel_bind_group: wgpu::BindGroup,
+    viewmodel_depth_view: wgpu::TextureView,
     sky_color: Cell<wgpu::Color>,
+}
+
+/// One frame's view-model draw: the (already view-space) geometry, the projection + brightness
+/// uniform, and the private depth target to clear + test against.
+pub struct ViewModelDraw<'a> {
+    pub mesh: &'a GpuPart,
+    pub depth: &'a wgpu::TextureView,
+    pub uniform: crate::viewmodel::ViewModelUniform,
+}
+
+/// Create the view-model's private depth texture at the given output resolution.
+fn make_viewmodel_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("viewmodel-depth"),
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 impl ChunkRenderer {
@@ -272,6 +302,92 @@ impl ChunkRenderer {
                 },
             ],
         });
+
+        // M34-VM: first-person view-model pipeline. group(0) = its proj+brightness uniform, group(1) =
+        // the (reused) block atlas. Reuses the unified Vertex so the geometry builders feed it directly.
+        let viewmodel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("viewmodel-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../assets/shaders/viewmodel.wgsl").into(),
+            ),
+        });
+        let viewmodel_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("viewmodel-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let viewmodel_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewmodel-uniform"),
+            size: std::mem::size_of::<crate::viewmodel::ViewModelUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let viewmodel_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewmodel-bg"),
+            layout: &viewmodel_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: viewmodel_buffer.as_entire_binding(),
+            }],
+        });
+        let viewmodel_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("viewmodel-pipeline-layout"),
+            bind_group_layouts: &[Some(&viewmodel_bgl), Some(&atlas_bgl)],
+            immediate_size: 0,
+        });
+        let viewmodel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("viewmodel-pipeline"),
+            layout: Some(&viewmodel_layout),
+            vertex: wgpu::VertexState {
+                module: &viewmodel_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &viewmodel_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let viewmodel_depth_view =
+            make_viewmodel_depth(device, gpu.config.width, gpu.config.height);
 
         // Optional group(3): the world TLAS, for hardware shadow rays (M33-G5).
         let as_bgl = if use_hw_rt {
@@ -1171,6 +1287,10 @@ impl ChunkRenderer {
             gi_accum,
             gi_temporal_bgl,
             gi_temporal_pipeline,
+            viewmodel_pipeline,
+            viewmodel_buffer,
+            viewmodel_bind_group,
+            viewmodel_depth_view,
             sky_color: Cell::new(wgpu::Color {
                 r: 0.46,
                 g: 0.64,
@@ -1182,6 +1302,63 @@ impl ChunkRenderer {
 
     pub fn set_sky(&self, color: wgpu::Color) {
         self.sky_color.set(color);
+    }
+
+    /// Recreate output-resolution-bound targets on window resize. Currently just the view-model's
+    /// private depth (the scene targets are owned by the app / DLSS). Call from the resize handler.
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.viewmodel_depth_view = make_viewmodel_depth(device, width, height);
+    }
+
+    /// Upload one frame's view-model geometry into a `GpuPart` (no BLAS — it never enters the world AS).
+    pub fn upload_viewmodel(&self, device: &wgpu::Device, geom: &Geometry) -> Option<GpuPart> {
+        upload_geometry(device, geom, false)
+    }
+
+    /// M34-VM: draw the first-person view-model into `color_view` over its own freshly-cleared depth.
+    /// `clear_color` clears the colour first (for the FG UI-recomposition layer); otherwise it draws
+    /// over the already-resolved frame. Runs after the tonemap, before the 2D HUD.
+    fn record_viewmodel(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        color_view: &wgpu::TextureView,
+        vm: &ViewModelDraw,
+        clear_color: bool,
+    ) {
+        gpu.queue
+            .write_buffer(&self.viewmodel_buffer, 0, bytemuck::bytes_of(&vm.uniform));
+        let load = if clear_color {
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+        } else {
+            wgpu::LoadOp::Load
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("viewmodel-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: vm.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.viewmodel_pipeline);
+        pass.set_bind_group(0, &self.viewmodel_bind_group, &[]);
+        pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        pass.set_vertex_buffer(0, vm.mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(vm.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..vm.mesh.index_count, 0, 0..1);
     }
 
     pub fn volume_bgl(&self) -> &wgpu::BindGroupLayout {
@@ -1788,6 +1965,8 @@ impl ChunkRenderer {
         // M33-G8-FG (Phase 4): also write the HUD-less scene + the UI layer for DLSS-G recomposition.
         hudless_view: Option<&wgpu::TextureView>,
         ui_view: Option<&wgpu::TextureView>,
+        // M34-VM: the first-person held item, drawn over the tonemapped scene + into the FG UI layer.
+        viewmodel: Option<&ViewModelDraw>,
     ) {
         // Fullscreen ACES resolve (HDR → LDR). The triangle covers every pixel; the clear is just a
         // defined initial state. Reused for both the swapchain and (Phase 4) the HUD-less buffer.
@@ -1813,17 +1992,29 @@ impl ChunkRenderer {
             pass.draw(0..3, 0..1);
         };
         tonemap(encoder, final_view);
-        // Phase 4: the HUD-less scene colour DLSS-G interpolates from (same tonemapped scene).
+        // Phase 4: the HUD-less scene colour DLSS-G interpolates from (same tonemapped scene). The
+        // view-model is NOT drawn here — it has no motion vectors, so it rides the UI layer instead.
         if let Some(hv) = hudless_view {
             tonemap(encoder, hv);
         }
 
-        // HUD over the real (presented) frame; then the FG UI-recomposition layer (transparent + HUD).
+        // View-model over the real (presented) frame, then HUD on top.
+        if let Some(vm) = viewmodel {
+            self.record_viewmodel(gpu, encoder, final_view, vm, false);
+        }
         if !ui_verts.is_empty() {
             self.draw_hud(gpu, encoder, final_view, ui_verts, false);
         }
+        // The FG UI-recomposition layer: clear → view-model → HUD (so the hand recomposites crisply on
+        // generated frames like the HUD, instead of ghosting against world motion in the scene layer).
         if let Some(uv) = ui_view {
-            self.draw_hud(gpu, encoder, uv, ui_verts, true);
+            match viewmodel {
+                Some(vm) => {
+                    self.record_viewmodel(gpu, encoder, uv, vm, true); // clears the layer, then the hand
+                    self.draw_hud(gpu, encoder, uv, ui_verts, false);
+                }
+                None => self.draw_hud(gpu, encoder, uv, ui_verts, true),
+            }
         }
     }
 
@@ -1916,6 +2107,7 @@ impl ChunkRenderer {
         ui_verts: &[UiVertex],
         hudless_view: Option<&wgpu::TextureView>,
         ui_view: Option<&wgpu::TextureView>,
+        viewmodel: Option<&ViewModelDraw>,
     ) {
         // 1. ACES tonemap the super-res HDR → super-res LDR (swapchain colour format).
         self.blit(encoder, &self.tonemap_pipeline, hdr_tonemap_bg, ss_ldr_view, "ss-tonemap");
@@ -1924,12 +2116,22 @@ impl ChunkRenderer {
         if let Some(hv) = hudless_view {
             self.blit(encoder, &self.ss_downscale_pipeline, ss_downscale_bg, hv, "ss-downscale-hudless");
         }
-        // 3. Crisp HUD at swapchain res; 4. the FG UI-recomposition layer.
+        // 3. View-model (swapchain res, never supersampled) → crisp HUD on top.
+        if let Some(vm) = viewmodel {
+            self.record_viewmodel(gpu, encoder, final_view, vm, false);
+        }
         if !ui_verts.is_empty() {
             self.draw_hud(gpu, encoder, final_view, ui_verts, false);
         }
+        // 4. The FG UI-recomposition layer: clear → view-model → HUD.
         if let Some(uv) = ui_view {
-            self.draw_hud(gpu, encoder, uv, ui_verts, true);
+            match viewmodel {
+                Some(vm) => {
+                    self.record_viewmodel(gpu, encoder, uv, vm, true);
+                    self.draw_hud(gpu, encoder, uv, ui_verts, false);
+                }
+                None => self.draw_hud(gpu, encoder, uv, ui_verts, true),
+            }
         }
     }
 
@@ -1950,11 +2152,12 @@ impl ChunkRenderer {
         ui_verts: &[UiVertex],
         hudless_view: Option<&wgpu::TextureView>,
         ui_view: Option<&wgpu::TextureView>,
+        viewmodel: Option<&ViewModelDraw>,
     ) {
         self.record(encoder, targets, depth_view, meshes, volume_bg, as_bg);
         self.record_highlight(gpu, encoder, &targets.hdr_view, depth_view, highlight);
         self.record_resolve(
-            gpu, encoder, &targets.tonemap_bg, final_view, ui_verts, hudless_view, ui_view,
+            gpu, encoder, &targets.tonemap_bg, final_view, ui_verts, hudless_view, ui_view, viewmodel,
         );
     }
 
@@ -2028,6 +2231,7 @@ impl ChunkRenderer {
         // `hudless_view` and the HUD alone into `ui_view`, for DLSS-G UI recomposition.
         hudless_view: Option<&wgpu::TextureView>,
         ui_view: Option<&wgpu::TextureView>,
+        viewmodel: Option<&ViewModelDraw>,
         dlss: Option<&mut crate::dlss::DlssRender>,
     ) {
         match dlss {
@@ -2084,10 +2288,12 @@ impl ChunkRenderer {
                         ui_verts,
                         hudless_view,
                         ui_view,
+                        viewmodel,
                     );
                 } else {
                     self.record_resolve(
                         gpu, &mut enc2, resolve_bg, final_view, ui_verts, hudless_view, ui_view,
+                        viewmodel,
                     );
                 }
                 gpu.queue.submit(Some(enc2.finish()));
@@ -2098,7 +2304,7 @@ impl ChunkRenderer {
                 });
                 self.record_full(
                     gpu, &mut enc, targets, final_view, scene_depth, meshes, volume_bg, as_bg,
-                    highlight, ui_verts, hudless_view, ui_view,
+                    highlight, ui_verts, hudless_view, ui_view, viewmodel,
                 );
                 gpu.queue.submit(Some(enc.finish()));
             }
@@ -2116,9 +2322,17 @@ impl ChunkRenderer {
         as_bg: Option<&wgpu::BindGroup>,
         highlight: Option<(IVec3, f32)>,
         ui_verts: &[UiVertex],
+        // M34-VM: this frame's view-model geometry + its projection/brightness uniform (the renderer
+        // supplies the private depth target). `None` when nothing is held / VM disabled.
+        viewmodel: Option<(&GpuPart, crate::viewmodel::ViewModelUniform)>,
         mut dlss: Option<&mut crate::dlss::DlssRender>,
         fg: Option<&mut crate::frame_gen::FrameGen>,
     ) {
+        let vmd = viewmodel.map(|(mesh, uniform)| ViewModelDraw {
+            mesh,
+            depth: &self.viewmodel_depth_view,
+            uniform,
+        });
         // M33-G8-FG: present through DLSS Frame Generation when active — the scene renders into the
         // acquired swapchain texture, FG tags the output-res depth/motion and inserts a generated
         // frame. With RR (Phase 3) the scene is rendered at render res and the guides are point-
@@ -2143,7 +2357,7 @@ impl ChunkRenderer {
             let presented = fg.present_frame(gpu, aspect, &depth, &motion, &hudless, &ui, |view| {
                 self.render_into(
                     gpu, targets, view, &gpu.depth_view, meshes, volume_bg, as_bg, highlight,
-                    ui_verts, Some(&hudless_view), Some(&ui_view), dlss.as_deref_mut(),
+                    ui_verts, Some(&hudless_view), Some(&ui_view), vmd.as_ref(), dlss.as_deref_mut(),
                 );
             });
             if presented {
@@ -2177,6 +2391,7 @@ impl ChunkRenderer {
             ui_verts,
             None,
             None,
+            vmd.as_ref(),
             dlss,
         );
         frame.present();

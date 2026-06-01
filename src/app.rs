@@ -114,6 +114,8 @@ struct State {
     /// F1 creative menu: the full reachable item list (built once) + the current page (scroll to flip).
     creative_palette: Vec<item::ItemId>,
     creative_page: usize,
+    /// M34-VM first-person view-model animation state (held item + swing/use/bob).
+    view_model: crate::viewmodel::ViewModel,
 }
 
 pub struct App {
@@ -1121,6 +1123,17 @@ impl App {
         } else {
             None
         };
+        // M34-VM: build the first-person held-item geometry (view space) + its projection/brightness
+        // uniform. VM1 uses a constant brightness; VM5 will sample the local block light.
+        let vm_light = 0.95;
+        let vm_geom = state
+            .view_model
+            .build_geometry(state.inventory.selected_item(), vm_light);
+        let vm_part = vm_geom
+            .as_ref()
+            .and_then(|g| state.renderer.upload_viewmodel(&state.gpu.device, g));
+        let vm_uniform = crate::viewmodel::ViewModelUniform::new(aspect, vm_light);
+        let viewmodel = vm_part.as_ref().map(|p| (p, vm_uniform));
         state.renderer.render_frame(
             &state.gpu,
             &state.targets,
@@ -1129,6 +1142,7 @@ impl App {
             as_bg.as_ref(),
             highlight,
             &ui,
+            viewmodel,
             state.dlss_render.as_mut(),
             state.frame_gen.as_mut(),
         );
@@ -1701,6 +1715,14 @@ impl ApplicationHandler for App {
             shot_inv.slots[9] = Some(item::ItemStack::new(item::item_of_block(block::COAL_ORE), 12));
             shot_inv.slots[11] = Some(item::ItemStack::new(item::item_of_block(block::DIRT), 64));
             shot_inv.slots[19] = Some(item::ItemStack::new(item::item_of_block(block::IRON_ORE), 5));
+            // M34-VM: VOXELCRAFT_HELD=<item_id> forces the held item so the view-model is screenshot-
+            // verifiable (default selected slot holds a diamond pickaxe — a non-block, no VM1 geometry).
+            if let Some(id) = std::env::var("VOXELCRAFT_HELD")
+                .ok()
+                .and_then(|s| s.trim().parse::<item::ItemId>().ok())
+            {
+                shot_inv.slots[shot_inv.selected] = Some(item::ItemStack::new(id, 1));
+            }
             // VOXELCRAFT_SURVIVAL=1 flips the HUD to survival mode with demo air/XP for verification.
             let survival_demo = std::env::var("VOXELCRAFT_SURVIVAL").is_ok();
             let mut ui = overlay::build_ui(
@@ -1790,6 +1812,15 @@ impl ApplicationHandler for App {
             if let Some(em) = &entity_mesh {
                 all.push(em);
             }
+            // M34-VM: build the held-item view-model for the shot (forced via VOXELCRAFT_HELD).
+            let vm_light = 0.95;
+            let vm_state = crate::viewmodel::ViewModel::default();
+            let vm_geom = vm_state.build_geometry(shot_inv.selected_item(), vm_light);
+            let vm_part = vm_geom
+                .as_ref()
+                .and_then(|g| renderer.upload_viewmodel(&gpu.device, g));
+            let vm_uniform = crate::viewmodel::ViewModelUniform::new(gpu.aspect(), vm_light);
+            let viewmodel = vm_part.as_ref().map(|p| (p, vm_uniform));
             capture::screenshot(
                 &gpu,
                 &renderer,
@@ -1800,6 +1831,7 @@ impl ApplicationHandler for App {
                 gpu.config.width,
                 gpu.config.height,
                 &camera_uniform,
+                viewmodel,
                 dlss_render.as_mut(),
                 &path,
             );
@@ -1932,6 +1964,7 @@ impl ApplicationHandler for App {
             difficulty,
             creative_palette: item::creative_palette(),
             creative_page: 0,
+            view_model: crate::viewmodel::ViewModel::default(),
         });
         self.set_grab(true);
     }
@@ -1945,6 +1978,8 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state.gpu.resize(size);
+                    // M34-VM: the view-model's private depth is output-resolution-bound.
+                    state.renderer.resize(&state.gpu.device, state.gpu.config.width, state.gpu.config.height);
                     // M33-G8-FG (Phase 4): the DLSS-G recomposition textures are swapchain-sized.
                     if let Some(fg) = state.frame_gen.as_mut() {
                         fg.resize(&state.gpu.device, state.gpu.config.width, state.gpu.config.height);

@@ -7,7 +7,7 @@ use crate::camera::CameraUniform;
 use crate::dlss::DlssRender;
 use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::overlay::UiVertex;
-use crate::renderer::{ChunkRenderer, GpuMesh};
+use crate::renderer::{ChunkRenderer, GpuMesh, GpuPart, ViewModelDraw};
 
 #[allow(clippy::too_many_arguments)]
 pub fn screenshot(
@@ -21,6 +21,8 @@ pub fn screenshot(
     height: u32,
     // The UN-jittered camera uniform; the DLSS path re-applies the per-frame jitter itself.
     camera_uniform: &CameraUniform,
+    // M34-VM: the first-person view-model geometry + uniform for this shot (built by the caller).
+    viewmodel: Option<(&GpuPart, crate::viewmodel::ViewModelUniform)>,
     dlss: Option<&mut DlssRender>,
     path: &str,
 ) {
@@ -58,6 +60,19 @@ pub fn screenshot(
         view_formats: &[],
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // M34-VM: the view-model's private depth (output res), cleared each pass like the live path's.
+    let vm_depth = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shot-vm-depth"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let vm_depth_view = vm_depth.create_view(&wgpu::TextureViewDescriptor::default());
 
     let bytes_per_pixel = 4u32;
     let unpadded_bytes_per_row = width * bytes_per_pixel;
@@ -174,6 +189,11 @@ pub fn screenshot(
             u.apply_jitter(d.jitter(), rw, rh);
             renderer.update_camera(gpu, &u);
         }
+        let vmd = viewmodel.map(|(mesh, uniform)| ViewModelDraw {
+            mesh,
+            depth: &vm_depth_view,
+            uniform,
+        });
         renderer.render_into(
             gpu,
             &targets,
@@ -186,6 +206,7 @@ pub fn screenshot(
             ui_verts,
             None,
             None,
+            vmd.as_ref(),
             dlss.as_deref_mut(),
         );
         if save_frames {

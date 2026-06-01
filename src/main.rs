@@ -23,7 +23,7 @@ pub(crate) use gameplay::{
 };
 pub(crate) use gfx::{
     camera, capture, device as gpu, dlss, environment, frame_gen, frustum, renderer, rt_probe,
-    rt_spike, texture, voxel_volume,
+    rt_spike, texture, viewmodel, voxel_volume,
 };
 pub(crate) use mesh::mesher;
 pub(crate) use ui::{font, overlay};
