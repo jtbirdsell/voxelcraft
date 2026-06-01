@@ -780,15 +780,30 @@ mod tests {
 
     #[test]
     fn block_drops_table() {
-        assert_eq!(block::drops(block::STONE), Some((block::COBBLESTONE, 1)));
-        assert_eq!(block::drops(block::GRASS), Some((block::DIRT, 1)));
-        assert_eq!(block::drops(block::LEAVES), None);
-        assert_eq!(block::drops(block::DIRT), Some((block::DIRT, 1)));
+        assert_eq!(block::drops(block::STONE, 0), Some((block::COBBLESTONE, 1)));
+        assert_eq!(block::drops(block::GRASS, 0), Some((block::DIRT, 1)));
+        assert_eq!(block::drops(block::LEAVES, 0), None);
+        assert_eq!(block::drops(block::DIRT, 0), Some((block::DIRT, 1)));
         // Ores drop their material item (not the ore block).
-        assert_eq!(block::drops(block::COAL_ORE), Some((COAL, 1)));
-        assert_eq!(block::drops(block::DIAMOND_ORE), Some((DIAMOND, 1)));
-        assert_eq!(block::drops(block::IRON_ORE), Some((RAW_IRON, 1)));
-        assert_eq!(block::drops(block::REDSTONE_ORE), Some((REDSTONE_DUST, 4)));
+        assert_eq!(block::drops(block::COAL_ORE, 0), Some((COAL, 1)));
+        assert_eq!(block::drops(block::DIAMOND_ORE, 0), Some((DIAMOND, 1)));
+        assert_eq!(block::drops(block::IRON_ORE, 0), Some((RAW_IRON, 1)));
+        assert_eq!(block::drops(block::REDSTONE_ORE, 0), Some((REDSTONE_DUST, 4)));
+        // A single slab drops one; a double slab drops two.
+        assert_eq!(block::drops(block::STONE_SLAB, block::SLAB_BOTTOM), Some((block::STONE_SLAB, 1)));
+        assert_eq!(block::drops(block::STONE_SLAB, block::SLAB_TOP), Some((block::STONE_SLAB, 1)));
+        assert_eq!(block::drops(block::STONE_SLAB, block::SLAB_DOUBLE), Some((block::STONE_SLAB, 2)));
+    }
+
+    #[test]
+    fn slab_collision_boxes_per_state() {
+        // Aabb = [minx,miny,minz, maxx,maxy,maxz]. Bottom = y0..0.5, top = y0.5..1, double = full.
+        let bottom = block::solid_boxes(block::STONE_SLAB, block::SLAB_BOTTOM)[0];
+        assert_eq!((bottom[1], bottom[4]), (0.0, 0.5));
+        let top = block::solid_boxes(block::STONE_SLAB, block::SLAB_TOP)[0];
+        assert_eq!((top[1], top[4]), (0.5, 1.0));
+        let double = block::solid_boxes(block::STONE_SLAB, block::SLAB_DOUBLE)[0];
+        assert_eq!((double[1], double[4]), (0.0, 1.0));
     }
 
     #[test]

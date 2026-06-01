@@ -195,9 +195,14 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
         let l = crate::light::at(&lightgrid, x, y, z);
         match kind {
             block::RenderKind::Cross => emit_cross(&mut mesh.opaque, origin, x, y, z, id, l),
-            // Bottom slab: a half-height box.
+            // Slab: a half-height box (bottom/top) or a full cube (double), per the state byte.
             block::RenderKind::Slab => {
-                emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l, 0)
+                let (lo, hi) = match block::slab_half(neigh.state_at(x, y, z)) {
+                    block::SLAB_TOP => ([0.0, 0.5, 0.0], [1.0, 1.0, 1.0]),
+                    block::SLAB_DOUBLE => ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+                    _ => ([0.0, 0.0, 0.0], [1.0, 0.5, 1.0]),
+                };
+                emit_box(&mut mesh.opaque, origin, x, y, z, lo, hi, id, l, 0);
             }
             // Stairs: a bottom slab + an upper half-box on the high side (per the block's facing). The
             // upper box's bottom face sits flush on the slab, so skip it (face 2 = -Y) — that removes

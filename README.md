@@ -80,6 +80,9 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
 - **Translucent glass** (its own alpha-blended, depth-writing render pass — see-through and tinted,
   non-occluding to light) plus **slabs and stairs** as half/partial blocks emitted through the
   mesher's per-cell path; the greedy mesher now splits geometry into opaque / water / glass buckets.
+  **Slabs** place as a **bottom or top half** (chosen by the clicked face / where on a side you click);
+  adding a matching slab into the empty half forms a **double slab** (a full block that drops two) —
+  carried in a per-block **block-state byte** (the same mechanism that orients stairs).
 - **Day/night** cycle with a dynamic sky, distance fog, translucent **water**, and **flowing fluids**
   (water/lava cellular simulation). Animated water ripples and lava.
 - **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /

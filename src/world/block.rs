@@ -68,6 +68,26 @@ pub fn stair_state(facing: u8) -> u8 {
     facing & 0b11
 }
 
+/// Slab block-state (bits 0-1): 0 = bottom half, 1 = top half, 2 = double (a full block formed by
+/// placing a matching slab into the empty half). A reserved value (3) decodes as bottom.
+pub const SLAB_BOTTOM: u8 = 0;
+pub const SLAB_TOP: u8 = 1;
+pub const SLAB_DOUBLE: u8 = 2;
+
+#[inline]
+pub fn slab_half(state: u8) -> u8 {
+    match state & 0b11 {
+        1 => SLAB_TOP,
+        2 => SLAB_DOUBLE,
+        _ => SLAB_BOTTOM,
+    }
+}
+
+#[inline]
+pub fn slab_state(half: u8) -> u8 {
+    half & 0b11
+}
+
 /// How a block is meshed: a full greedy cube, a cross billboard (plants), or a non-greedy partial
 /// shape (slab / stairs) emitted one cell at a time like a billboard.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -115,7 +135,9 @@ pub fn is_cube(id: BlockId) -> bool {
 }
 
 /// Whether a block occupies the ray-traced voxel volume as a full cube (casts shadows / AO). Glass
-/// is see-through (stored as 0); slabs/stairs are approximated as full cubes (like leaves today).
+/// is see-through (stored as 0); slabs/stairs are approximated as full cubes (a DOUBLE slab genuinely
+/// IS a full cube; a single slab is over-conservative here — per-state sky-transparency is a deferred
+/// refinement, kept id-only so the volume upload / light flood don't need the state byte).
 #[inline]
 pub fn is_volume_solid(id: BlockId) -> bool {
     is_opaque(id) || is_partial(id)
@@ -130,7 +152,8 @@ pub fn is_solid(id: BlockId) -> bool {
 /// A solid sub-box in a block's local 0..1 space: `[minx, miny, minz, maxx, maxy, maxz]`.
 pub type Aabb = [f32; 6];
 const BOX_FULL: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
-const BOX_SLAB: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
+const BOX_SLAB: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]; // bottom half
+const BOX_SLAB_TOP: [Aabb; 1] = [[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]]; // top half
 const BOX_NONE: [Aabb; 0] = [];
 // Stairs: a bottom slab + an upper half-box on the high side, one per facing (0:+z 1:+x 2:-z 3:-x).
 const SLAB_HALF: Aabb = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
@@ -159,7 +182,11 @@ pub fn solid_boxes(id: BlockId, state: u8) -> &'static [Aabb] {
         return &BOX_NONE;
     }
     match render_kind(id) {
-        RenderKind::Slab => &BOX_SLAB,
+        RenderKind::Slab => match slab_half(state) {
+            SLAB_TOP => &BOX_SLAB_TOP,
+            SLAB_DOUBLE => &BOX_FULL,
+            _ => &BOX_SLAB,
+        },
         RenderKind::Stairs => match stair_facing(state) {
             1 => &BOX_STAIRS_E,
             2 => &BOX_STAIRS_S,
@@ -449,7 +476,7 @@ pub fn breakable(id: BlockId) -> bool {
 /// yields cobblestone; grass yields dirt; leaves/ice/glass drop nothing; most blocks drop themselves.
 /// Tool gating (the right pickaxe tier) is enforced by the caller. Note: `ItemId == BlockId == u16`,
 /// so block-item and material ids mix freely here.
-pub fn drops(id: BlockId) -> Option<(crate::item::ItemId, u8)> {
+pub fn drops(id: BlockId, state: u8) -> Option<(crate::item::ItemId, u8)> {
     use crate::item;
     Some(match id {
         AIR => return None,
@@ -458,6 +485,8 @@ pub fn drops(id: BlockId) -> Option<(crate::item::ItemId, u8)> {
         LEAVES => return None, // saplings/apples arrive with tree variety + farming
         ICE => return None,    // melts away (no silk touch yet)
         GLASS => return None,  // shatters
+        // A double slab drops two slab items; a single drops one.
+        STONE_SLAB | WOOD_SLAB => (id, if slab_half(state) == SLAB_DOUBLE { 2 } else { 1 }),
         COAL_ORE => (item::COAL, 1),
         IRON_ORE => (item::RAW_IRON, 1),
         GOLD_ORE => (item::RAW_GOLD, 1),

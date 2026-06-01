@@ -11,6 +11,9 @@ pub struct RayHit {
     /// Distance along the (normalized) ray to the hit face — used to compare against mob hits so a
     /// mob is only struck if it's genuinely nearer than the block surface, not its center.
     pub dist: f32,
+    /// World-space point where the ray meets the hit face (`origin + dir*dist`). Its sub-cell Y
+    /// (`.rem_euclid(1.0)`) picks the top/bottom half when placing a slab on a side face.
+    pub hit_point: Vec3,
 }
 
 /// Step along `dir` from `origin` up to `max_dist` blocks, returning the first cell for which
@@ -65,7 +68,7 @@ pub fn cast(
     let mut t = 0.0f32;
     // Check the starting cell too.
     if is_solid(voxel) {
-        return Some(RayHit { block: voxel, normal: IVec3::ZERO, dist: 0.0 });
+        return Some(RayHit { block: voxel, normal: IVec3::ZERO, dist: 0.0, hit_point: origin });
     }
     while t <= max_dist {
         if t_max.x < t_max.y && t_max.x < t_max.z {
@@ -88,7 +91,7 @@ pub fn cast(
             break;
         }
         if is_solid(voxel) {
-            return Some(RayHit { block: voxel, normal, dist: t });
+            return Some(RayHit { block: voxel, normal, dist: t, hit_point: origin + dir * t });
         }
     }
     None

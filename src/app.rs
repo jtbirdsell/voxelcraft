@@ -528,6 +528,8 @@ impl App {
                     }
                     state.mine_progress += if time <= 0.0 { 1.0 } else { dt / time };
                     if state.mine_progress >= 1.0 {
+                        // Capture the block state before clearing it (a double slab drops two).
+                        let bstate = state.game.block_state_at(hit).1;
                         let removed =
                             state.game.set_block(&state.gpu, &state.renderer, hit, block::AIR);
                         if removed && !state.inventory.creative {
@@ -542,7 +544,7 @@ impl App {
                             };
                             if harvest_ok {
                                 let center = hit.as_vec3() + Vec3::splat(0.5);
-                                if let Some((drop_item, count)) = block::drops(id) {
+                                if let Some((drop_item, count)) = block::drops(id, bstate) {
                                     let stack = item::ItemStack::new(drop_item, count);
                                     state.game.spawn_item(center, stack);
                                 }
@@ -606,34 +608,74 @@ impl App {
                     // Right-clicking a chest opens its 27-slot storage screen.
                     state.pending_open = Some(Screen::Chest(hit.block));
                 } else {
-                    let place = hit.block + hit.normal;
                     let id = state.inventory.selected_block();
-                    // Orientation state for the placed block. Stairs orient by where the player
-                    // faces: the high step rises away from you.
-                    let place_state = if id == block::STONE_STAIRS {
-                        let f = state.camera.forward();
-                        let facing = if f.x.abs() > f.z.abs() {
-                            if f.x > 0.0 { 1 } else { 3 }
-                        } else if f.z > 0.0 {
-                            0
-                        } else {
-                            2
-                        };
-                        block::stair_state(facing)
+                    let is_slab = matches!(id, block::STONE_SLAB | block::WOOD_SLAB);
+                    // Double-slab merge: clicking the empty-half face of a matching single slab with
+                    // the same slab item fills it into a full (double) block — no new neighbor block.
+                    // hit.normal is the face normal pointing back at the camera: +Y = clicked the top
+                    // face (merges a bottom slab), -Y = clicked the bottom face (merges a top slab).
+                    let (tgt_id, tgt_state) = state.game.block_state_at(hit.block);
+                    let merge = is_slab
+                        && tgt_id == id
+                        && ((block::slab_half(tgt_state) == block::SLAB_BOTTOM && hit.normal.y == 1)
+                            || (block::slab_half(tgt_state) == block::SLAB_TOP && hit.normal.y == -1));
+                    if merge {
+                        if state.game.set_block_state(
+                            &state.gpu,
+                            &state.renderer,
+                            hit.block,
+                            id,
+                            block::slab_state(block::SLAB_DOUBLE),
+                        ) {
+                            state.inventory.consume_selected();
+                        }
                     } else {
-                        0
-                    };
-                    let blocks_player = block::is_solid(id) && state.player.intersects_block(place);
-                    if id != block::AIR
-                        && !blocks_player
-                        && state
-                            .game
-                            .set_block_state(&state.gpu, &state.renderer, place, id, place_state)
-                    {
-                        state.inventory.consume_selected();
-                        if block::is_fluid(id) {
-                            // Placed water/lava becomes a flowing source.
-                            state.game.add_fluid_source(place, id);
+                        let place = hit.block + hit.normal;
+                        // Orientation/half state for the placed block.
+                        let place_state = if id == block::STONE_STAIRS {
+                            // Stairs orient by where the player faces (the high step rises away).
+                            let f = state.camera.forward();
+                            let facing = if f.x.abs() > f.z.abs() {
+                                if f.x > 0.0 { 1 } else { 3 }
+                            } else if f.z > 0.0 {
+                                0
+                            } else {
+                                2
+                            };
+                            block::stair_state(facing)
+                        } else if is_slab {
+                            // Bottom when set on a top face, top when set under a face, else by where
+                            // on a side face you clicked (upper half of the cell → top slab).
+                            let half = if hit.normal.y == 1 {
+                                block::SLAB_BOTTOM
+                            } else if hit.normal.y == -1 {
+                                block::SLAB_TOP
+                            } else if hit.hit_point.y.rem_euclid(1.0) > 0.5 {
+                                block::SLAB_TOP
+                            } else {
+                                block::SLAB_BOTTOM
+                            };
+                            block::slab_state(half)
+                        } else {
+                            0
+                        };
+                        let blocks_player =
+                            block::is_solid(id) && state.player.intersects_block(place);
+                        if id != block::AIR
+                            && !blocks_player
+                            && state.game.set_block_state(
+                                &state.gpu,
+                                &state.renderer,
+                                place,
+                                id,
+                                place_state,
+                            )
+                        {
+                            state.inventory.consume_selected();
+                            if block::is_fluid(id) {
+                                // Placed water/lava becomes a flowing source.
+                                state.game.add_fluid_source(place, id);
+                            }
                         }
                     }
                 }
