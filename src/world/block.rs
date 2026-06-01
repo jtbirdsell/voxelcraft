@@ -1274,6 +1274,38 @@ pub mod tile {
     pub const SCULK_SHRIEKER: u32 = 123;
     pub const SCULK_CATALYST: u32 = 124;
     pub const REINFORCED_DEEPSLATE: u32 = 125;
+    // M34-VM2 item sprites (alpha-cutout shapes, painted by `paint_item`). Tools occupy a contiguous
+    // 25-tile block matching the tool id layout (tier*5 + class) so `item::item_tile` is a simple add.
+    pub const TOOL_BASE: u32 = 126; // 126..=150: 5 tiers × 5 classes (Pick/Axe/Shovel/Sword/Hoe)
+    pub const BOW: u32 = 151;
+    pub const SHIELD: u32 = 152;
+    pub const ARROW: u32 = 153;
+    pub const STICK: u32 = 154;
+    pub const INGOT_IRON: u32 = 155;
+    pub const INGOT_GOLD: u32 = 156;
+    pub const INGOT_COPPER: u32 = 157;
+    pub const GEM_DIAMOND: u32 = 158;
+    pub const GEM_EMERALD: u32 = 159;
+    pub const GEM_LAPIS: u32 = 160;
+    pub const GEM_AMETHYST: u32 = 161;
+    pub const DUST_REDSTONE: u32 = 162;
+    pub const ITEM_COAL: u32 = 163;
+    pub const ITEM_CHARCOAL: u32 = 164;
+    pub const RAW_IRON_ITEM: u32 = 165;
+    pub const RAW_GOLD_ITEM: u32 = 166;
+    pub const RAW_COPPER_ITEM: u32 = 167;
+    pub const ITEM_FLINT: u32 = 168;
+    pub const ITEM_BONE: u32 = 169;
+    pub const ITEM_FEATHER: u32 = 170;
+    pub const ITEM_LEATHER: u32 = 171;
+    pub const ITEM_STRING: u32 = 172;
+    pub const FOOD_BREAD: u32 = 173;
+    pub const FOOD_APPLE: u32 = 174;
+    pub const FOOD_CARROT: u32 = 175;
+    pub const FOOD_WHEAT: u32 = 176;
+    pub const FOOD_SEEDS: u32 = 177;
+    pub const FOOD_BERRIES: u32 = 178;
+    pub const FOOD_COOKED: u32 = 179; // a cooked steak/chop (shared by the cooked meats)
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,

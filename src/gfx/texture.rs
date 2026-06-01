@@ -461,6 +461,279 @@ fn ore_lump(x: u32, y: u32, salt: u32) -> u8 {
     best
 }
 
+/// M34-VM2 item sprites: alpha-cutout shapes (tools, weapons, ingots/gems, materials, food) shared by
+/// the held-item view-model and the hotbar/inventory icons. Transparent outside the shape so they read
+/// as objects, not tiles. Shapes are deliberately simple but distinct per item.
+fn paint_item(tile: u32, x: u32, y: u32) -> [u8; 4] {
+    const CLEAR: [u8; 4] = [0, 0, 0, 0];
+    let (xi, yi) = (x as i32, y as i32);
+    // Fill with a colour + a faint per-texel grain so the sprite isn't flat.
+    let fill = |c: [f32; 3]| -> [u8; 4] {
+        let n = hashf(x, y, 7);
+        let s = shade(c, (n - 0.5) * 0.16);
+        [to_u8(s[0]), to_u8(s[1]), to_u8(s[2]), 255]
+    };
+    let cx = xi - 8;
+    let cy = yi - 8;
+    let manh = cx.abs() + cy.abs();
+    let r2 = cx * cx + cy * cy;
+
+    // Tools: a wood handle + a tier-coloured head, laid out tier*5 + class (Pick/Axe/Shovel/Sword/Hoe).
+    if (T::TOOL_BASE..T::TOOL_BASE + 25).contains(&tile) {
+        let idx = tile - T::TOOL_BASE;
+        let tier = (idx / 5) as usize;
+        let class = idx % 5;
+        const HEAD: [[f32; 3]; 5] = [
+            [0.62, 0.47, 0.28], // wood
+            [0.50, 0.50, 0.53], // stone
+            [0.80, 0.80, 0.83], // iron
+            [0.97, 0.80, 0.28], // gold
+            [0.45, 0.86, 0.84], // diamond
+        ];
+        let head = HEAD[tier];
+        let handle = [0.45, 0.32, 0.18];
+        if class == 3 {
+            // Sword: a vertical blade, a crossguard, and a grip.
+            if (7..=8).contains(&xi) && (1..=9).contains(&yi) {
+                return fill(head);
+            }
+            if xi == 7 && yi == 0 {
+                return fill(head); // tip
+            }
+            if (9..=10).contains(&yi) && (5..=10).contains(&xi) {
+                return fill([0.50, 0.42, 0.26]); // crossguard
+            }
+            if (7..=8).contains(&xi) && (10..=14).contains(&yi) {
+                return fill(handle); // grip
+            }
+            return CLEAR;
+        }
+        // Handle: an anti-diagonal band (bottom-left → upper-mid) for the other four classes.
+        if (xi + yi - 16).abs() <= 1 && (3..=12).contains(&xi) && (4..=13).contains(&yi) {
+            return fill(handle);
+        }
+        let in_head = match class {
+            0 => {
+                // Pickaxe: an arc bar across the top with down-turned tips.
+                ((2..=3).contains(&yi) && (3..=12).contains(&xi))
+                    || (matches!(xi, 3 | 4 | 11 | 12) && (3..=5).contains(&yi))
+            }
+            1 => (8..=12).contains(&xi) && yi >= 2 && yi <= 10 - (xi - 8), // axe blade, tapering
+            2 => (9..=12).contains(&xi) && (2..=5).contains(&yi),         // shovel blade
+            4 => {
+                // Hoe: an L (a top bar + a short downward stub at the left).
+                ((2..=3).contains(&yi) && (7..=12).contains(&xi))
+                    || ((7..=8).contains(&xi) && (2..=5).contains(&yi))
+            }
+            _ => false,
+        };
+        if in_head {
+            return fill(head);
+        }
+        return CLEAR;
+    }
+
+    match tile {
+        T::BOW => {
+            // A left-bowed arc (centre off to the left) + a straight bowstring on the right.
+            let ax = xi - 2;
+            let rr = ax * ax + cy * cy;
+            if (64..=100).contains(&rr) && xi >= 2 && xi <= 12 {
+                return fill([0.45, 0.30, 0.15]);
+            }
+            if xi == 12 && (3..=13).contains(&yi) {
+                return fill([0.86, 0.86, 0.80]); // string
+            }
+            CLEAR
+        }
+        T::SHIELD => {
+            // A rounded heater shield: wide top, tapering to a point, with a lighter rim + boss.
+            let top = (3..=10).contains(&yi) && (3..=12).contains(&xi);
+            let taper = (11..=14).contains(&yi) && (xi - 8).abs() <= (14 - yi);
+            if top || taper {
+                let rim = xi == 3 || xi == 12 || yi == 3;
+                if rim {
+                    return fill([0.72, 0.58, 0.30]);
+                }
+                if r2 <= 4 {
+                    return fill([0.85, 0.86, 0.88]); // metal boss
+                }
+                return fill([0.40, 0.26, 0.50]); // face
+            }
+            CLEAR
+        }
+        T::ARROW => {
+            // A diagonal shaft, a grey head at the tip, white fletching at the tail.
+            if (xi - yi).abs() <= 1 && (2..=13).contains(&xi) {
+                return fill([0.50, 0.36, 0.20]); // shaft
+            }
+            if xi >= 12 && yi <= 4 && (xi - yi) >= 9 {
+                return fill([0.78, 0.80, 0.83]); // arrowhead
+            }
+            if xi <= 4 && yi >= 11 && (yi - xi) >= 8 {
+                return fill([0.92, 0.92, 0.95]); // fletching
+            }
+            CLEAR
+        }
+        T::STICK => {
+            if (xi + yi - 15).abs() <= 1 && (3..=12).contains(&xi) {
+                return fill([0.48, 0.34, 0.18]);
+            }
+            CLEAR
+        }
+        T::INGOT_IRON => ingot(xi, yi, [0.82, 0.82, 0.85], &fill),
+        T::INGOT_GOLD => ingot(xi, yi, [0.97, 0.82, 0.30], &fill),
+        T::INGOT_COPPER => ingot(xi, yi, [0.80, 0.46, 0.30], &fill),
+        T::GEM_DIAMOND => gem(manh, cx, cy, [0.46, 0.90, 0.88], &fill),
+        T::GEM_EMERALD => gem(manh, cx, cy, [0.20, 0.80, 0.42], &fill),
+        T::GEM_LAPIS => gem(manh, cx, cy, [0.20, 0.34, 0.74], &fill),
+        T::GEM_AMETHYST => gem(manh, cx, cy, [0.64, 0.42, 0.86], &fill),
+        T::DUST_REDSTONE => {
+            if r2 <= 26 && hashf(x, y, 13) > 0.45 {
+                return fill([0.85, 0.12, 0.10]);
+            }
+            CLEAR
+        }
+        T::ITEM_COAL => lump(x, y, r2, [0.15, 0.15, 0.17], &fill),
+        T::ITEM_CHARCOAL => lump(x, y, r2, [0.26, 0.21, 0.18], &fill),
+        T::RAW_IRON_ITEM => lump(x, y, r2, [0.74, 0.60, 0.48], &fill),
+        T::RAW_GOLD_ITEM => lump(x, y, r2, [0.88, 0.72, 0.34], &fill),
+        T::RAW_COPPER_ITEM => lump(x, y, r2, [0.78, 0.48, 0.32], &fill),
+        T::ITEM_FLINT => {
+            // An angular dark shard (a clipped triangle).
+            if yi >= 4 && yi <= 13 && (xi - 4) >= 0 && (xi - 4) <= (yi - 4) && xi <= 12 {
+                return fill([0.26, 0.26, 0.30]);
+            }
+            CLEAR
+        }
+        T::ITEM_BONE => {
+            let shaft = (7..=8).contains(&xi) && (4..=11).contains(&yi);
+            let knobs = (matches!(xi, 5 | 6 | 9 | 10)) && (matches!(yi, 3 | 4 | 11 | 12));
+            if shaft || knobs {
+                return fill([0.92, 0.91, 0.85]);
+            }
+            CLEAR
+        }
+        T::ITEM_FEATHER => {
+            if (xi + yi - 15).abs() <= 4 && (xi - yi).abs() <= 6 && (3..=13).contains(&yi) {
+                let quill = (xi + yi - 15).abs() <= 1;
+                return fill(if quill { [0.80, 0.80, 0.82] } else { [0.93, 0.94, 0.97] });
+            }
+            CLEAR
+        }
+        T::ITEM_LEATHER => {
+            if (3..=12).contains(&xi) && (4..=12).contains(&yi) && manh <= 9 {
+                return fill([0.55, 0.36, 0.20]);
+            }
+            CLEAR
+        }
+        T::ITEM_STRING => {
+            if (yi - 8 + ((xi as f32 * 0.9).sin() * 2.5) as i32).abs() <= 1 {
+                return fill([0.86, 0.86, 0.84]);
+            }
+            CLEAR
+        }
+        T::FOOD_BREAD => {
+            if cx * cx + cy * cy * 2 <= 34 {
+                let crust = cx * cx + cy * cy * 2 >= 22;
+                return fill(if crust { [0.55, 0.34, 0.15] } else { [0.80, 0.58, 0.30] });
+            }
+            CLEAR
+        }
+        T::FOOD_APPLE => {
+            if r2 <= 20 {
+                return fill([0.84, 0.16, 0.16]);
+            }
+            if xi == 8 && (2..=4).contains(&yi) {
+                return fill([0.40, 0.26, 0.12]); // stem
+            }
+            if (9..=10).contains(&xi) && (3..=4).contains(&yi) {
+                return fill([0.30, 0.62, 0.24]); // leaf
+            }
+            CLEAR
+        }
+        T::FOOD_CARROT => {
+            if (4..=13).contains(&yi) && (xi - 8).abs() <= (13 - yi) / 2 {
+                return fill([0.92, 0.52, 0.16]);
+            }
+            if (2..=4).contains(&yi) && (6..=10).contains(&xi) && hashf(x, y, 5) > 0.4 {
+                return fill([0.28, 0.60, 0.24]); // greens
+            }
+            CLEAR
+        }
+        T::FOOD_WHEAT => {
+            if matches!(xi % 4, 1 | 2) && yi >= 3 {
+                let head = yi <= 7 && hashf(x, y, 9) > 0.4;
+                return fill(if head { [0.92, 0.80, 0.34] } else { [0.74, 0.62, 0.26] });
+            }
+            CLEAR
+        }
+        T::FOOD_SEEDS => {
+            if r2 <= 30 && hashf(x, y, 3) > 0.78 {
+                return fill([0.62, 0.66, 0.30]);
+            }
+            CLEAR
+        }
+        T::FOOD_BERRIES => {
+            // A small cluster of bright berries.
+            for i in 0..3u32 {
+                let bxr = (hashf(i, 0, 21) * 8.0) as i32 + 4;
+                let byr = (hashf(i, 1, 25) * 8.0) as i32 + 4;
+                if (xi - bxr).pow(2) + (yi - byr).pow(2) <= 5 {
+                    return fill([0.98, 0.70, 0.18]);
+                }
+            }
+            CLEAR
+        }
+        T::FOOD_COOKED => {
+            // A cooked steak: a rounded brown blob with a darker seared edge.
+            if cx * cx * 2 + cy * cy <= 36 {
+                let edge = cx * cx * 2 + cy * cy >= 24;
+                return fill(if edge { [0.40, 0.22, 0.12] } else { [0.66, 0.40, 0.24] });
+            }
+            CLEAR
+        }
+        _ => CLEAR,
+    }
+}
+
+/// A rounded metal ingot bar (shared by the iron/gold/copper sprites).
+fn ingot(xi: i32, yi: i32, c: [f32; 3], fill: &dyn Fn([f32; 3]) -> [u8; 4]) -> [u8; 4] {
+    if (4..=11).contains(&xi) && (6..=10).contains(&yi)
+        && !((xi == 4 || xi == 11) && (yi == 6 || yi == 10))
+    {
+        // A brighter top edge gives the bar a little relief.
+        if yi == 6 {
+            return fill(shade(c, 0.14));
+        }
+        return fill(c);
+    }
+    [0, 0, 0, 0]
+}
+
+/// A faceted gem rhombus (shared by diamond/emerald/lapis/amethyst).
+fn gem(manh: i32, cx: i32, cy: i32, c: [f32; 3], fill: &dyn Fn([f32; 3]) -> [u8; 4]) -> [u8; 4] {
+    if manh <= 5 {
+        // The upper-left half catches the light.
+        if cx + cy <= 0 {
+            return fill(shade(c, 0.18));
+        }
+        return fill(c);
+    }
+    [0, 0, 0, 0]
+}
+
+/// A lumpy nugget (coal / raw ore), a rough disc with a frayed edge + a couple of dark pits.
+fn lump(x: u32, y: u32, r2: i32, c: [f32; 3], fill: &dyn Fn([f32; 3]) -> [u8; 4]) -> [u8; 4] {
+    if r2 <= 18 + (hashf(x, y, 31) * 8.0) as i32 {
+        if hashf(x, y, 43) > 0.86 {
+            return fill(shade(c, -0.28)); // pit
+        }
+        return fill(c);
+    }
+    [0, 0, 0, 0]
+}
+
 /// Paint one texel of a tile. Detail is brightness variation around the base color (mean-preserving),
 /// plus a few per-tile motifs (ore specks, bark columns, wood rings, a grassy top strip).
 fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
@@ -494,6 +767,9 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
     }
     if tile == T::GLASS {
         return paint_glass(x, y);
+    }
+    if (T::TOOL_BASE..=T::FOOD_COOKED).contains(&tile) {
+        return paint_item(tile, x, y);
     }
     let base = base_color(tile);
     let n = hashf(x, y, tile.wrapping_mul(131) + 7); // 0..1 fine grain

@@ -479,16 +479,55 @@ pub fn creative_palette() -> Vec<ItemId> {
     v
 }
 
-/// Atlas tile for a dropped item entity: the block's tile, or a generic tool tile.
+/// Atlas tile for an item (a dropped entity, a hotbar/inventory icon, or the held view-model). Tools
+/// and the common non-block items have dedicated procedural sprites (M34-VM2); block-items use their
+/// top face; the remaining mob-drops use their flat-coloured drop tiles.
 pub fn item_tile(item: ItemId) -> u32 {
-    // Mob-drop materials get a flat-colored atlas tile so a dropped pile reads as its real item
-    // (beef/leather/bone/…) instead of a generic wooden box.
+    use block::tile as t;
+    // Tools: a contiguous sprite block mirroring the id layout (tier*5 + class).
+    if is_tool(item) {
+        return t::TOOL_BASE + (item - TOOL_BASE) as u32;
+    }
+    match item {
+        BOW => return t::BOW,
+        SHIELD => return t::SHIELD,
+        ARROW => return t::ARROW,
+        STICK => return t::STICK,
+        IRON_INGOT => return t::INGOT_IRON,
+        GOLD_INGOT => return t::INGOT_GOLD,
+        COPPER_INGOT => return t::INGOT_COPPER,
+        DIAMOND => return t::GEM_DIAMOND,
+        EMERALD => return t::GEM_EMERALD,
+        LAPIS => return t::GEM_LAPIS,
+        AMETHYST_SHARD => return t::GEM_AMETHYST,
+        REDSTONE_DUST => return t::DUST_REDSTONE,
+        COAL => return t::ITEM_COAL,
+        CHARCOAL => return t::ITEM_CHARCOAL,
+        RAW_IRON => return t::RAW_IRON_ITEM,
+        RAW_GOLD => return t::RAW_GOLD_ITEM,
+        RAW_COPPER => return t::RAW_COPPER_ITEM,
+        FLINT => return t::ITEM_FLINT,
+        BONE => return t::ITEM_BONE,
+        FEATHER => return t::ITEM_FEATHER,
+        LEATHER => return t::ITEM_LEATHER,
+        STRING => return t::ITEM_STRING,
+        BREAD => return t::FOOD_BREAD,
+        APPLE => return t::FOOD_APPLE,
+        CARROT => return t::FOOD_CARROT,
+        WHEAT => return t::FOOD_WHEAT,
+        SEEDS => return t::FOOD_SEEDS,
+        GLOW_BERRIES => return t::FOOD_BERRIES,
+        COOKED_BEEF | COOKED_PORK | COOKED_CHICKEN | COOKED_MUTTON => return t::FOOD_COOKED,
+        CLAY_BALL => return t::CLAY, // the clay block tile reads as a clay ball
+        _ => {}
+    }
+    // Mob-drop raw materials keep their flat-coloured drop tiles (beef/leather/…).
     if (BEEF..=ROTTEN_FLESH).contains(&item) {
         return block::tile::MATERIAL_DROP + (item - BEEF) as u32;
     }
     match block_of_item(item) {
         Some(b) => block::face_tile(b, [0, 1, 0]),
-        None => block::tile::PLANKS, // generic handle-colored placeholder for tools/sticks/ingots
+        None => block::tile::PLANKS, // last-resort placeholder (armor, undefined materials)
     }
 }
 

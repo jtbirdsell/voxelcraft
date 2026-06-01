@@ -147,15 +147,18 @@ fn push_icon(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, w: f32, 
     }
 }
 
-/// Draw an item's icon inside an inner rect: a textured block tile for block-items, else a flat
-/// color swatch (tools / materials / foods get painted item sprites in a later visual pass).
+/// Draw an item's icon inside an inner rect: a textured block tile for block-items, a painted item
+/// sprite (alpha-cutout) for tools/materials/food (M34-VM2), or a flat tier swatch for armor.
 fn item_icon(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, size: f32, item: item::ItemId) {
     if let Some(b) = item::block_of_item(item) {
         let tile = crate::block::face_tile(b, [0, 0, 1]); // a representative side face
         push_icon(out, sw, sh, x, y, size, size, tile, [1.0, 1.0, 1.0, 1.0]);
-    } else {
-        let c = item::item_color(item);
+    } else if item::is_armor(item) {
+        let c = item::item_color(item); // armor has no sprite yet — a flat tier swatch
         push_px_rect(out, sw, sh, x, y, size, size, [c[0], c[1], c[2], 1.0]);
+    } else {
+        // Tools / weapons / ingots / gems / food: their painted atlas sprite.
+        push_icon(out, sw, sh, x, y, size, size, item::item_tile(item), [1.0, 1.0, 1.0, 1.0]);
     }
 }
 

@@ -74,27 +74,77 @@ impl Default for ViewModel {
 }
 
 impl ViewModel {
-    /// The view-space pose transform applied to the held item this frame. VM1: the static rest pose.
-    /// Later milestones compose equip / swing / use / bob / sway offsets here.
+    /// The view-space pose transform for a 3D held item (block cube / arm). A noticeable tilt shows
+    /// the cube's faces. Later milestones compose equip / swing / use / bob / sway offsets here.
     fn transform(&self) -> Mat4 {
         Mat4::from_translation(REST)
             * Mat4::from_rotation_y(BASE_YAW)
             * Mat4::from_rotation_x(BASE_PITCH)
     }
 
-    /// Build the view-space geometry for the currently-held item, or `None` when there is nothing to
-    /// draw. `light` is the local brightness scalar baked into the vertices. VM1 handles block items
-    /// (a textured mini-cube); item sprites + the empty hand arrive in VM2.
+    /// Pose for a flat sprite card (tools/materials/food). Held nearly face-on — only a slight turn +
+    /// tip — so the 2D sprite stays readable instead of going edge-on like the 3D pose would.
+    fn card_transform(&self) -> Mat4 {
+        Mat4::from_translation(Vec3::new(0.42, -0.42, -0.78))
+            * Mat4::from_rotation_y(-0.16)
+            * Mat4::from_rotation_x(0.10)
+    }
+
+    /// Build the view-space geometry for the currently-held item. `light` is the local brightness
+    /// scalar baked into the vertices. Block items → a textured mini-cube; tools/materials/food → a
+    /// flat sprite card (alpha-cutout, via `item::item_tile`); empty hand → a skin-toned fist.
     pub fn build_geometry(&self, sel_item: ItemId, light: f32) -> Option<Geometry> {
-        let block = item::block_of_item(sel_item)?;
-        if block == block::AIR {
-            return None;
-        }
         let mut geom = Geometry::default();
         let m = self.transform();
-        push_block_cube(&mut geom, block, &m, light);
+        if sel_item == block::AIR {
+            push_arm(&mut geom, &m, light);
+        } else if let Some(block) = item::block_of_item(sel_item) {
+            push_block_cube(&mut geom, block, &m, light);
+        } else {
+            push_sprite_card(
+                &mut geom,
+                item::item_tile(sel_item),
+                &self.card_transform(),
+                light,
+                item::item_emission(sel_item),
+            );
+        }
         Some(geom)
     }
+}
+
+/// A flat, camera-facing sprite card textured with one atlas tile (an item sprite), upright (tile row
+/// 0 = card top). Single quad — the view-model pipeline has culling off, so it shows from both sides.
+fn push_sprite_card(geom: &mut Geometry, tile: u32, m: &Mat4, light: f32, emission: f32) {
+    let (hw, hh) = (0.26, 0.28);
+    let shade = [emission, 0.0];
+    let quad = [
+        (Vec3::new(-hw, hh, 0.0), [0.0, 0.0]),  // top-left
+        (Vec3::new(hw, hh, 0.0), [1.0, 0.0]),   // top-right
+        (Vec3::new(hw, -hh, 0.0), [1.0, 1.0]),  // bottom-right
+        (Vec3::new(-hw, -hh, 0.0), [0.0, 1.0]), // bottom-left
+    ];
+    let normal = m.transform_vector3(Vec3::Z).normalize_or_zero().to_array();
+    let base = geom.vertices.len() as u32;
+    for (p, uv) in quad {
+        geom.vertices.push(Vertex {
+            position: m.transform_point3(p).to_array(),
+            normal,
+            uv,
+            tile,
+            light: [light, light],
+            shade,
+        });
+    }
+    geom.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+/// A skin-toned fist/forearm box for the empty hand (uses the pinkish mob tile — no skin sprite).
+fn push_arm(geom: &mut Geometry, m: &Mat4, light: f32) {
+    let half = Vec3::new(0.11, 0.2, 0.11);
+    let arm = *m * Mat4::from_translation(Vec3::new(-0.05, -0.05, 0.0));
+    push_box_xform(geom, half, &arm, &[block::tile::MOB; 6], light, 0.0);
 }
 
 /// Emit a textured cube for a held block: per-face atlas tiles via `block::face_tile`, transformed by
@@ -173,7 +223,17 @@ mod tests {
         for v in &geom.vertices {
             assert!(v.position[2] < 0.0, "held item must be in front of the camera (z={})", v.position[2]);
         }
-        // Holding nothing (AIR) draws nothing.
-        assert!(vm.build_geometry(block::AIR, 1.0).is_none());
+        // A tool builds a flat sprite card (one quad).
+        let card = vm
+            .build_geometry(item::DIAMOND_PICKAXE, 1.0)
+            .expect("a held tool builds a sprite card");
+        assert_eq!(card.vertices.len(), 4);
+        assert_eq!(card.indices.len(), 6);
+        // Empty hand (AIR) still draws something (the fist), all in front of the camera.
+        let hand = vm.build_geometry(block::AIR, 1.0).expect("empty hand draws a fist");
+        assert!(!hand.vertices.is_empty());
+        for v in &hand.vertices {
+            assert!(v.position[2] < 0.0);
+        }
     }
 }
