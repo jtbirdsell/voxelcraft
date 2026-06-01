@@ -171,9 +171,11 @@ position, albedo + skylight) and an ACES tonemap.
 - **Armor**: 4 equip slots (helmet/chestplate/leggings/boots) × leather/iron/gold/diamond, drag-to-equip
   in the inventory (each slot only accepts its piece). Equipped defense points reduce incoming damage
   (~4%/point, capped at 80%) for fall/lava/mob hits; a steel armor bar shows on the HUD.
-- **Typed mobs + AI**: eight species (cow, pig, sheep, chicken, zombie, skeleton, creeper, spider),
-  each with its own size, health, and a distinct **multi-box model** (quadrupeds, humanoids, a tall
-  creeper, a wide-low spider), lit by the same ray-traced pipeline as the world. An **Idle / Wander /
+- **Typed mobs + AI**: twelve species — cow, pig, sheep, chicken, zombie, skeleton, creeper, spider,
+  plus a **wolf** (neutral; turns on you when struck), a tall **enderman**, a **slime** (bounces, and
+  **splits into smaller slimes** when killed until the smallest pops), and a passive **villager** —
+  each with its own size, health, and a distinct **multi-box model**, lit by the same ray-traced
+  pipeline as the world. An **Idle / Wander /
   Flee / Chase / Attack** state machine drives them: passive species flee when you crowd them, hostile
   species **chase you on sight** (raycast line-of-sight) and close to attack range. Movement is real
   **local navigation** — mobs **step up** one-block ledges, **avoid walking off cliffs** (passives) and

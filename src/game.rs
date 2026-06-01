@@ -1079,8 +1079,14 @@ impl Game {
     /// category has its own ring + cap. `day` is the day factor (0 = night, 1 = full day).
     pub fn try_spawn(&mut self, day: f32, player_pos: Vec3) -> bool {
         use crate::entity::Species;
-        const HOSTILE: [Species; 4] =
-            [Species::Zombie, Species::Skeleton, Species::Creeper, Species::Spider];
+        const HOSTILE: [Species; 6] = [
+            Species::Zombie,
+            Species::Skeleton,
+            Species::Creeper,
+            Species::Spider,
+            Species::Slime, // P18 (spawn_mob makes a LARGE slime by default)
+            Species::Enderman,
+        ];
         let night = day < 0.35 && self.difficulty.spawns_hostiles();
         let daytime = day > 0.6;
         if !night && !daytime {
@@ -1102,7 +1108,7 @@ impl Game {
             if self.entities.hostile_count() >= HOSTILE_CAP || self.block_light_at(feet) > 0 {
                 return false;
             }
-            let pick = ((r >> 32) & 3) as usize;
+            let pick = ((r >> 32) as usize) % HOSTILE.len();
             self.entities
                 .spawn_mob(Vec3::new(wx as f32 + 0.5, (sy + 1) as f32, wz as f32 + 0.5), HOSTILE[pick]);
             return true;

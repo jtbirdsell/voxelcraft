@@ -85,6 +85,7 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::MOB_SKELETON => [0.82, 0.82, 0.78],
         T::MOB_CREEPER => [0.36, 0.66, 0.34],
         T::MOB_SPIDER => [0.20, 0.17, 0.20],
+        T::MOB_WOLF => [0.72, 0.72, 0.74], // grey wolf fur (P18)
         // Mob-drop material tiles (51..=61) map back to the item's flat color (single source of truth).
         t if (T::MATERIAL_DROP..T::MATERIAL_DROP + 11).contains(&t) => {
             crate::item::material_color(crate::item::BEEF + (t - T::MATERIAL_DROP) as u16)
@@ -320,7 +321,7 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             c = shade(base, (n - 0.5) * 0.10);
         }
         T::MOB_COW | T::MOB_PIG | T::MOB_SHEEP | T::MOB_CHICKEN | T::MOB_ZOMBIE
-        | T::MOB_SKELETON | T::MOB_CREEPER | T::MOB_SPIDER => {
+        | T::MOB_SKELETON | T::MOB_CREEPER | T::MOB_SPIDER | T::MOB_WOLF => {
             c = shade(base, (n - 0.5) * 0.12); // subtle grain on the flat body color
         }
         T::COBBLE => {

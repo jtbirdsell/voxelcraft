@@ -93,7 +93,7 @@ fn randf(state: &mut u64) -> f32 {
 
 /// A creature type (M27). Passive species wander and flee; hostile species (used by combat in M29)
 /// will hunt the player. Each has a distinct size, health, and multi-box `model()`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Species {
     Cow,
     Pig,
@@ -103,11 +103,16 @@ pub enum Species {
     Skeleton,
     Creeper,
     Spider,
+    // P18
+    Wolf,
+    Enderman,
+    Slime,
+    Villager,
 }
 
 impl Species {
     /// All species, for spawning a representative set.
-    pub const ALL: [Species; 8] = [
+    pub const ALL: [Species; 12] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -116,6 +121,10 @@ impl Species {
         Species::Skeleton,
         Species::Creeper,
         Species::Spider,
+        Species::Wolf,
+        Species::Enderman,
+        Species::Slime,
+        Species::Villager,
     ];
 
     fn max_health(self) -> f32 {
@@ -125,10 +134,14 @@ impl Species {
             Species::Cow | Species::Pig => 10.0,
             Species::Spider => 16.0,
             Species::Zombie | Species::Skeleton | Species::Creeper => 20.0,
+            Species::Wolf => 8.0,
+            Species::Enderman => 20.0, // teleport deferred → a fair non-boss threat
+            Species::Villager => 10.0,
+            Species::Slime => 8.0, // LARGE default; a tier-spawned slime rewrites health (spawn_slime)
         }
     }
 
-    /// Collision AABB (width, height).
+    /// Collision AABB (width, height). Slime returns its LARGE box; the live tier scales it (`dims`).
     fn size(self) -> (f32, f32) {
         match self {
             Species::Chicken => (0.4, 0.7),
@@ -138,14 +151,25 @@ impl Species {
             Species::Creeper => (0.6, 1.7),
             Species::Zombie | Species::Skeleton => (0.6, 1.9),
             Species::Spider => (1.1, 0.7),
+            Species::Wolf => (0.7, 0.85),
+            // Enderman: short-enough AABB to fit the 2-air spawn check; the model() draws it 2.9 tall.
+            Species::Enderman => (0.6, 1.95),
+            Species::Villager => (0.6, 1.9),
+            Species::Slime => (1.0, 1.0),
         }
     }
 
-    /// Hostile species hunt the player and deal contact damage.
+    /// Hostile species hunt the player and deal contact damage. (Wolf/Enderman are NEUTRAL — they
+    /// turn hostile at runtime via MobData.angry once attacked, so they count as passive until then.)
     pub fn hostile(self) -> bool {
         matches!(
             self,
-            Species::Zombie | Species::Skeleton | Species::Creeper | Species::Spider
+            Species::Zombie
+                | Species::Skeleton
+                | Species::Creeper
+                | Species::Spider
+                | Species::Slime
+                | Species::Enderman
         )
     }
 
@@ -153,8 +177,8 @@ impl Species {
     fn contact_damage(self) -> f32 {
         match self {
             Species::Creeper => 4.0,
-            Species::Zombie => 3.0,
-            Species::Skeleton | Species::Spider => 2.0,
+            Species::Zombie | Species::Enderman => 3.0,
+            Species::Skeleton | Species::Spider | Species::Wolf | Species::Slime => 2.0,
             _ => 0.0,
         }
     }
@@ -172,12 +196,11 @@ impl Species {
 
     /// Experience dropped when this mob is killed.
     fn xp_drop(self) -> u32 {
-        if self.hostile() {
-            5
-        } else if matches!(self, Species::Chicken) {
-            1
-        } else {
-            2
+        match self {
+            Species::Slime => 1, // each split body drops a little (a large→cascade isn't 50 XP)
+            Species::Chicken => 1,
+            _ if self.hostile() => 5,
+            _ => 2,
         }
     }
 
@@ -193,6 +216,8 @@ impl Species {
             Species::Skeleton => &[(BONE, 2)],
             Species::Creeper => &[(GUNPOWDER, 1)],
             Species::Spider => &[(STRING, 1), (SPIDER_EYE, 1)],
+            // P18: no slimeball/ender-pearl/emerald items yet — these drop nothing (MC: wolves do too).
+            Species::Wolf | Species::Enderman | Species::Slime | Species::Villager => &[],
         }
     }
 }
@@ -220,7 +245,45 @@ fn model(s: Species) -> Vec<Part> {
         Species::Skeleton => biped(T::MOB_SKELETON),
         Species::Creeper => creeper(),
         Species::Spider => spider(),
+        Species::Wolf => wolf(),
+        Species::Enderman => enderman(),
+        Species::Slime => slime(),
+        Species::Villager => villager(),
     }
+}
+
+/// Wolf: a small grey quadruped with pointed ears, a snout, and a tail (distinct from the cow).
+fn wolf() -> Vec<Part> {
+    let mut v = quadruped(T::MOB_WOLF, 0.7, 0.4, 0.45, 0.78, 0.3);
+    v.push(part([0.28, 0.78, -0.14], [0.34, 0.92, -0.06], T::MOB_WOLF)); // left ear
+    v.push(part([0.28, 0.78, 0.06], [0.34, 0.92, 0.14], T::MOB_WOLF)); // right ear
+    v.push(part([0.40, 0.50, -0.05], [0.54, 0.62, 0.05], T::MOB_WOLF)); // snout
+    v.push(part([-0.40, 0.52, -0.04], [-0.54, 0.66, 0.04], T::MOB_WOLF)); // tail
+    v
+}
+
+/// Enderman: a very tall, thin near-black biped — the AABB is short (size()) but the model is 2.9 high.
+fn enderman() -> Vec<Part> {
+    vec![
+        part([-0.10, 0.0, -0.10], [-0.01, 1.5, 0.10], T::MOB_ENDERMAN), // left leg (long)
+        part([0.01, 0.0, -0.10], [0.10, 1.5, 0.10], T::MOB_ENDERMAN),   // right leg
+        part([-0.12, 1.5, -0.10], [0.12, 2.5, 0.10], T::MOB_ENDERMAN),  // slim torso
+        part([-0.18, 2.5, -0.18], [0.18, 2.9, 0.18], T::MOB_ENDERMAN),  // oversized head
+        part([0.02, 1.55, -0.26], [0.10, 2.5, -0.12], T::MOB_ENDERMAN), // left arm (long)
+        part([0.02, 1.55, 0.12], [0.10, 2.5, 0.26], T::MOB_ENDERMAN),   // right arm
+    ]
+}
+
+/// Slime: a single gel cube. Its size tier scales the whole model at render (see `mob_scale`).
+fn slime() -> Vec<Part> {
+    vec![part([-0.5, 0.0, -0.5], [0.5, 1.0, 0.5], T::MOB_SLIME)]
+}
+
+/// Villager: the humanoid biped plus a protruding nose (a distinct silhouette from the undead bipeds).
+fn villager() -> Vec<Part> {
+    let mut v = biped(T::MOB_VILLAGER);
+    v.push(part([0.18, 1.50, -0.05], [0.32, 1.62, 0.05], T::MOB_VILLAGER)); // big nose
+    v
 }
 
 /// A body + forward head + four corner legs.
@@ -311,6 +374,33 @@ struct MobData {
     growth: f32,
     love: f32,
     breed_cd: f32,
+    /// P18: a NEUTRAL mob (wolf/enderman) flips permanently hostile toward the player once attacked.
+    angry: bool,
+    /// P18 slime size tier: 2 = large, 1 = medium, 0 = small (0 for every non-slime). Scales the
+    /// model + collision/hit AABB via `mob_scale`/`dims`; the smallest tier does not split on death.
+    slime_tier: u8,
+}
+
+/// Slime size-tier factor (small/medium/large): scales both the render model and the collision/hit
+/// AABB so they stay locked together. Non-slimes are unscaled (1.0).
+fn mob_scale(m: &MobData) -> f32 {
+    if m.species == Species::Slime {
+        [0.5, 0.75, 1.0][(m.slime_tier.min(2)) as usize]
+    } else {
+        1.0
+    }
+}
+
+/// Collision/hit footprint (width, height): `species.size()` folded with the live slime tier scale.
+fn dims(m: &MobData) -> (f32, f32) {
+    let (w, h) = m.species.size();
+    let s = mob_scale(m);
+    (w * s, h * s)
+}
+
+/// Slime health per size tier (large = the species max).
+fn slime_health(tier: u8) -> f32 {
+    [1.0, 4.0, 8.0][(tier.min(2)) as usize]
 }
 
 /// Who loosed an arrow — decides what it can hit (player arrows hit mobs, mob arrows hit the player).
@@ -468,7 +558,7 @@ impl Entities {
         let mut best: Option<f32> = None;
         for e in &self.list {
             if let Kind::Mob(m) = e.kind {
-                let (w, h) = m.species.size();
+                let (w, h) = dims(&m);
                 let half = w * 0.5;
                 let min = e.pos - Vec3::new(half, 0.0, half);
                 let max = e.pos + Vec3::new(half, h, half);
@@ -489,7 +579,7 @@ impl Entities {
         let mut best: Option<(usize, f32)> = None;
         for (i, e) in self.list.iter().enumerate() {
             if let Kind::Mob(m) = e.kind {
-                let (w, h) = m.species.size();
+                let (w, h) = dims(&m);
                 let half = w * 0.5;
                 let min = e.pos - Vec3::new(half, 0.0, half);
                 let max = e.pos + Vec3::new(half, h, half);
@@ -530,7 +620,7 @@ impl Entities {
         let mut best: Option<(usize, f32)> = None;
         for (i, e) in self.list.iter().enumerate() {
             if let Kind::Mob(m) = e.kind {
-                let (w, h) = m.species.size();
+                let (w, h) = dims(&m);
                 let half = w * 0.5;
                 let min = e.pos - Vec3::new(half, 0.0, half);
                 let max = e.pos + Vec3::new(half, h, half);
@@ -548,6 +638,9 @@ impl Entities {
             if let Kind::Mob(m) = &mut e.kind {
                 m.health -= damage;
                 m.hurt = if crit { 0.6 } else { 0.35 };
+                if matches!(m.species, Species::Wolf | Species::Enderman) {
+                    m.angry = true; // P18: a struck neutral turns hostile toward the player
+                }
             }
             let mut kb = e.pos - origin;
             kb.y = 0.0;
@@ -621,6 +714,18 @@ impl Entities {
         self.spawn_mob_kind(pos, species, true);
     }
 
+    /// Spawn a slime of an explicit size tier (P18) — used for split children. (Plain `spawn_mob`
+    /// makes a LARGE slime, so try_spawn / the demo need no special-case.)
+    pub fn spawn_slime(&mut self, pos: Vec3, tier: u8) {
+        self.spawn_mob_kind(pos, Species::Slime, false);
+        if let Some(e) = self.list.last_mut() {
+            if let Kind::Mob(m) = &mut e.kind {
+                m.slime_tier = tier;
+                m.health = slime_health(tier);
+            }
+        }
+    }
+
     fn spawn_mob_kind(&mut self, pos: Vec3, species: Species, baby: bool) {
         let mut rng = self.next_seed();
         let heading = randf(&mut rng) * TAU;
@@ -638,6 +743,9 @@ impl Entities {
                 growth: if baby { GROW_TIME } else { 0.0 },
                 love: 0.0,
                 breed_cd: 0.0,
+                angry: false,
+                // A slime spawned via spawn_mob defaults to the LARGE tier (health already = max).
+                slime_tier: if species == Species::Slime { 2 } else { 0 },
             }),
             pos,
             vel: Vec3::ZERO,
@@ -739,6 +847,7 @@ impl Entities {
         let mut shots: Vec<(Vec3, Vec3)> = Vec::new(); // skeleton arrows (pos, vel), spawned post-loop
         let mut arrow_hits: Vec<(usize, Vec3, f32)> = Vec::new(); // player arrows -> (mob idx, pos, dmg)
         let mut births: Vec<(Vec3, Species)> = Vec::new(); // P17 babies, spawned post-loop
+        let mut slime_births: Vec<(Vec3, u8)> = Vec::new(); // P18 split children (pos, tier), post-loop
         // P17 breeding partner snapshot: in-love, breedable adults (list-idx, pos, species). Read-only
         // (same reason as mob_boxes — can't borrow siblings during the &mut iteration).
         let lovers: Vec<(usize, Vec3, Species)> = self
@@ -762,7 +871,7 @@ impl Entities {
             .enumerate()
             .filter_map(|(i, e)| {
                 if let Kind::Mob(m) = e.kind {
-                    let (w, h) = m.species.size();
+                    let (w, h) = dims(&m);
                     let center = e.pos + Vec3::new(0.0, h * 0.5, 0.0);
                     let radius = (w * 0.5).max(h * 0.5) + 0.3;
                     Some((center, radius, i))
@@ -786,7 +895,7 @@ impl Entities {
                         }
                     }
                     m.atk_cd = (m.atk_cd - dt).max(0.0);
-                    let (mw, mh) = m.species.size();
+                    let (mw, mh) = dims(&m);
 
                     // Perception: distance to the player + (for hostiles) exact line-of-sight.
                     let to_player = player_pos - e.pos;
@@ -794,13 +903,16 @@ impl Entities {
                     let eye = Vec3::new(0.0, mh * 0.5, 0.0);
                     let target = player_pos + Vec3::new(0.0, 0.9, 0.0);
 
+                    // P18: a NEUTRAL mob (wolf/enderman) acts hostile once it's been provoked (angry).
+                    let effective_hostile = m.species.hostile() || m.angry;
+
                     // LOS only matters within the give-up range; skip the DDA for far/passive mobs.
-                    let los = m.species.hostile()
+                    let los = effective_hostile
                         && dist < CALM_RADIUS
                         && line_of_sight(e.pos + eye, target, &is_solid);
 
                     // State transition.
-                    if m.species.hostile() {
+                    if effective_hostile {
                         let sees = dist < DETECT_RADIUS && los;
                         // Hysteresis: stay in Attack a bit past ATTACK_RADIUS so it doesn't jitter.
                         let attack_keep = m.ai == Ai::Attack && dist <= ATTACK_RADIUS * 1.5;
@@ -881,6 +993,13 @@ impl Entities {
                         e.vel.z = e.heading.sin() * fwd;
                         if let Some(vy) = st.vy {
                             e.vel.y = vy;
+                        }
+                        // P18: slimes hop while grounded + active (overrides any step-up impulse).
+                        if m.species == Species::Slime
+                            && e.on_ground
+                            && matches!(m.ai, Ai::Wander | Ai::Chase | Ai::Attack)
+                        {
+                            e.vel.y = 7.0;
                         }
                     }
 
@@ -971,6 +1090,16 @@ impl Entities {
                     } else if m.health <= 0.0 {
                         e.dead = true;
                         deaths.push((e.pos, m.species)); // killed → drops loot
+                        // P18: a slime splits into smaller slimes (large→3, medium→2); the smallest
+                        // (tier 0) does NOT split. Children spawn post-loop (after retain), no aliasing.
+                        if m.species == Species::Slime && m.slime_tier > 0 {
+                            let child = m.slime_tier - 1;
+                            let n = if m.slime_tier == 2 { 3 } else { 2 };
+                            for k in 0..n {
+                                let a = k as f32 / n as f32 * TAU;
+                                slime_births.push((e.pos + Vec3::new(a.cos() * 0.4, 0.1, a.sin() * 0.4), child));
+                            }
+                        }
                     } else if e.pos.y < FALL_OUT_Y || dist > DESPAWN_RADIUS {
                         e.dead = true; // fell out of the world / wandered too far → no loot
                     }
@@ -1105,6 +1234,9 @@ impl Entities {
         for (pos, species) in births {
             self.spawn_baby(pos, species);
         }
+        for (pos, tier) in slime_births {
+            self.spawn_slime(pos, tier);
+        }
         collected
     }
 
@@ -1115,8 +1247,8 @@ impl Entities {
             match e.kind {
                 Kind::Mob(m) => {
                     // Each species draws its own multi-box model, yaw-rotated to face its heading;
-                    // a baby renders at BABY_SCALE (P17).
-                    let scale = if m.baby { BABY_SCALE } else { 1.0 };
+                    // a baby renders at BABY_SCALE (P17), a slime by its size tier (P18).
+                    let scale = (if m.baby { BABY_SCALE } else { 1.0 }) * mob_scale(&m);
                     for p in model(m.species) {
                         push_part(&mut mesh.opaque, e.pos, e.heading, &p, m.hurt, scale);
                     }
@@ -1853,5 +1985,57 @@ mod tests {
             es.update(dt, p, |pp| pp.y < 1, |_| false, |_| false); // never sky-exposed
         }
         assert!((es.mob_health(0) - h0).abs() < 1e-3, "sheltered/night undead don't burn");
+    }
+
+    #[test]
+    fn hit_wolf_becomes_hostile_and_chases() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::ZERO, Species::Wolf);
+        // Player beyond FLEE_RADIUS*1.8 (=9) → a CALM wolf wanders, never chases.
+        let far = Vec3::new(0.0, 0.0, 12.0);
+        let _ = es.update(0.016, far, |_| false, |_| false, |_| false);
+        let s = es.ai_summary();
+        assert!(!s.contains("chase:1") && !s.contains("attack:1"), "calm wolf doesn't chase ({s})");
+        // Hit it (from the far side so it survives), then a close visible player → it chases.
+        es.attack(Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0), 6.0, 1.0, false, None, 1.0);
+        let _ = es.update(0.016, Vec3::new(0.0, 0.0, 4.0), |_| false, |_| false, |_| false);
+        let s = es.ai_summary();
+        assert!(s.contains("chase:1") || s.contains("attack:1"), "an angry wolf chases ({s})");
+    }
+
+    #[test]
+    fn large_slime_splits_and_smallest_does_not() {
+        let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
+        let mut es = Entities::new();
+        es.spawn_slime(Vec3::ZERO, 2); // large (8 hp)
+        es.attack(o, d, 6.0, 10.0, false, None, 1.0); // lethal
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
+        assert_eq!(es.mob_count(), 3, "a large slime splits into 3 mediums");
+        let mut es2 = Entities::new();
+        es2.spawn_slime(Vec3::ZERO, 0); // smallest (1 hp)
+        es2.attack(o, d, 6.0, 10.0, false, None, 1.0);
+        let _ = es2.update(0.016, o, |_| false, |_| false, |_| false);
+        assert_eq!(es2.mob_count(), 0, "the smallest slime leaves no children");
+    }
+
+    #[test]
+    fn villager_is_passive() {
+        assert!(!Species::Villager.hostile());
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::ZERO, Species::Villager);
+        assert_eq!(es.species_summary(), "passive:1 hostile:0");
+    }
+
+    #[test]
+    fn new_species_in_all_with_valid_tables() {
+        assert_eq!(Species::ALL.len(), 12);
+        for s in Species::ALL {
+            assert!(s.max_health() > 0.0, "{s:?} has health");
+            let (w, h) = s.size();
+            assert!(w > 0.0 && h > 0.0, "{s:?} has a size");
+            assert!(!model(s).is_empty(), "{s:?} has a model");
+        }
+        assert!(Species::Slime.hostile() && Species::Enderman.hostile());
+        assert!(!Species::Wolf.hostile() && !Species::Villager.hostile());
     }
 }

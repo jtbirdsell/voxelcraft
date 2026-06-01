@@ -106,7 +106,8 @@ impl Worldgen {
         use crate::entity::Species::*;
         let h = self.height(wx, wz);
         match self.biome(wx, wz, h) {
-            Biome::Plains | Biome::Forest => &[Cow, Pig, Sheep, Chicken],
+            Biome::Forest => &[Cow, Pig, Sheep, Chicken, Wolf], // wolves roam forests
+            Biome::Plains => &[Cow, Pig, Sheep, Chicken, Villager], // villagers on the plains
             _ => &[],
         }
     }

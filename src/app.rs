@@ -1720,8 +1720,12 @@ impl ApplicationHandler for App {
                 game.set_rtx_quality(rays.max(1));
             }
         }
-        // One of each species near spawn; they fall onto terrain as it streams in.
-        let ring = [(-4, -6), (4, -6), (7, 0), (4, 6), (-4, 6), (-7, 0), (0, 8), (0, -8)];
+        // One of each species near spawn; they fall onto terrain as it streams in. 12 ring slots so
+        // the four P18 species (wolf/enderman/slime/villager) appear too (zip truncates otherwise).
+        let ring = [
+            (-4, -6), (4, -6), (7, 0), (4, 6), (-4, 6), (-7, 0), (0, 8), (0, -8),
+            (8, 8), (-8, 8), (8, -8), (-8, -8),
+        ];
         for (species, &(dx, dz)) in crate::entity::Species::ALL.iter().zip(ring.iter()) {
             game.spawn_mob(
                 Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32),

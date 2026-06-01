@@ -901,6 +901,12 @@ pub mod tile {
     /// Base of 11 flat-color tiles (51..=61) for mob-drop materials (item.rs BEEF..=ROTTEN_FLESH),
     /// so dropped loot renders in its real color instead of a generic wooden box.
     pub const MATERIAL_DROP: u32 = 51;
+    // P18 mob tiles. Tile 62 is the last free atlas slot (the grid is a fixed 8×8=64); the other three
+    // reuse existing distinct flat-color tiles (silhouette separates them) so the atlas isn't resized.
+    pub const MOB_WOLF: u32 = 62; // new flat grey
+    pub const MOB_ENDERMAN: u32 = OBSIDIAN; // near-black
+    pub const MOB_SLIME: u32 = SUGAR_CANE; // gel green
+    pub const MOB_VILLAGER: u32 = MOB_COW; // brown robe (biped silhouette ≠ the cow quadruped)
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
 }
 
