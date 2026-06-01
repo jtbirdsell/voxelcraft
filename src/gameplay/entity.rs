@@ -34,6 +34,13 @@ const KNOCKBACK: f32 = 6.0; // horizontal impulse imparted by a melee hit
 const SWEEP_RADIUS: f32 = 1.5; // a charged sword sweep hits OTHER mobs within this of the primary
 const SWEEP_KNOCKBACK: f32 = 2.5; // lighter shove (away from the player) for swept mobs
 const MOB_ATTACK_COOLDOWN: f32 = 1.0; // seconds between a hostile mob's contact hits
+// P15 local navigation tuning.
+const NAV_MARGIN: f32 = 0.4; // look-ahead beyond the mob's leading face (probe = half_width + this)
+const NAV_MAX_DROP: i32 = 3; // wander/flee refuse to step off a drop this many empty cells deep or more
+const STEP_UP_VEL: f32 = 8.5; // upward impulse to clear a 1-block ledge: apex v²/2g ≈ 1.29 > 1.0 (g=28)
+const DEFLECT_HOLD: f32 = 0.5; // seconds a mob commits to a chosen detour heading (kills stutter)
+// Detour headings tried in order when the goal is blocked: ±30°, ±60°, ±120° (small turns first).
+const DEFLECT_FAN: [f32; 6] = [0.5236, -0.5236, 1.0472, -1.0472, 2.0944, -2.0944];
 // Projectiles + explosions (M30).
 const ARROW_DAMAGE: f32 = 3.0;
 const ARROW_SPEED: f32 = 22.0;
@@ -277,6 +284,9 @@ struct MobData {
     atk_cd: f32,
     /// Creeper detonation fuse: <0 = unprimed, else seconds left before it explodes.
     fuse: f32,
+    /// Local-nav detour commitment (P15): while >0 the mob holds `deflect_heading` (counts down).
+    deflect: f32,
+    deflect_heading: f32,
 }
 
 /// Who loosed an arrow — decides what it can hit (player arrows hit mobs, mob arrows hit the player).
@@ -346,6 +356,17 @@ impl Entities {
             .iter()
             .filter(|e| matches!(e.kind, Kind::Mob(_)))
             .count()
+    }
+
+    /// Feet position of the i-th live mob (P15 navigation tests).
+    #[cfg(test)]
+    pub(crate) fn mob_pos(&self, i: usize) -> Vec3 {
+        self.list
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::Mob(_)))
+            .nth(i)
+            .unwrap()
+            .pos
     }
 
     /// Passive/hostile mob tally (headless spawn verification).
@@ -513,6 +534,8 @@ impl Entities {
                 ai: Ai::Wander,
                 atk_cd: 0.0,
                 fuse: -1.0,
+                deflect: 0.0,
+                deflect_heading: 0.0,
             }),
             pos,
             vel: Vec3::ZERO,
@@ -596,7 +619,15 @@ impl Entities {
 
     /// Advance AI + physics for all entities and drop the dead/collected ones. Returns the blocks
     /// of any item drops the player walked over this frame (to add to their inventory).
-    pub fn update(&mut self, dt: f32, player_pos: Vec3, is_solid: impl Fn(IVec3) -> bool) -> Collected {
+    /// `is_hazard(cell)` reports a contact-damage block (lava) for mob navigation (P15) — distinct
+    /// from `is_solid` because lava is non-solid (a mob would otherwise walk straight into it).
+    pub fn update(
+        &mut self,
+        dt: f32,
+        player_pos: Vec3,
+        is_solid: impl Fn(IVec3) -> bool,
+        is_hazard: impl Fn(IVec3) -> bool,
+    ) -> Collected {
         let mut collected = Collected::default();
         let mut deaths: Vec<(Vec3, Species)> = Vec::new();
         let mut shots: Vec<(Vec3, Vec3)> = Vec::new(); // skeleton arrows (pos, vel), spawned post-loop
@@ -666,16 +697,8 @@ impl Entities {
                     let heading_to = |v: Vec3| v.z.atan2(v.x);
                     let speed = match m.ai {
                         Ai::Flee => {
-                            e.wander -= dt;
-                            let away = heading_to(-to_player);
-                            // Periodically deflect so a cornered mob sidesteps instead of running
-                            // straight into the wall it's trapped against forever.
-                            e.heading = if e.wander <= 0.0 {
-                                e.wander = 1.5 + randf(&mut e.rng);
-                                away + (randf(&mut e.rng) - 0.5) * 2.2
-                            } else {
-                                away
-                            };
+                            // Run away from the player; `steer` (below) handles cornering/deflection now.
+                            e.heading = heading_to(-to_player);
                             FLEE_SPEED
                         }
                         Ai::Chase => {
@@ -703,11 +726,32 @@ impl Entities {
                         e.vel.x *= 0.86;
                         e.vel.z *= 0.86;
                     } else {
-                        e.vel.x = e.heading.cos() * speed;
-                        e.vel.z = e.heading.sin() * speed;
-                        // Occasional hop helps clear 1-block steps without real pathfinding.
-                        if speed > 0.0 && e.on_ground && randf(&mut e.rng) < 0.05 {
-                            e.vel.y = 7.0;
+                        // P15 local steering: deflect around walls/cliffs/lava + deterministic step-up
+                        // (replaces the old blind 5% random hop). Chase/Attack pursue relentlessly
+                        // (no edge-avoid) but still route around hazards; passive states avoid drops.
+                        let relentless = matches!(m.ai, Ai::Chase | Ai::Attack);
+                        let st = if speed > 0.0 {
+                            steer(
+                                e.pos,
+                                &mut e.heading,
+                                &mut m.deflect,
+                                &mut m.deflect_heading,
+                                dt,
+                                mw * 0.5,
+                                !relentless, // edge_avoid off for chase
+                                relentless,
+                                e.on_ground,
+                                &is_solid,
+                                &is_hazard,
+                            )
+                        } else {
+                            Steered { vy: None, stop: false }
+                        };
+                        let fwd = if st.stop { 0.0 } else { speed };
+                        e.vel.x = e.heading.cos() * fwd;
+                        e.vel.z = e.heading.sin() * fwd;
+                        if let Some(vy) = st.vy {
+                            e.vel.y = vy;
                         }
                     }
 
@@ -1041,6 +1085,104 @@ fn ray_aabb(o: Vec3, d: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     }
 }
 
+/// Result of a `steer` call: an optional step-up impulse, and whether the mob should hold position
+/// this frame (a relentless chaser boxed in by a hazard it can't route around — mill, don't retreat).
+struct Steered {
+    vy: Option<f32>,
+    stop: bool,
+}
+
+/// P15 local steering. Given the goal `heading` the AI state already chose, nudge it to a heading the
+/// mob can actually walk — stepping up 1-block ledges, refusing cliffs (when `edge_avoid`) and hazards
+/// (always), and deflecting around obstacles (committing to a detour for DEFLECT_HOLD so it doesn't
+/// stutter). Mutates `heading`/`deflect`/`deflect_heading` in place. `half` = mob footprint half-width.
+#[allow(clippy::too_many_arguments)]
+fn steer(
+    pos: Vec3,
+    heading: &mut f32,
+    deflect: &mut f32,
+    deflect_heading: &mut f32,
+    dt: f32,
+    half: f32,
+    edge_avoid: bool,
+    relentless: bool,
+    on_ground: bool,
+    is_solid: &impl Fn(IVec3) -> bool,
+    is_hazard: &impl Fn(IVec3) -> bool,
+) -> Steered {
+    let probe = half + NAV_MARGIN; // sample beyond the leading face, not inside the footprint
+    let base = pos.y.floor() as i32; // the mob's body/feet cell row; dy=0 = body, +1 = head, -1 = ground
+    let cell = |h: f32, dy: i32| {
+        IVec3::new(
+            (pos.x + h.cos() * probe).floor() as i32,
+            base + dy,
+            (pos.z + h.sin() * probe).floor() as i32,
+        )
+    };
+    // Can the mob safely advance along `h`? (A 1-block ledge IS walkable — it steps up below.)
+    let walkable = |h: f32| -> bool {
+        let foot = cell(h, 0); // body-level cell ahead (a solid here is a wall or a step-up ledge)
+        // Never advance toward a hazard at body level, or one we'd drop a step into.
+        if is_hazard(foot) || is_hazard(cell(h, -1)) {
+            return false;
+        }
+        // A 2-tall wall (solid at both body and head height) is not a passable step.
+        if is_solid(foot) && is_solid(cell(h, 1)) {
+            return false;
+        }
+        // Edge: only when grounded + edge-avoiding, refuse a drop NAV_MAX_DROP or more cells deep.
+        // (Open ahead at body level AND no ground at the step-down cell = a drop to measure.)
+        if edge_avoid && on_ground && !is_solid(foot) && !is_solid(cell(h, -1)) {
+            let mut depth = 1;
+            while depth < NAV_MAX_DROP && !is_solid(cell(h, -1 - depth)) {
+                depth += 1;
+            }
+            if depth >= NAV_MAX_DROP {
+                return false;
+            }
+        }
+        true
+    };
+
+    if walkable(*heading) {
+        *deflect = 0.0; // path to the goal is clear — abandon any detour
+    } else if *deflect > 0.0 && walkable(*deflect_heading) {
+        *heading = *deflect_heading; // hold the still-valid committed detour
+    } else {
+        let chosen = DEFLECT_FAN.iter().map(|&off| *heading + off).find(|&h| walkable(h));
+        match chosen {
+            Some(h) => {
+                *heading = h;
+                *deflect_heading = h;
+                *deflect = DEFLECT_HOLD;
+            }
+            None if relentless => {
+                // Boxed in while chasing: mill at the edge facing the player (don't moonwalk away).
+                return Steered { vy: None, stop: true };
+            }
+            None => {
+                *heading += std::f32::consts::PI; // dead-end: back out
+                *deflect_heading = *heading;
+                *deflect = DEFLECT_HOLD;
+            }
+        }
+    }
+    *deflect = (*deflect - dt).max(0.0);
+
+    // Step-up: a 1-block ledge straight ahead (solid foot, clear head + the cell above), on the ground.
+    let vy = if on_ground
+        && is_solid(cell(*heading, 0))
+        && !is_solid(cell(*heading, 1))
+        && !is_hazard(cell(*heading, 1))
+        && !is_solid(cell(*heading, 2))
+    {
+        Some(STEP_UP_VEL)
+    } else {
+        None
+    };
+    Steered { vy, stop: false }
+}
+
 /// Move an AABB (width `w`, height `h`, feet at `pos`) by `vel*dt` with axis-separated voxel
 /// collision; returns whether it ended up resting on ground.
 fn collide_move(
@@ -1258,7 +1400,7 @@ mod tests {
         assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 4 -> 2
         assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 2 -> 0
         // The dead mob is culled on the next tick (and drops an XP orb in its place).
-        let _ = es.update(0.016, o, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false);
         assert_eq!(es.ai_summary(), "mobs idle:0 wander:0 flee:0 chase:0 attack:0");
     }
 
@@ -1272,7 +1414,7 @@ mod tests {
         es.spawn_mob(Vec3::new(3.0, 0.0, 0.0), Species::Chicken); // 3.0 > 1.5 -> safe
         let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
         assert!(es.attack(o, d, 6.0, 10.0, false, Some(10.0), 1.0));
-        let _ = es.update(0.016, o, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false);
         assert_eq!(es.mob_count(), 1, "primary + the in-radius neighbor die; the far mob survives");
     }
 
@@ -1284,7 +1426,7 @@ mod tests {
         es.spawn_mob(Vec3::new(1.0, 0.0, 0.0), Species::Chicken);
         let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
         assert!(es.attack(o, d, 6.0, 10.0, false, None, 1.0));
-        let _ = es.update(0.016, o, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false);
         assert_eq!(es.mob_count(), 1, "only the primary dies without a sweep");
     }
 
@@ -1295,7 +1437,7 @@ mod tests {
         let player = Vec3::new(0.0, 0.0, 3.0); // feet; chest (+1) sits at z=3
         let mut dmg = 0.0;
         for _ in 0..120 {
-            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }
@@ -1314,7 +1456,7 @@ mod tests {
         let player = Vec3::ZERO; // the shooter
         let mut dmg = 0.0;
         for _ in 0..240 {
-            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.mob_count() == 0 {
                 break;
             }
@@ -1331,7 +1473,7 @@ mod tests {
         let player = Vec3::ZERO;
         let mut dmg = 0.0;
         for _ in 0..300 {
-            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }
@@ -1346,7 +1488,7 @@ mod tests {
         es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Cow); // near
         es.spawn_mob(Vec3::new(100.0, 1.0, 0.0), Species::Pig); // beyond DESPAWN_RADIUS
         assert_eq!(es.mob_count(), 2);
-        let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1); // floor at y<1
+        let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1, |_| false); // floor at y<1
         assert_eq!(es.mob_count(), 1, "the far mob despawns, the near one stays");
     }
 
@@ -1358,7 +1500,7 @@ mod tests {
         for _ in 0..3 {
             es.attack(o, d, 6.0, 5.0, false, None, 1.0); // 10 hp -> dead
         }
-        let _ = es.update(0.016, o, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false);
         assert_eq!(es.species_summary(), "passive:0 hostile:0", "the cow died");
         // Two item drops (beef, leather) + one XP orb remain as entities.
         assert!(es.count() >= 3, "cow should drop loot + xp (count = {})", es.count());
@@ -1371,7 +1513,7 @@ mod tests {
         // jump from z=0 to z=2.2 (final cell z=2), never testing z=1 — the sub-step march must catch it.
         es.spawn_arrow(Vec3::new(0.5, 1.0, 0.0), Vec3::new(0.0, 0.0, 22.0));
         let wall = |p: IVec3| p.z == 1;
-        es.update(0.1, Vec3::new(0.0, 500.0, 500.0), wall); // player far away
+        es.update(0.1, Vec3::new(0.0, 500.0, 500.0), wall, |_| false); // player far away
         assert_eq!(es.count(), 0, "the arrow stops at the wall instead of tunneling through it");
     }
 
@@ -1381,11 +1523,82 @@ mod tests {
         es.spawn_arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 12.0));
         let wall = |p: IVec3| p.z >= 2;
         for _ in 0..120 {
-            es.update(1.0 / 60.0, Vec3::new(0.0, 200.0, 200.0), wall); // player far away
+            es.update(1.0 / 60.0, Vec3::new(0.0, 200.0, 200.0), wall, |_| false); // player far away
             if es.count() == 0 {
                 break;
             }
         }
         assert_eq!(es.count(), 0, "the arrow stops at the wall and despawns");
+    }
+
+    // P15 local navigation. Passive (Cow) tests drive a deterministic heading via FLEE: a player just
+    // inside FLEE_RADIUS on -x makes the cow flee +x toward the scripted obstacle.
+    #[test]
+    fn mob_steps_up_one_block_ledge() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.5, 1.0, 0.5), Species::Cow);
+        // Floor at y<1, plus a raised plateau (solid at y==1) for x>=2 — a 1-block step up at x=2.
+        let solid = |p: IVec3| p.y < 1 || (p.x >= 2 && p.y == 1);
+        let player = Vec3::new(-1.0, 1.0, 0.5);
+        for _ in 0..240 {
+            es.update(1.0 / 60.0, player, solid, |_| false);
+        }
+        assert!(es.mob_pos(0).x > 2.0, "cow crossed onto the ledge (x={})", es.mob_pos(0).x);
+        assert!(es.mob_pos(0).y >= 1.9, "cow climbed the 1-block step (y={})", es.mob_pos(0).y);
+    }
+
+    #[test]
+    fn wanderer_does_not_walk_off_a_tall_drop() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(1.0, 1.0, 0.5), Species::Cow);
+        let solid = |p: IVec3| p.y < 1 && p.x < 3; // floor ends at x=3 → a deep void beyond
+        let player = Vec3::new(-0.5, 1.0, 0.5);
+        for _ in 0..300 {
+            es.update(1.0 / 60.0, player, solid, |_| false);
+        }
+        assert!(es.mob_pos(0).x < 3.0, "cow stayed back from the cliff (x={})", es.mob_pos(0).x);
+        assert!(es.mob_pos(0).y > 0.5, "cow did not fall into the void (y={})", es.mob_pos(0).y);
+    }
+
+    #[test]
+    fn mob_does_not_path_into_lava() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(1.0, 1.0, 0.5), Species::Cow);
+        let solid = |p: IVec3| p.y < 1; // full floor
+        let lava = |p: IVec3| p.x >= 3 && p.y == 1; // a lava body at body level for x>=3
+        let player = Vec3::new(-0.5, 1.0, 0.5);
+        for _ in 0..300 {
+            es.update(1.0 / 60.0, player, solid, lava);
+        }
+        assert!(es.mob_pos(0).x < 3.0, "cow avoided the lava (x={})", es.mob_pos(0).x);
+    }
+
+    #[test]
+    fn deflection_picks_a_side_around_a_wall() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(1.0, 1.0, 0.5), Species::Cow);
+        let solid = |p: IVec3| p.y < 1 || (p.x == 3 && p.y >= 1); // a 2-tall wall plane at x=3
+        let player = Vec3::new(-0.5, 1.0, 0.5);
+        for _ in 0..240 {
+            es.update(1.0 / 60.0, player, solid, |_| false);
+        }
+        assert!((es.mob_pos(0).z - 0.5).abs() > 0.5, "cow deflected sideways (z={})", es.mob_pos(0).z);
+        assert!(es.mob_pos(0).x < 3.0, "cow did not tunnel the wall (x={})", es.mob_pos(0).x);
+    }
+
+    #[test]
+    fn chase_steps_up_to_follow_the_player() {
+        // A hostile zombie chases a player on a raised plateau; chase keeps step-up (only edge-avoid
+        // is disabled), so it must climb the ledge to approach. (Hazard avoidance is shared with the
+        // flee path proven above — it is not state-gated.)
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.5, 1.0, 0.5), Species::Zombie);
+        let solid = |p: IVec3| p.y < 1 || (p.x >= 2 && p.y == 1);
+        let player = Vec3::new(6.0, 2.0, 0.5);
+        for _ in 0..400 {
+            es.update(1.0 / 60.0, player, solid, |_| false);
+        }
+        assert!(es.mob_pos(0).x > 3.0, "zombie advanced toward the player (x={})", es.mob_pos(0).x);
+        assert!(es.mob_pos(0).y >= 1.9, "zombie climbed onto the plateau (y={})", es.mob_pos(0).y);
     }
 }

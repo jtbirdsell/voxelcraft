@@ -175,7 +175,10 @@ position, albedo + skylight) and an ACES tonemap.
   each with its own size, health, and a distinct **multi-box model** (quadrupeds, humanoids, a tall
   creeper, a wide-low spider), lit by the same ray-traced pipeline as the world. An **Idle / Wander /
   Flee / Chase / Attack** state machine drives them: passive species flee when you crowd them, hostile
-  species **chase you on sight** (raycast line-of-sight) and close to attack range. They **spawn
+  species **chase you on sight** (raycast line-of-sight) and close to attack range. Movement is real
+  **local navigation** — mobs **step up** one-block ledges, **avoid walking off cliffs** (passives) and
+  **into lava**, and **deflect around walls** rather than stuttering into them (a chaser pursues
+  relentlessly, dropping off ledges to follow you but still routing around lava). They **spawn
   naturally** around you — passive species in daylight on grass, hostile species at night — capped in
   number and despawning once you roam far away. Dropped items + XP orbs share the same entity physics.
 - **Combat (modern 1.9-style)**: left-click melees the nearest mob in your reach (ray-vs-AABB beats

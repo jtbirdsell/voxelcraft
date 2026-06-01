@@ -449,23 +449,26 @@ impl Game {
             self.try_spawn(day, camera_pos);
         }
 
-        // Update mobs and dropped items (AI + physics). The collision closure borrows only the
-        // chunk map, leaving `self.entities` free to mutate.
+        // Update mobs and dropped items (AI + physics). The sampler closures borrow only the chunk
+        // map (read-only), leaving `self.entities` free to mutate. `is_hazard` (P15 mob nav) flags
+        // lava — non-solid, so the bool `is_solid` can't see it, but a mob must not walk into it.
         let chunks = &self.world.chunks;
-        let collected = self.entities.update(dt, camera_pos, |wp| {
+        let block_at = |wp: IVec3| -> block::BlockId {
             let cpos = world::chunk_of(wp);
             match chunks.get(&cpos) {
                 Some(c) => {
                     let o = world::chunk_origin(cpos);
-                    block::is_solid(c.get(
-                        (wp.x - o.x) as usize,
-                        (wp.y - o.y) as usize,
-                        (wp.z - o.z) as usize,
-                    ))
+                    c.get((wp.x - o.x) as usize, (wp.y - o.y) as usize, (wp.z - o.z) as usize)
                 }
-                None => false,
+                None => block::AIR, // unloaded → air (a mob just won't sense a hazard it can't see)
             }
-        });
+        };
+        let collected = self.entities.update(
+            dt,
+            camera_pos,
+            |wp| block::is_solid(block_at(wp)),
+            |wp| block_at(wp) == block::LAVA,
+        );
 
         // Apply any creeper explosions: carve the crater, then add radial blast damage to the player.
         let mut collected = collected;
