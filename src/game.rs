@@ -985,6 +985,13 @@ impl Game {
         x
     }
 
+    /// Default player spawn Y for a fresh world: a couple of blocks above the generated surface column
+    /// so the player settles onto the ground. Needed now that the world is deepened (sea level y96) —
+    /// the old fixed y96 spawn would land inside the raised terrain.
+    pub fn spawn_surface_y(&self, wx: i32, wz: i32) -> f32 {
+        self.worldgen.height(wx, wz) as f32 + 2.0
+    }
+
     /// Topmost walkable ground surface at (wx,wz) with 2 air blocks above (room for a mob), else
     /// None. Only real ground counts (grass/dirt/stone/sand/snow/gravel) — never a leaf canopy or a
     /// tree trunk, so mobs don't spawn perched in the air on trees.

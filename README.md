@@ -70,8 +70,9 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
 **World & rendering**
 - Infinite world streamed as 32³ chunks, generated and **binary greedy-meshed** across a worker pool
   (cores − 2 threads), with CPU frustum culling.
-- Multi-octave OpenSimplex terrain with parameter-space **biomes**, 3D-noise **caves**, depth-banded
-  **ores**, a jagged **bedrock** floor, **deepslate** at depth, and deterministic **trees** and
+- Multi-octave OpenSimplex terrain (deepened: sea level y96, ~90 blocks of underground) with
+  parameter-space **biomes**, 3D-noise **caves**, depth-banded **ores**, a jagged **bedrock** floor,
+  a noise-perturbed **deepslate** boundary at depth, and deterministic **trees** and
   biome-gated surface **decoration** — flowers, tall grass, **ferns**, **red/brown mushrooms**,
   **sugar cane** along water edges, **pumpkins**, cactus, and **ice** on frozen lakes in snowy
   biomes. Fully seed-deterministic.

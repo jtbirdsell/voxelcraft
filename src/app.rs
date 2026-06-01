@@ -1401,7 +1401,11 @@ impl ApplicationHandler for App {
                         None
                     }
                 })
-                .unwrap_or((Vec3::new(8.0, 96.0, 24.0), -std::f32::consts::FRAC_PI_2, -0.30));
+                .unwrap_or_else(|| {
+                    // Spawn on the (deepened) surface of the spawn column, not a fixed y96.
+                    let sy = game.spawn_surface_y(8, 24);
+                    (Vec3::new(8.0, sy, 24.0), -std::f32::consts::FRAC_PI_2, -0.30)
+                });
             let player = Player::new(cam_xyz, false);
             let camera = Camera::new(player.eye(), cam_yaw, cam_pitch);
             let mut camera_uniform = CameraUniform::new();
@@ -1690,11 +1694,11 @@ impl ApplicationHandler for App {
         // Interactive: load a saved world if one exists, else start a new one.
         let dir = persistence::save_dir();
         let level = persistence::load_level(&dir);
-        let (seed, spawn, yaw, pitch, time, flying) = match &level {
+        let (seed, mut spawn, yaw, pitch, time, flying) = match &level {
             Some(l) => (l.seed, Vec3::from(l.spawn), l.yaw, l.pitch, l.time, l.flying),
             None => (
                 SEED,
-                Vec3::new(8.0, 96.0, 24.0),
+                Vec3::new(8.0, 96.0, 24.0), // y is fixed up to the deepened surface below
                 -std::f32::consts::FRAC_PI_2,
                 -0.30,
                 0.34,
@@ -1706,6 +1710,10 @@ impl ApplicationHandler for App {
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
         game.restore_furnaces(saved_furnaces);
         game.restore_chests(saved_chests);
+        // Fresh world: drop the spawn onto the deepened surface (saved worlds keep their stored spawn).
+        if level.is_none() {
+            spawn.y = game.spawn_surface_y(spawn.x as i32, spawn.z as i32);
+        }
         // World difficulty (P6): VOXELCRAFT_DIFFICULTY overrides; else the saved value; else Normal.
         let difficulty = std::env::var("VOXELCRAFT_DIFFICULTY")
             .ok()

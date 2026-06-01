@@ -12,8 +12,8 @@ use glam::IVec3;
 use crate::block::{self, BlockId};
 use crate::world::{chunk_origin, Chunk, CHUNK_SIZE, CHUNK_SIZE_I, WORLD_HEIGHT};
 
-pub const SEA_LEVEL: i32 = 64;
-const MAX_TREE_HEIGHT: i32 = 9;
+pub const SEA_LEVEL: i32 = 96;
+const MAX_TREE_HEIGHT: i32 = 12;
 const TREE_MARGIN: i32 = 2;
 const TREE_SALT: u64 = 0x7265655F_5345_4544;
 
@@ -22,7 +22,7 @@ const TREE_SALT: u64 = 0x7265655F_5345_4544;
 // edits this data, not the control flow). Copied verbatim from the pre-P20 `biome()` ladder.
 const OCEAN_MAX_H: i32 = SEA_LEVEL - 1; // height <= 63  -> Ocean
 const BEACH_MAX_H: i32 = SEA_LEVEL + 1; // height <= 65  -> Beach
-const MOUNTAIN_MIN_H: i32 = 104; // height >= 104 -> Mountains
+const MOUNTAIN_MIN_H: i32 = SEA_LEVEL + 40; // height >= sea+40 -> Mountains (deepened: was abs 104)
 const SNOWY_TEMP_MAX: f32 = -0.35; // temperature <  -0.35 -> Snowy
 const DESERT_TEMP_MIN: f32 = 0.33; // temperature > 0.33 (and dry) -> Desert
 const DESERT_HUM_MAX: f32 = -0.05; // humidity < -0.05 (with hot temp) -> Desert
@@ -82,9 +82,15 @@ pub struct Worldgen {
     cave_a: FastNoiseLite,
     cave_b: FastNoiseLite,
     cheese: FastNoiseLite,
+    deepslate: FastNoiseLite,
 }
 
 impl Worldgen {
+    /// Mean deepslate boundary + jitter amplitude: deepslate fills a wavy band ~y5..y15 just above the
+    /// bedrock floor (the underground is shallow here vs Minecraft, so the band hugs the world floor).
+    const DEEPSLATE_MID: i32 = 10;
+    const DEEPSLATE_JITTER: f32 = 5.0;
+
     pub fn new(seed: u64) -> Self {
         let mk = |off: u64, nt: NoiseType, freq: f32, octaves: i32| {
             let mut n = FastNoiseLite::new();
@@ -105,6 +111,7 @@ impl Worldgen {
             cave_a: mk(6, NoiseType::OpenSimplex2, 0.018, 2),
             cave_b: mk(7, NoiseType::OpenSimplex2S, 0.018, 2),
             cheese: mk(8, NoiseType::OpenSimplex2, 0.010, 2),
+            deepslate: mk(9, NoiseType::OpenSimplex2, 0.010, 2),
         }
     }
 
@@ -180,7 +187,7 @@ impl Worldgen {
             Biome::Desert | Biome::Beach => block::SAND,
             Biome::Snowy => block::SNOW,
             Biome::Mountains => {
-                if height > 112 {
+                if height > SEA_LEVEL + 48 {
                     block::SNOW
                 } else {
                     block::STONE
@@ -210,10 +217,19 @@ impl Worldgen {
         self.cheese.get_noise_3d(fx, fy * 1.4, fz) > 0.80
     }
 
-    /// Host rock by depth: deepslate in the deep band, stone above.
+    /// The y below which a column is deepslate, as a noise-perturbed per-column band just above
+    /// bedrock. This is the SINGLE SOURCE OF TRUTH for "am I in deepslate" — host rock and (from U6)
+    /// ore-variant choice both read it, so a stone cell never holds a deepslate-variant ore. Computed
+    /// once per column in `generate_chunk` and threaded into `ore_at`/`host_stone`.
+    fn deepslate_top(&self, wx: i32, wz: i32) -> i32 {
+        let n = self.deepslate.get_noise_2d(wx as f32, wz as f32); // [-1, 1]
+        Self::DEEPSLATE_MID + (n * Self::DEEPSLATE_JITTER).round() as i32
+    }
+
+    /// Host rock by depth: deepslate below the (noisy) per-column boundary `ds_top`, stone above.
     #[inline]
-    fn host_stone(wy: i32) -> BlockId {
-        if wy < 14 {
+    fn host_stone(wy: i32, ds_top: i32) -> BlockId {
+        if wy < ds_top {
             block::DEEPSLATE
         } else {
             block::STONE
@@ -222,7 +238,7 @@ impl Worldgen {
 
     /// Depth-banded ore distribution (diamond/redstone deep, gold lower, iron/coal common), else the
     /// host rock (deepslate/stone).
-    fn ore_at(&self, wx: i32, wy: i32, wz: i32) -> BlockId {
+    fn ore_at(&self, wx: i32, wy: i32, wz: i32, ds_top: i32) -> BlockId {
         let h = hash3(self.seed, wx, wy, wz);
         if wy < 16 && (h % 1100) < 3 {
             return block::DIAMOND_ORE;
@@ -242,7 +258,7 @@ impl Worldgen {
         if wy < 128 && ((h >> 22) % 700) < 8 {
             return block::COAL_ORE;
         }
-        Self::host_stone(wy)
+        Self::host_stone(wy, ds_top)
     }
 
     pub fn generate_chunk(&self, pos: IVec3) -> Chunk {
@@ -276,6 +292,7 @@ impl Worldgen {
                 let biome = self.biome(wx, wz, height);
                 let top = self.surface_top(biome, height);
                 let sub = self.subsurface(biome);
+                let ds_top = self.deepslate_top(wx, wz); // noisy deepslate boundary, once per column
                 for ly in 0..CHUNK_SIZE {
                     let wy = oy + ly as i32;
                     if wy < height {
@@ -295,7 +312,7 @@ impl Worldgen {
                         } else if wy >= 3 && wy < height - 1 && self.is_cave(wx, wy, wz) {
                             id = block::AIR;
                         } else if id == block::STONE {
-                            id = self.ore_at(wx, wy, wz);
+                            id = self.ore_at(wx, wy, wz, ds_top);
                         }
                         if id != block::AIR {
                             chunk.set(lx, ly, lz, id);
@@ -558,7 +575,7 @@ mod tests {
             if height <= SEA_LEVEL + 1 {
                 return Biome::Beach;
             }
-            if height >= 104 {
+            if height >= SEA_LEVEL + 40 {
                 return Biome::Mountains;
             }
             let t = self.temperature.get_noise_2d(wx as f32, wz as f32);
@@ -682,5 +699,60 @@ mod tests {
         // Stronger: regenerating the same neighbor yields identical data.
         let right2 = wg.generate_chunk(IVec3::new(1, 2, 0));
         assert_eq!(right.blocks, right2.blocks);
+    }
+
+    /// U1 (deepening): sea level rose to 96 (more underground), terrain+canopy never pierces the
+    /// world ceiling, and the deepslate boundary is a noisy low band that host rock honors.
+    #[test]
+    fn u1_deepening_and_noisy_deepslate() {
+        let wg = Worldgen::new(0x5EED_C0FFEE);
+        let (mut hmin, mut hmax) = (i32::MAX, i32::MIN);
+        let (mut ds_min, mut ds_max) = (i32::MAX, i32::MIN);
+        let mut wx = -2048;
+        while wx <= 2048 {
+            let mut wz = -2048;
+            while wz <= 2048 {
+                let h = wg.height(wx, wz);
+                hmin = hmin.min(h);
+                hmax = hmax.max(h);
+                assert!(
+                    h + MAX_TREE_HEIGHT <= WORLD_HEIGHT,
+                    "terrain+canopy pierces the ceiling at ({wx},{wz}): h={h}"
+                );
+                let ds = wg.deepslate_top(wx, wz);
+                ds_min = ds_min.min(ds);
+                ds_max = ds_max.max(ds);
+                wz += 64;
+            }
+            wx += 64;
+        }
+        // Sea level deepened: there are submerged columns and real highlands well above it.
+        assert!(hmin < SEA_LEVEL, "no submerged columns (sea level didn't deepen)");
+        assert!(hmax > SEA_LEVEL + 20, "no highlands above the raised sea level");
+        // The deepslate boundary is noisy and confined to a low band MID +/- JITTER.
+        assert!(ds_max - ds_min >= 4, "deepslate boundary not noisy (min {ds_min}, max {ds_max})");
+        assert!(ds_min >= Worldgen::DEEPSLATE_MID - 5 && ds_max <= Worldgen::DEEPSLATE_MID + 5);
+        // host_stone honors the boundary; a deep chunk has deepslate only in the low band + stone above.
+        assert_eq!(Worldgen::host_stone(4, 10), block::DEEPSLATE);
+        assert_eq!(Worldgen::host_stone(10, 10), block::STONE);
+        let deep = wg.generate_chunk(IVec3::new(0, 0, 0)); // world y 0..32 (deep underground)
+        let (mut saw_deepslate, mut saw_stone_high) = (false, false);
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                for ly in 0..CHUNK_SIZE {
+                    let id = deep.get(lx, ly, lz);
+                    let wy = ly as i32; // chunk origin y = 0
+                    if id == block::DEEPSLATE {
+                        saw_deepslate = true;
+                        assert!(wy < Worldgen::DEEPSLATE_MID + 6, "deepslate above its band at wy={wy}");
+                    }
+                    if id == block::STONE && wy > Worldgen::DEEPSLATE_MID + 6 {
+                        saw_stone_high = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_deepslate, "deep chunk has no deepslate near bedrock");
+        assert!(saw_stone_high, "deep chunk has no stone above the deepslate band");
     }
 }
