@@ -189,6 +189,10 @@ position, albedo + skylight) and an ACES tonemap.
   projectiles that stick in blocks or deal damage on a hit); **creepers** prime a fuse in your face and
   **detonate** — a spherical crater blown out of the world plus radial blast damage that falls off with
   distance (and is reduced by armor).
+- **Bow**: craft a bow (string + sticks) and arrows (flint/stick/feather); **hold right-click to draw**
+  (a charge bar fills above the crosshair) and release to loose a **gravity-arced arrow** whose speed and
+  damage scale with the draw — a full draw fires a faster, harder **critical** arrow. Arrows are owner-
+  tagged, so yours strike mobs (never yourself); drawing spends one arrow (free in creative).
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
 
 Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;

@@ -101,6 +101,9 @@ struct State {
     /// Eat-hold progress (seconds) and the food id being eaten (right-click-hold on a food).
     eat_progress: f32,
     eat_item: Option<item::ItemId>,
+    /// Bow-draw progress (seconds) and the bow id being drawn (right-click-hold with a bow, P13).
+    draw_progress: f32,
+    draw_item: Option<item::ItemId>,
     /// World difficulty (P6); mirrored to player + game, persisted in level.bin, cycled with G.
     difficulty: crate::rules::Difficulty,
 }
@@ -612,12 +615,48 @@ impl App {
             state.mine_progress = 0.0;
         }
 
+        let sel_item = state.inventory.selected_item();
+
+        // Bow (P13): hold right-click with a bow + ammo to DRAW (charge over BOW_DRAW_TIME); release
+        // looses a gravity-arced arrow whose speed/damage scale with the draw. This pre-empts eating
+        // and block placement. Combined into one block so the RELEASE (place_held just went false) is
+        // detected and fires BEFORE the draw state is reset.
+        let have_ammo = state.inventory.creative || state.inventory.has_item(item::ARROW);
+        let bow_drawing = state.screen == Screen::None
+            && state.input.place_held
+            && item::is_bow(sel_item)
+            && have_ammo;
+        if state.draw_item.is_some() && !bow_drawing {
+            // We were drawing and now aren't: fire on a genuine in-world release past the min draw;
+            // a screen-open or weapon-swap cancels (those leave place_held/screen != the fire case).
+            if state.screen == Screen::None
+                && !state.input.place_held
+                && state.draw_progress >= item::BOW_MIN_DRAW
+            {
+                let (speed, damage) = item::bow_shot(state.draw_progress / item::BOW_DRAW_TIME);
+                let dir = state.camera.forward();
+                let pos = state.camera.position + dir * 1.2; // muzzle clear of the player AABB
+                state.game.spawn_player_arrow(pos, dir * speed, damage);
+                if !state.inventory.creative {
+                    state.inventory.consume_item(item::ARROW);
+                }
+            }
+            state.draw_progress = 0.0;
+            state.draw_item = None;
+        } else if bow_drawing {
+            if state.draw_item != Some(sel_item) {
+                state.draw_item = Some(sel_item);
+                state.draw_progress = 0.0;
+            }
+            state.draw_progress = (state.draw_progress + dt).min(item::BOW_DRAW_TIME);
+        }
+
         // Eating: hold right-click while a food item is selected to eat it over EAT_TIME, then
         // restore hunger/saturation and consume one. (Foods place nothing, so the place edge below
-        // is a no-op for them.) Gameplay-only — suppressed while any screen is open.
-        let sel_item = state.inventory.selected_item();
+        // is a no-op for them.) Gameplay-only — suppressed while any screen is open or drawing a bow.
         let edible = state.screen == Screen::None
             && state.input.place_held
+            && !item::is_bow(sel_item)
             && crate::food::food(sel_item).is_some_and(|f| state.player.can_eat(f.always_edible));
         if edible {
             if state.eat_item != Some(sel_item) {
@@ -640,7 +679,9 @@ impl App {
 
         if state.input.place_pressed {
             state.input.place_pressed = false;
-            if let Some(hit) = &target {
+            if item::is_bow(state.inventory.selected_item()) {
+                // A bow press only starts the draw (handled above) — never place/interact.
+            } else if let Some(hit) = &target {
                 let targeted = state.game.block_at(hit.block);
                 if targeted == block::WOODEN_DOOR {
                     // Right-click toggles the door open/closed — both halves together.
@@ -915,6 +956,11 @@ impl App {
                 1.0
             }
         };
+        let draw_charge = if item::is_bow(state.inventory.selected_item()) {
+            (state.draw_progress / item::BOW_DRAW_TIME).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let mut ui = overlay::build_ui(
             state.gpu.config.width,
             state.gpu.config.height,
@@ -928,6 +974,7 @@ impl App {
             state.player.level,
             state.player.xp_fraction(),
             attack_charge,
+            draw_charge,
             debug_lines.as_deref(),
         );
         if let Screen::Chest(pos) = state.screen {
@@ -1502,6 +1549,7 @@ impl ApplicationHandler for App {
                 if survival_demo { 7 } else { 0 },
                 if survival_demo { 0.6 } else { 0.0 },
                 if survival_demo { 0.5 } else { 1.0 }, // attack_charge: show the cooldown bar in the demo
+                if survival_demo { 0.7 } else { 0.0 }, // draw_charge: show the bow-draw bar in the demo
                 Some(&dbg),
             );
             let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();
@@ -1692,6 +1740,8 @@ impl ApplicationHandler for App {
             melee_prev_sel: 0,
             eat_progress: 0.0,
             eat_item: None,
+            draw_progress: 0.0,
+            draw_item: None,
             difficulty,
         });
         self.set_grab(true);

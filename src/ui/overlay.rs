@@ -668,6 +668,7 @@ pub fn build_ui(
     level: u32,
     xp_frac: f32,
     attack_charge: f32,
+    draw_charge: f32,
     debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
@@ -690,6 +691,21 @@ pub fn build_ui(
         if fw > 0.0 {
             let c = 0.4 + 0.55 * attack_charge;
             push_px_rect(&mut v, sw, sh, bx, by, fw, bar_h, [c, c, c, 0.9]);
+        }
+    }
+
+    // Bow-draw indicator (P13): a cyan bar ABOVE the crosshair, filling as the bow charges and
+    // brightening to white near full draw. Above the crosshair (vs the grey cooldown bar below) so
+    // the two never read as one.
+    if draw_charge > 0.01 {
+        let (bar_w, bar_h) = (40.0, 3.0);
+        let (bx, by) = (cx - bar_w * 0.5, cy - 18.0);
+        push_px_rect(&mut v, sw, sh, bx, by, bar_w, bar_h, [0.10, 0.12, 0.14, 0.55]);
+        let fw = bar_w * draw_charge.clamp(0.0, 1.0);
+        if fw > 0.0 {
+            let full = ((draw_charge - 0.85).max(0.0) / 0.15).min(1.0);
+            let c = [0.35 + 0.6 * full, 0.75, 0.95, 0.95];
+            push_px_rect(&mut v, sw, sh, bx, by, fw, bar_h, c);
         }
     }
 

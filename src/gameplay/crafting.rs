@@ -96,6 +96,19 @@ fn build_recipes() -> Vec<Recipe> {
     armor_set(&mut r, item::IRON_INGOT, 1);
     armor_set(&mut r, item::GOLD_INGOT, 2);
     armor_set(&mut r, item::DIAMOND, 3);
+    // P13: bow (3 string + 3 sticks, MC shape) and arrows (flint + stick + feather -> 4).
+    r.push(shaped(
+        &[" ST", "S T", " ST"],
+        &[('S', item::STRING), ('T', S)],
+        item::BOW,
+        1,
+    ));
+    r.push(shaped(
+        &["F", "S", "E"],
+        &[('F', item::FLINT), ('S', S), ('E', item::FEATHER)],
+        item::ARROW,
+        4,
+    ));
     r
 }
 

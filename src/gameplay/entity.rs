@@ -279,14 +279,22 @@ struct MobData {
     fuse: f32,
 }
 
+/// Who loosed an arrow — decides what it can hit (player arrows hit mobs, mob arrows hit the player).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArrowOwner {
+    Player,
+    Mob,
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
     Mob(MobData),
     Item(ItemStack),
     /// An experience orb worth `n` points; homes toward a nearby player and grants XP on pickup.
     Xp(u32),
-    /// A skeleton arrow carrying `damage`; flies until it hits a block, the player, or expires.
-    Arrow(f32),
+    /// An arrow carrying `damage`, tagged by who loosed it. Flies under gravity until it hits a block,
+    /// its target (a mob for a player arrow; the player for a mob arrow), or expires.
+    Arrow { damage: f32, owner: ArrowOwner },
 }
 
 /// What the entity tick produced this frame: item stacks + XP the player swept up, contact/projectile
@@ -556,11 +564,21 @@ impl Entities {
         });
     }
 
-    /// Spawn an arrow at `pos` with velocity `vel` (oriented along its flight).
+    /// Spawn a MOB arrow (skeleton shot) at `pos` with velocity `vel`. Kept as `spawn_arrow` so the
+    /// skeleton-shot loop + existing tests need no change.
     pub fn spawn_arrow(&mut self, pos: Vec3, vel: Vec3) {
+        self.spawn_arrow_owned(pos, vel, ARROW_DAMAGE, ArrowOwner::Mob);
+    }
+
+    /// Spawn a PLAYER arrow (bow shot, P13): hits mobs, never the player.
+    pub fn spawn_player_arrow(&mut self, pos: Vec3, vel: Vec3, damage: f32) {
+        self.spawn_arrow_owned(pos, vel, damage, ArrowOwner::Player);
+    }
+
+    fn spawn_arrow_owned(&mut self, pos: Vec3, vel: Vec3, damage: f32, owner: ArrowOwner) {
         let rng = self.next_seed();
         self.list.push(Entity {
-            kind: Kind::Arrow(ARROW_DAMAGE),
+            kind: Kind::Arrow { damage, owner },
             pos,
             vel,
             on_ground: false,
@@ -579,6 +597,26 @@ impl Entities {
         let mut collected = Collected::default();
         let mut deaths: Vec<(Vec3, Species)> = Vec::new();
         let mut shots: Vec<(Vec3, Vec3)> = Vec::new(); // skeleton arrows (pos, vel), spawned post-loop
+        let mut arrow_hits: Vec<(usize, Vec3, f32)> = Vec::new(); // player arrows -> (mob idx, pos, dmg)
+        // Mob hit-spheres for player-arrow tests — a read-only snapshot taken before the `&mut self.list`
+        // iteration (we can't borrow other entities while one is mutably borrowed). Pre-move positions are
+        // fine: a mob drifts <~0.06 blocks per frame, the same one-frame lag the deaths/knockback already
+        // settle with. A forgiving sphere (like the skeleton->player test) so fast arrows don't slip past.
+        let mob_boxes: Vec<(Vec3, f32, usize)> = self
+            .list
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                if let Kind::Mob(m) = e.kind {
+                    let (w, h) = m.species.size();
+                    let center = e.pos + Vec3::new(0.0, h * 0.5, 0.0);
+                    let radius = (w * 0.5).max(h * 0.5) + 0.3;
+                    Some((center, radius, i))
+                } else {
+                    None
+                }
+            })
+            .collect();
         for e in &mut self.list {
             e.age += dt;
             match e.kind {
@@ -775,12 +813,12 @@ impl Entities {
                         e.dead = true;
                     }
                 }
-                Kind::Arrow(dmg) => {
+                Kind::Arrow { damage: dmg, owner } => {
                     e.vel.y -= ARROW_GRAVITY * dt;
                     e.heading = e.vel.z.atan2(e.vel.x);
                     // Sub-step the flight so a fast arrow can't tunnel through a 1-block wall or skip
-                    // past the player in a single frame: march ~0.4 blocks at a time, testing the
-                    // cell ahead and the player-hit at each step.
+                    // past its target in a single frame: march ~0.4 blocks at a time, testing the cell
+                    // ahead and the owner-appropriate target hit at each step.
                     let move_vec = e.vel * dt;
                     let steps = (move_vec.length() / 0.4).ceil().max(1.0) as i32;
                     let step = move_vec / steps as f32;
@@ -797,16 +835,50 @@ impl Entities {
                             break;
                         }
                         e.pos = next;
-                        if (chest - e.pos).length() < 0.7 {
-                            collected.player_damage += dmg;
-                            e.dead = true;
-                            break;
+                        match owner {
+                            ArrowOwner::Mob => {
+                                if (chest - e.pos).length() < 0.7 {
+                                    collected.player_damage += dmg;
+                                    e.dead = true;
+                                    break;
+                                }
+                            }
+                            ArrowOwner::Player => {
+                                // The shooter is never in mob_boxes, and the muzzle spawns outside the
+                                // player AABB, so a player arrow can't self-hit. Defer the mob mutation
+                                // (can't touch other entities mid-&mut-iteration).
+                                let ap = e.pos;
+                                if let Some(&(_, _, mi)) =
+                                    mob_boxes.iter().find(|&&(c, r, _)| (c - ap).length() < r)
+                                {
+                                    arrow_hits.push((mi, ap, dmg));
+                                    e.dead = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                     if !e.dead && (e.age > ARROW_LIFETIME || e.pos.y < FALL_OUT_Y) {
                         e.dead = true;
                     }
                 }
+            }
+        }
+        // Apply player-arrow hits (deferred from the &mut iteration above; indices are still valid
+        // pre-retain). Light knockback + hurt-flash; the mob's death/loot settles next tick like melee.
+        for (mi, hit_pos, dmg) in arrow_hits {
+            if let Some(e) = self.list.get_mut(mi) {
+                if let Kind::Mob(m) = &mut e.kind {
+                    m.health -= dmg;
+                    m.hurt = m.hurt.max(0.35);
+                }
+                let mut kb = e.pos - hit_pos;
+                kb.y = 0.0;
+                let kb = kb.normalize_or_zero();
+                e.vel.x = kb.x * KNOCKBACK * 0.5;
+                e.vel.z = kb.z * KNOCKBACK * 0.5;
+                e.vel.y = e.vel.y.max(0.0) + 2.0;
+                e.stun = e.stun.max(0.3);
             }
         }
         self.list.retain(|e| !e.dead);
@@ -865,7 +937,7 @@ impl Entities {
                         0.9,
                     );
                 }
-                Kind::Arrow(_) => {
+                Kind::Arrow { .. } => {
                     // A thin dark dart, elongated along its (horizontal) heading.
                     let (l, w) = (0.5, 0.05);
                     push_box(
@@ -1224,6 +1296,42 @@ mod tests {
         }
         assert!(dmg > 0.0, "the arrow should damage the player");
         assert_eq!(es.count(), 0, "and despawn on impact");
+    }
+
+    #[test]
+    fn player_arrow_hits_mob_not_player() {
+        // A player (bow) arrow damages MOBS and never the shooter. (The mob-arrow path is covered by
+        // arrow_hits_player_and_despawns, which now routes through the spawn_arrow mob-owner shim.)
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 0.0, 5.0), Species::Cow); // 10 hp, ahead on +z
+        es.spawn_player_arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 18.0), 12.0); // lethal
+        let player = Vec3::ZERO; // the shooter
+        let mut dmg = 0.0;
+        for _ in 0..240 {
+            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage;
+            if es.mob_count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(dmg, 0.0, "a player arrow never damages the player");
+        assert_eq!(es.mob_count(), 0, "the player arrow killed the cow");
+    }
+
+    #[test]
+    fn player_arrow_does_not_hit_shooter() {
+        // No mobs: a player arrow loosed from the player's chest must never register a player hit.
+        let mut es = Entities::new();
+        es.spawn_player_arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 12.0), 5.0);
+        let player = Vec3::ZERO;
+        let mut dmg = 0.0;
+        for _ in 0..300 {
+            dmg += es.update(1.0 / 60.0, player, |_| false).player_damage;
+            if es.count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(dmg, 0.0, "a player arrow never hurts the shooter");
+        assert_eq!(es.count(), 0, "it despawns by lifetime / fall-out");
     }
 
     #[test]

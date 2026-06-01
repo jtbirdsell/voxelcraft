@@ -883,6 +883,11 @@ impl Game {
         self.entities.spawn_arrow(pos, vel);
     }
 
+    /// Loose a PLAYER arrow (bow shot, P13): hits mobs, never the player.
+    pub fn spawn_player_arrow(&mut self, pos: Vec3, vel: Vec3, damage: f32) {
+        self.entities.spawn_player_arrow(pos, vel, damage);
+    }
+
     fn spawn_rand(&mut self) -> u64 {
         let mut x = self.spawn_rng;
         x ^= x << 13;

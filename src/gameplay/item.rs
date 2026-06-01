@@ -76,6 +76,9 @@ pub const LAPIS: ItemId = MATERIAL_BASE + 24;
 pub const RAW_IRON: ItemId = MATERIAL_BASE + 25;
 pub const RAW_GOLD: ItemId = MATERIAL_BASE + 26;
 pub const FLINT: ItemId = MATERIAL_BASE + 27;
+// Bow + ammo (P13).
+pub const ARROW: ItemId = MATERIAL_BASE + 28;
+pub const BOW: ItemId = MATERIAL_BASE + 29;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -110,6 +113,8 @@ fn material_name(item: ItemId) -> &'static str {
         RAW_IRON => "Raw Iron",
         RAW_GOLD => "Raw Gold",
         FLINT => "Flint",
+        ARROW => "Arrow",
+        BOW => "Bow",
         _ => "Material",
     }
 }
@@ -144,6 +149,8 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         RAW_IRON => [0.78, 0.62, 0.50],
         RAW_GOLD => [0.85, 0.70, 0.30],
         FLINT => [0.30, 0.28, 0.28],
+        ARROW => [0.62, 0.58, 0.52], // grey shaft + pale fletching
+        BOW => [0.55, 0.40, 0.22],   // bow wood
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -321,6 +328,33 @@ pub fn is_sword(item: ItemId) -> bool {
     is_tool(item) && tool_class(item) == ToolClass::Sword
 }
 
+/// Whether this item is a bow (drawn with right-click to loose arrows, P13).
+#[inline]
+pub fn is_bow(item: ItemId) -> bool {
+    item == BOW
+}
+
+// Bow tuning (P13). Draw time to full; a release below the min draw is a dry-fire (no shot).
+pub const BOW_DRAW_TIME: f32 = 1.0;
+pub const BOW_MIN_DRAW: f32 = 0.15; // seconds of draw below which release fires nothing
+const ARROW_MIN_SPEED: f32 = 6.0;
+const ARROW_MAX_SPEED: f32 = 22.0; // matches entity.rs ARROW_SPEED (the skeleton muzzle speed)
+const BOW_MIN_DAMAGE: f32 = 1.0;
+const BOW_MAX_DAMAGE: f32 = 6.0; // ×1.5 at full draw -> 9 (a critical arrow)
+
+/// Arrow (speed in engine units/s, damage) for a draw fraction `t` in 0..1. Uses Minecraft's bow
+/// power curve `f = (t² + 2t)/3` (clamped); a full draw looses a CRITICAL arrow (×1.5 damage).
+pub fn bow_shot(t: f32) -> (f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    let f = ((t * t + 2.0 * t) / 3.0).min(1.0);
+    let speed = ARROW_MIN_SPEED + f * (ARROW_MAX_SPEED - ARROW_MIN_SPEED);
+    let mut damage = BOW_MIN_DAMAGE + f * (BOW_MAX_DAMAGE - BOW_MIN_DAMAGE);
+    if t >= 0.99 {
+        damage *= 1.5; // full-draw critical arrow
+    }
+    (speed, damage)
+}
+
 /// The block an item places, if it is a block-item (tools place nothing).
 #[inline]
 pub fn block_of_item(i: ItemId) -> Option<BlockId> {
@@ -337,10 +371,10 @@ pub fn item_of_block(b: BlockId) -> ItemId {
     b
 }
 
-/// Max stack size: tools and armor don't stack.
+/// Max stack size: tools, armor, and bows don't stack.
 #[inline]
 pub fn max_stack(item: ItemId) -> u8 {
-    if is_tool(item) || is_armor(item) {
+    if is_tool(item) || is_armor(item) || item == BOW {
         1
     } else {
         64
@@ -574,6 +608,9 @@ impl Inventory {
             for piece in 0..4u16 {
                 slots[HOTBAR + MAIN + piece as usize] = Some(ItemStack::new(armor_id(3, piece), 1));
             }
+            // P13: a bow + arrows in the last two free main-grid cells (34/35) for creative testing.
+            slots[HOTBAR + MAIN - 2] = Some(ItemStack::new(BOW, 1));
+            slots[HOTBAR + MAIN - 1] = Some(ItemStack::new(ARROW, 64));
         }
         Self {
             slots,
@@ -642,6 +679,32 @@ impl Inventory {
         } else {
             false
         }
+    }
+
+    /// Whether any hotbar/main slot holds at least one of `item` (used to check for bow ammo).
+    pub fn has_item(&self, item: ItemId) -> bool {
+        self.slots[0..HOTBAR + MAIN].iter().flatten().any(|s| s.item == item)
+    }
+
+    /// Remove one `item` from the first slot that has it (hotbar before main); returns whether one
+    /// was available. No-op in creative (infinite). Used to spend an arrow on a bow release — the
+    /// ammo usually isn't the selected slot, so `consume_selected` won't do.
+    pub fn consume_item(&mut self, item: ItemId) -> bool {
+        if self.creative {
+            return self.has_item(item); // test-only path: gameplay guards this behind `if !creative`
+        }
+        for slot in self.slots[0..HOTBAR + MAIN].iter_mut() {
+            if let Some(s) = slot {
+                if s.item == item {
+                    s.count -= 1;
+                    if s.count == 0 {
+                        *slot = None;
+                    }
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Try to add a whole stack, merging into existing stacks then empty slots (hotbar before main).
@@ -987,6 +1050,34 @@ mod tests {
         assert!((charged_damage(base, 2.0) - 10.0).abs() < 1e-6);
 
         assert!(is_sword(DIAMOND_SWORD) && !is_sword(DIAMOND_PICKAXE));
+    }
+
+    #[test]
+    fn bow_shot_curve_and_ammo() {
+        // Full draw = max speed + a CRITICAL arrow (6 * 1.5 = 9). No draw = the floor values.
+        let (s1, d1) = bow_shot(1.0);
+        assert!((s1 - 22.0).abs() < 1e-4, "full draw = max speed");
+        assert!((d1 - 9.0).abs() < 1e-4, "full draw crit = 9");
+        let (s0, d0) = bow_shot(0.0);
+        assert!((s0 - 6.0).abs() < 1e-4 && (d0 - 1.0).abs() < 1e-4);
+        assert!(bow_shot(0.3).0 < bow_shot(0.7).0, "speed rises with draw");
+        assert_eq!(bow_shot(2.0).0, bow_shot(1.0).0, "draw clamps high");
+        assert_eq!(bow_shot(-1.0).1, bow_shot(0.0).1, "draw clamps low");
+        assert!(is_bow(BOW) && !is_bow(DIAMOND_SWORD));
+
+        // Ammo: consume_item spends across NON-selected slots; has_item tracks availability.
+        let mut inv = Inventory::new(false);
+        inv.slots[10] = Some(ItemStack::new(ARROW, 2));
+        assert!(inv.has_item(ARROW));
+        assert!(inv.consume_item(ARROW) && inv.slots[10].unwrap().count == 1);
+        assert!(inv.consume_item(ARROW)); // 1 -> 0, slot cleared
+        assert!(inv.slots[10].is_none() && !inv.has_item(ARROW));
+        assert!(!inv.consume_item(ARROW), "nothing left to spend");
+        // Creative reports availability but never decrements.
+        let mut cre = Inventory::new(true);
+        let before = cre.slots[HOTBAR + MAIN - 1].map(|s| s.count);
+        assert!(cre.consume_item(ARROW));
+        assert_eq!(cre.slots[HOTBAR + MAIN - 1].map(|s| s.count), before, "creative arrows aren't spent");
     }
 
     #[test]
