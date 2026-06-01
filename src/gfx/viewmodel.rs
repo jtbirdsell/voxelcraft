@@ -185,7 +185,9 @@ impl ViewModel {
             // The bow rises up toward the aiming centre as it charges, with a hold-shake at full draw.
             let t = u.draw;
             let shake = if t > 0.95 { (t * 70.0).sin() * 0.006 } else { 0.0 };
-            return (Vec3::new(-0.20 * t + shake, 0.12 * t, 0.10 * t), -0.10 * t, 0.35 * t, 1.0);
+            // Ramp the override weight in (matching eat/shield) so idle/swing fade out, not snap.
+            let w = smoothstep(0.0, 0.25, t);
+            return (Vec3::new(-0.20 * t + shake, 0.12 * t, 0.10 * t), -0.10 * t, 0.35 * t, w);
         }
         if u.shield > 0.0 {
             // The shield slides toward the centre into a blocking pose.
