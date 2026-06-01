@@ -34,6 +34,13 @@ const KNOCKBACK: f32 = 6.0; // horizontal impulse imparted by a melee hit
 const SWEEP_RADIUS: f32 = 1.5; // a charged sword sweep hits OTHER mobs within this of the primary
 const SWEEP_KNOCKBACK: f32 = 2.5; // lighter shove (away from the player) for swept mobs
 const MOB_ATTACK_COOLDOWN: f32 = 1.0; // seconds between a hostile mob's contact hits
+// P17 life-cycle tuning (timers shortened from MC for a clone's pace).
+const LOVE_TIME: f32 = 30.0; // how long a fed animal stays ready to breed
+const BREED_COOLDOWN: f32 = 60.0; // post-breed lockout before it can breed again
+const GROW_TIME: f32 = 120.0; // baby → adult
+const BREED_RANGE: f32 = 3.0; // two in-love adults within this (blocks) breed (must be penned close)
+const BABY_SCALE: f32 = 0.5; // juvenile model scale
+const BURN_DPS: f32 = 1.0; // undead daylight burn damage per second
 // P15 local navigation tuning.
 const NAV_MARGIN: f32 = 0.4; // look-ahead beyond the mob's leading face (probe = half_width + this)
 const NAV_MAX_DROP: i32 = 3; // wander/flee refuse to step off a drop this many empty cells deep or more
@@ -149,6 +156,17 @@ impl Species {
             Species::Zombie => 3.0,
             Species::Skeleton | Species::Spider => 2.0,
             _ => 0.0,
+        }
+    }
+
+    /// The item that puts this animal into love-mode when fed (P17). Hostiles don't breed.
+    fn breeding_food(self) -> Option<crate::item::ItemId> {
+        use crate::item;
+        match self {
+            Species::Cow | Species::Sheep => Some(item::WHEAT),
+            Species::Chicken => Some(item::SEEDS),
+            Species::Pig => Some(item::CARROT),
+            _ => None,
         }
     }
 
@@ -287,6 +305,12 @@ struct MobData {
     /// Local-nav detour commitment (P15): while >0 the mob holds `deflect_heading` (counts down).
     deflect: f32,
     deflect_heading: f32,
+    /// Life-cycle (P17): a juvenile (scaled model, can't breed); seconds left until adult; love-mode
+    /// timer (>0 = ready to breed with a nearby in-love same-species adult); post-breed lockout.
+    baby: bool,
+    growth: f32,
+    love: f32,
+    breed_cd: f32,
 }
 
 /// Who loosed an arrow — decides what it can hit (player arrows hit mobs, mob arrows hit the player).
@@ -379,6 +403,32 @@ impl Entities {
             .pos
     }
 
+    /// MobData of the i-th live mob (P17 life-cycle tests).
+    #[cfg(test)]
+    fn mob_data(&self, i: usize) -> MobData {
+        self.list
+            .iter()
+            .filter_map(|e| if let Kind::Mob(m) = e.kind { Some(m) } else { None })
+            .nth(i)
+            .unwrap()
+    }
+    #[cfg(test)]
+    pub(crate) fn mob_in_love(&self, i: usize) -> bool {
+        self.mob_data(i).love > 0.0
+    }
+    #[cfg(test)]
+    pub(crate) fn mob_is_baby(&self, i: usize) -> bool {
+        self.mob_data(i).baby
+    }
+    #[cfg(test)]
+    pub(crate) fn mob_health(&self, i: usize) -> f32 {
+        self.mob_data(i).health
+    }
+    #[cfg(test)]
+    pub(crate) fn mob_breed_cd(&self, i: usize) -> f32 {
+        self.mob_data(i).breed_cd
+    }
+
     /// Passive/hostile mob tally (headless spawn verification).
     pub fn species_summary(&self) -> String {
         let (mut passive, mut hostile) = (0, 0);
@@ -430,6 +480,35 @@ impl Entities {
             }
         }
         best
+    }
+
+    /// P17 feed: if the ray (origin,dir) hits a breedable adult within `reach` and `food` is that
+    /// animal's breeding food, put it into love-mode. Returns true (→ the caller spends one food).
+    pub fn try_feed(&mut self, origin: Vec3, dir: Vec3, reach: f32, food: crate::item::ItemId) -> bool {
+        let dir = dir.normalize_or_zero();
+        let mut best: Option<(usize, f32)> = None;
+        for (i, e) in self.list.iter().enumerate() {
+            if let Kind::Mob(m) = e.kind {
+                let (w, h) = m.species.size();
+                let half = w * 0.5;
+                let min = e.pos - Vec3::new(half, 0.0, half);
+                let max = e.pos + Vec3::new(half, h, half);
+                if let Some(t) = ray_aabb(origin, dir, min, max) {
+                    if t <= reach && best.is_none_or(|(_, b)| t < b) {
+                        best = Some((i, t));
+                    }
+                }
+            }
+        }
+        if let Some((i, _)) = best {
+            if let Kind::Mob(m) = &mut self.list[i].kind {
+                if !m.baby && m.breed_cd <= 0.0 && m.species.breeding_food() == Some(food) {
+                    m.love = LOVE_TIME;
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Melee: damage the nearest mob the ray hits within `reach`, with knockback + a hurt-flash.
@@ -534,6 +613,15 @@ impl Entities {
     }
 
     pub fn spawn_mob(&mut self, pos: Vec3, species: Species) {
+        self.spawn_mob_kind(pos, species, false);
+    }
+
+    /// Spawn a juvenile (P17): scaled model, cannot breed, grows up after GROW_TIME.
+    pub fn spawn_baby(&mut self, pos: Vec3, species: Species) {
+        self.spawn_mob_kind(pos, species, true);
+    }
+
+    fn spawn_mob_kind(&mut self, pos: Vec3, species: Species, baby: bool) {
         let mut rng = self.next_seed();
         let heading = randf(&mut rng) * TAU;
         self.list.push(Entity {
@@ -546,6 +634,10 @@ impl Entities {
                 fuse: -1.0,
                 deflect: 0.0,
                 deflect_heading: 0.0,
+                baby,
+                growth: if baby { GROW_TIME } else { 0.0 },
+                love: 0.0,
+                breed_cd: 0.0,
             }),
             pos,
             vel: Vec3::ZERO,
@@ -637,11 +729,29 @@ impl Entities {
         player_pos: Vec3,
         is_solid: impl Fn(IVec3) -> bool,
         is_hazard: impl Fn(IVec3) -> bool,
+        // P17: true at a cell where an undead should burn — i.e. it is daytime AND the cell is open to
+        // the sky. Folds the day factor + the P16 sky-light query into one closure (supplied by game.rs)
+        // so the entity tick stays self-contained and `update` keeps a single new parameter.
+        sun_burn: impl Fn(IVec3) -> bool,
     ) -> Collected {
         let mut collected = Collected::default();
         let mut deaths: Vec<(Vec3, Species)> = Vec::new();
         let mut shots: Vec<(Vec3, Vec3)> = Vec::new(); // skeleton arrows (pos, vel), spawned post-loop
         let mut arrow_hits: Vec<(usize, Vec3, f32)> = Vec::new(); // player arrows -> (mob idx, pos, dmg)
+        let mut births: Vec<(Vec3, Species)> = Vec::new(); // P17 babies, spawned post-loop
+        // P17 breeding partner snapshot: in-love, breedable adults (list-idx, pos, species). Read-only
+        // (same reason as mob_boxes — can't borrow siblings during the &mut iteration).
+        let lovers: Vec<(usize, Vec3, Species)> = self
+            .list
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e.kind {
+                Kind::Mob(m) if !m.baby && m.love > 0.0 && m.breed_cd <= 0.0 => {
+                    Some((i, e.pos, m.species))
+                }
+                _ => None,
+            })
+            .collect();
         // Mob hit-spheres for player-arrow tests — a read-only snapshot taken before the `&mut self.list`
         // iteration (we can't borrow other entities while one is mutably borrowed). Pre-move positions are
         // fine: a mob drifts <~0.06 blocks per frame, the same one-frame lag the deaths/knockback already
@@ -661,11 +771,20 @@ impl Entities {
                 }
             })
             .collect();
-        for e in &mut self.list {
+        for (self_idx, e) in self.list.iter_mut().enumerate() {
             e.age += dt;
             match e.kind {
                 Kind::Mob(mut m) => {
                     m.hurt = (m.hurt - dt).max(0.0); // hurt-flash decays after a hit
+                    // P17 life-cycle timers (persist via the e.kind write-back at the block's end).
+                    m.love = (m.love - dt).max(0.0);
+                    m.breed_cd = (m.breed_cd - dt).max(0.0);
+                    if m.baby {
+                        m.growth = (m.growth - dt).max(0.0);
+                        if m.growth <= 0.0 {
+                            m.baby = false; // matured into an adult
+                        }
+                    }
                     m.atk_cd = (m.atk_cd - dt).max(0.0);
                     let (mw, mh) = m.species.size();
 
@@ -819,6 +938,34 @@ impl Entities {
                         }
                     }
 
+                    // P17B undead daytime burn: zombies/skeletons take fire damage in the open sun
+                    // (reuses the M29 hurt-flash + the existing death/loot path below).
+                    if matches!(m.species, Species::Zombie | Species::Skeleton) {
+                        let feet = IVec3::new(
+                            e.pos.x.floor() as i32,
+                            e.pos.y.floor() as i32,
+                            e.pos.z.floor() as i32,
+                        );
+                        if sun_burn(feet) {
+                            m.health -= BURN_DPS * dt;
+                            m.hurt = m.hurt.max(0.25);
+                        }
+                    }
+
+                    // P17A breeding: an in-love adult with an in-love same-species partner in range
+                    // produces one baby (the lower-indexed parent spawns it); both then go on cooldown.
+                    if !m.baby && m.love > 0.0 && m.breed_cd <= 0.0 {
+                        if let Some(&(jidx, jpos, _)) = lovers.iter().find(|&&(lidx, ppos, sp)| {
+                            lidx != self_idx && sp == m.species && (ppos - e.pos).length() <= BREED_RANGE
+                        }) {
+                            if self_idx < jidx {
+                                births.push(((e.pos + jpos) * 0.5, m.species));
+                            }
+                            m.love = 0.0;
+                            m.breed_cd = BREED_COOLDOWN;
+                        }
+                    }
+
                     if e.dead {
                         // already consumed (creeper detonated) — no loot
                     } else if m.health <= 0.0 {
@@ -954,6 +1101,10 @@ impl Entities {
         for (pos, vel) in shots {
             self.spawn_arrow(pos, vel);
         }
+        // P17 babies bred this frame (deferred — couldn't push into self.list mid-iteration).
+        for (pos, species) in births {
+            self.spawn_baby(pos, species);
+        }
         collected
     }
 
@@ -963,9 +1114,11 @@ impl Entities {
         for e in &self.list {
             match e.kind {
                 Kind::Mob(m) => {
-                    // Each species draws its own multi-box model, yaw-rotated to face its heading.
+                    // Each species draws its own multi-box model, yaw-rotated to face its heading;
+                    // a baby renders at BABY_SCALE (P17).
+                    let scale = if m.baby { BABY_SCALE } else { 1.0 };
                     for p in model(m.species) {
-                        push_part(&mut mesh.opaque, e.pos, e.heading, &p, m.hurt);
+                        push_part(&mut mesh.opaque, e.pos, e.heading, &p, m.hurt, scale);
                     }
                 }
                 Kind::Item(stack) => {
@@ -1259,13 +1412,15 @@ fn collide_move(
 /// `yaw` around the mob's vertical axis and placed at `feet`. `hurt` (0..1) is stashed in `shade.y`;
 /// the chunk shader doesn't read it yet — M29 combat will both set it and add the red-flash tint.
 /// Faces are never culled (mobs are small and self-contained).
-fn push_part(geom: &mut Geometry, feet: Vec3, yaw: f32, p: &Part, hurt: f32) {
+fn push_part(geom: &mut Geometry, feet: Vec3, yaw: f32, p: &Part, hurt: f32, scale: f32) {
     let (s, co) = yaw.sin_cos();
     let rot = |lx: f32, ly: f32, lz: f32| -> [f32; 3] {
         [feet.x + lx * co - lz * s, feet.y + ly, feet.z + lx * s + lz * co]
     };
     let rotn = |nx: f32, nz: f32| -> [f32; 3] { [nx * co - nz * s, 0.0, nx * s + nz * co] };
-    let (mn, mx) = (p.min, p.max);
+    // P17: `scale` shrinks the model around the feet (local origin) for a baby; 1.0 = adult.
+    let (mn, mx) = ([p.min[0] * scale, p.min[1] * scale, p.min[2] * scale],
+        [p.max[0] * scale, p.max[1] * scale, p.max[2] * scale]);
     let shade = [0.0, hurt];
     let face_uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     let cor = [
@@ -1410,7 +1565,7 @@ mod tests {
         assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 4 -> 2
         assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 2 -> 0
         // The dead mob is culled on the next tick (and drops an XP orb in its place).
-        let _ = es.update(0.016, o, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
         assert_eq!(es.ai_summary(), "mobs idle:0 wander:0 flee:0 chase:0 attack:0");
     }
 
@@ -1424,7 +1579,7 @@ mod tests {
         es.spawn_mob(Vec3::new(3.0, 0.0, 0.0), Species::Chicken); // 3.0 > 1.5 -> safe
         let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
         assert!(es.attack(o, d, 6.0, 10.0, false, Some(10.0), 1.0));
-        let _ = es.update(0.016, o, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
         assert_eq!(es.mob_count(), 1, "primary + the in-radius neighbor die; the far mob survives");
     }
 
@@ -1436,7 +1591,7 @@ mod tests {
         es.spawn_mob(Vec3::new(1.0, 0.0, 0.0), Species::Chicken);
         let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
         assert!(es.attack(o, d, 6.0, 10.0, false, None, 1.0));
-        let _ = es.update(0.016, o, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
         assert_eq!(es.mob_count(), 1, "only the primary dies without a sweep");
     }
 
@@ -1447,7 +1602,7 @@ mod tests {
         let player = Vec3::new(0.0, 0.0, 3.0); // feet; chest (+1) sits at z=3
         let mut dmg = 0.0;
         for _ in 0..120 {
-            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }
@@ -1466,7 +1621,7 @@ mod tests {
         let player = Vec3::ZERO; // the shooter
         let mut dmg = 0.0;
         for _ in 0..240 {
-            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.mob_count() == 0 {
                 break;
             }
@@ -1483,7 +1638,7 @@ mod tests {
         let player = Vec3::ZERO;
         let mut dmg = 0.0;
         for _ in 0..300 {
-            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }
@@ -1498,7 +1653,7 @@ mod tests {
         es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Cow); // near
         es.spawn_mob(Vec3::new(100.0, 1.0, 0.0), Species::Pig); // beyond DESPAWN_RADIUS
         assert_eq!(es.mob_count(), 2);
-        let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1, |_| false); // floor at y<1
+        let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1, |_| false, |_| false); // floor at y<1
         assert_eq!(es.mob_count(), 1, "the far mob despawns, the near one stays");
     }
 
@@ -1510,7 +1665,7 @@ mod tests {
         for _ in 0..3 {
             es.attack(o, d, 6.0, 5.0, false, None, 1.0); // 10 hp -> dead
         }
-        let _ = es.update(0.016, o, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
         assert_eq!(es.species_summary(), "passive:0 hostile:0", "the cow died");
         // Two item drops (beef, leather) + one XP orb remain as entities.
         assert!(es.count() >= 3, "cow should drop loot + xp (count = {})", es.count());
@@ -1523,7 +1678,7 @@ mod tests {
         // jump from z=0 to z=2.2 (final cell z=2), never testing z=1 — the sub-step march must catch it.
         es.spawn_arrow(Vec3::new(0.5, 1.0, 0.0), Vec3::new(0.0, 0.0, 22.0));
         let wall = |p: IVec3| p.z == 1;
-        es.update(0.1, Vec3::new(0.0, 500.0, 500.0), wall, |_| false); // player far away
+        es.update(0.1, Vec3::new(0.0, 500.0, 500.0), wall, |_| false, |_| false); // player far away
         assert_eq!(es.count(), 0, "the arrow stops at the wall instead of tunneling through it");
     }
 
@@ -1533,7 +1688,7 @@ mod tests {
         es.spawn_arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 12.0));
         let wall = |p: IVec3| p.z >= 2;
         for _ in 0..120 {
-            es.update(1.0 / 60.0, Vec3::new(0.0, 200.0, 200.0), wall, |_| false); // player far away
+            es.update(1.0 / 60.0, Vec3::new(0.0, 200.0, 200.0), wall, |_| false, |_| false); // player far away
             if es.count() == 0 {
                 break;
             }
@@ -1551,7 +1706,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 || (p.x >= 2 && p.y == 1);
         let player = Vec3::new(-1.0, 1.0, 0.5);
         for _ in 0..240 {
-            es.update(1.0 / 60.0, player, solid, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
         }
         assert!(es.mob_pos(0).x > 2.0, "cow crossed onto the ledge (x={})", es.mob_pos(0).x);
         assert!(es.mob_pos(0).y >= 1.9, "cow climbed the 1-block step (y={})", es.mob_pos(0).y);
@@ -1564,7 +1719,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 && p.x < 3; // floor ends at x=3 → a deep void beyond
         let player = Vec3::new(-0.5, 1.0, 0.5);
         for _ in 0..300 {
-            es.update(1.0 / 60.0, player, solid, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
         }
         assert!(es.mob_pos(0).x < 3.0, "cow stayed back from the cliff (x={})", es.mob_pos(0).x);
         assert!(es.mob_pos(0).y > 0.5, "cow did not fall into the void (y={})", es.mob_pos(0).y);
@@ -1578,7 +1733,7 @@ mod tests {
         let lava = |p: IVec3| p.x >= 3 && p.y == 1; // a lava body at body level for x>=3
         let player = Vec3::new(-0.5, 1.0, 0.5);
         for _ in 0..300 {
-            es.update(1.0 / 60.0, player, solid, lava);
+            es.update(1.0 / 60.0, player, solid, lava, |_| false);
         }
         assert!(es.mob_pos(0).x < 3.0, "cow avoided the lava (x={})", es.mob_pos(0).x);
     }
@@ -1590,7 +1745,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 || (p.x == 3 && p.y >= 1); // a 2-tall wall plane at x=3
         let player = Vec3::new(-0.5, 1.0, 0.5);
         for _ in 0..240 {
-            es.update(1.0 / 60.0, player, solid, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
         }
         assert!((es.mob_pos(0).z - 0.5).abs() > 0.5, "cow deflected sideways (z={})", es.mob_pos(0).z);
         assert!(es.mob_pos(0).x < 3.0, "cow did not tunnel the wall (x={})", es.mob_pos(0).x);
@@ -1606,7 +1761,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 || (p.x >= 2 && p.y == 1);
         let player = Vec3::new(6.0, 2.0, 0.5);
         for _ in 0..400 {
-            es.update(1.0 / 60.0, player, solid, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
         }
         assert!(es.mob_pos(0).x > 3.0, "zombie advanced toward the player (x={})", es.mob_pos(0).x);
         assert!(es.mob_pos(0).y >= 1.9, "zombie climbed onto the plateau (y={})", es.mob_pos(0).y);
@@ -1622,5 +1777,81 @@ mod tests {
         assert_eq!(es.mob_count(), 3);
         assert_eq!(es.passive_count(), 2);
         assert_eq!(es.hostile_count(), 1);
+    }
+
+    #[test]
+    fn feeding_flags_love_and_gates() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 3.0), Species::Cow);
+        let (o, d) = (Vec3::new(0.0, 1.5, 0.0), Vec3::new(0.0, 0.0, 1.0));
+        assert!(!es.try_feed(o, d, 6.0, crate::item::APPLE), "wrong food doesn't breed");
+        assert!(!es.mob_in_love(0));
+        assert!(es.try_feed(o, d, 6.0, crate::item::WHEAT), "wheat feeds a cow");
+        assert!(es.mob_in_love(0));
+        // A baby can't be fed into love.
+        let mut es2 = Entities::new();
+        es2.spawn_baby(Vec3::new(0.0, 1.0, 3.0), Species::Cow);
+        assert!(!es2.try_feed(o, d, 6.0, crate::item::WHEAT));
+        assert!(!es2.mob_in_love(0));
+    }
+
+    #[test]
+    fn two_in_love_breed_one_baby_then_cooldown() {
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 3.0), Species::Cow);
+        es.spawn_mob(Vec3::new(1.2, 1.0, 3.0), Species::Cow); // within BREED_RANGE
+        let d = Vec3::new(0.0, 0.0, 1.0);
+        assert!(es.try_feed(Vec3::new(0.0, 1.5, 0.0), d, 6.0, crate::item::WHEAT));
+        assert!(es.try_feed(Vec3::new(1.2, 1.5, 0.0), d, 6.0, crate::item::WHEAT));
+        assert!(es.mob_in_love(0) && es.mob_in_love(1));
+        let near = Vec3::new(10.0, 1.0, 3.0); // inside DESPAWN_RADIUS, outside FLEE_RADIUS
+        let floor = |p: IVec3| p.y < 1;
+        es.update(0.05, near, floor, |_| false, |_| false);
+        assert_eq!(es.mob_count(), 3, "exactly one baby is born");
+        assert!(!es.mob_in_love(0) && !es.mob_in_love(1), "both parents leave love-mode");
+        assert!(es.mob_breed_cd(0) > 0.0 && es.mob_breed_cd(1) > 0.0, "both go on cooldown");
+        es.update(0.05, near, floor, |_| false, |_| false);
+        assert_eq!(es.mob_count(), 3, "no second baby while on cooldown");
+    }
+
+    #[test]
+    fn baby_grows_into_adult() {
+        // Small dt so collide_move keeps the mob on the floor (a big dt tunnels it out of the world).
+        let dt = 0.05;
+        let mut es = Entities::new();
+        es.spawn_baby(Vec3::new(0.0, 1.0, 0.0), Species::Cow);
+        assert!(es.mob_is_baby(0));
+        // Track the baby with the player (dist≈0 → never despawns); floor at y<1 so it doesn't fall.
+        for _ in 0..((GROW_TIME / dt) as i32 + 20) {
+            let p = es.mob_pos(0);
+            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| false);
+        }
+        assert!(!es.mob_is_baby(0), "the baby matured after GROW_TIME");
+    }
+
+    #[test]
+    fn exposed_undead_burns_in_daylight() {
+        let dt = 0.05;
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Zombie);
+        let h0 = es.mob_health(0);
+        for _ in 0..100 {
+            let p = es.mob_pos(0); // player tracks the (milling) zombie: no despawn, floor → no fall
+            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| true); // sun_burn = exposed everywhere
+        }
+        assert!(es.mob_health(0) < h0, "the zombie took daylight burn damage");
+    }
+
+    #[test]
+    fn sheltered_undead_does_not_burn() {
+        let dt = 0.05;
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Zombie);
+        let h0 = es.mob_health(0);
+        for _ in 0..100 {
+            let p = es.mob_pos(0);
+            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| false); // never sky-exposed
+        }
+        assert!((es.mob_health(0) - h0).abs() < 1e-3, "sheltered/night undead don't burn");
     }
 }

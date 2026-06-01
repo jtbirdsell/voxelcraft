@@ -183,6 +183,9 @@ position, albedo + skylight) and an ACES tonemap.
   on any solid surface a short distance out; passive animals appear in **packs** on **sunlit grass**,
   drawn from a **biome-appropriate** pool. Hostiles and animals have **separate population caps** and
   despawn once you roam far away. Dropped items + XP orbs share the same entity physics.
+- **Life cycle**: **feed** an animal its food (wheat → cows/sheep, seeds → chickens, carrots → pigs) to
+  put it in love-mode; two in-love animals nearby breed a **baby** (a half-size juvenile that grows up
+  after a while). **Zombies and skeletons burn** in direct daylight when they're out in the open sun.
 - **Combat (modern 1.9-style)**: left-click melees the nearest mob in your reach (ray-vs-AABB beats
   mining when a mob is closer than the block). Each weapon has its own **attack-speed cooldown** shown
   as a recharge bar under the crosshair — swing before it refills and the hit is weak (damage scales

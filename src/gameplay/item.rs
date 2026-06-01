@@ -81,6 +81,10 @@ pub const ARROW: ItemId = MATERIAL_BASE + 28;
 pub const BOW: ItemId = MATERIAL_BASE + 29;
 // Shield (P14): raised with right-click-hold to block frontal damage.
 pub const SHIELD: ItemId = MATERIAL_BASE + 30;
+// Breeding foods (P17): right-click an animal holding its food to put it in love-mode.
+pub const WHEAT: ItemId = MATERIAL_BASE + 31;
+pub const SEEDS: ItemId = MATERIAL_BASE + 32;
+pub const CARROT: ItemId = MATERIAL_BASE + 33;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -118,6 +122,9 @@ fn material_name(item: ItemId) -> &'static str {
         ARROW => "Arrow",
         BOW => "Bow",
         SHIELD => "Shield",
+        WHEAT => "Wheat",
+        SEEDS => "Seeds",
+        CARROT => "Carrot",
         _ => "Material",
     }
 }
@@ -155,6 +162,9 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         ARROW => [0.62, 0.58, 0.52], // grey shaft + pale fletching
         BOW => [0.55, 0.40, 0.22],   // bow wood
         SHIELD => [0.42, 0.30, 0.55], // iron-banded wood, distinct purple-grey
+        WHEAT => [0.85, 0.78, 0.30],
+        SEEDS => [0.55, 0.70, 0.30],
+        CARROT => [0.90, 0.50, 0.15],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -622,6 +632,10 @@ impl Inventory {
             slots[HOTBAR + MAIN - 3] = Some(ItemStack::new(BOW, 1));
             slots[HOTBAR + MAIN - 2] = Some(ItemStack::new(SHIELD, 1));
             slots[HOTBAR + MAIN - 1] = Some(ItemStack::new(ARROW, 64));
+            // P17: breeding foods (free cells 30-32) so the mechanic is selectable in creative.
+            slots[HOTBAR + MAIN - 6] = Some(ItemStack::new(WHEAT, 64));
+            slots[HOTBAR + MAIN - 5] = Some(ItemStack::new(SEEDS, 64));
+            slots[HOTBAR + MAIN - 4] = Some(ItemStack::new(CARROT, 64));
         }
         Self {
             slots,

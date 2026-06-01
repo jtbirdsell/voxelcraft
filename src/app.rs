@@ -716,6 +716,10 @@ impl App {
                 // A bow press only starts the draw (handled above) — never place/interact.
             } else if item::is_shield(state.inventory.selected_item()) {
                 // A shield press only starts the raise (handled above) — never place/interact.
+            } else if state.game.try_feed_mob(eye, fwd, REACH, state.inventory.selected_item()) {
+                // P17: fed a breedable animal its food → love-mode; consume one (takes priority over
+                // placing, like melee's mob-precedence).
+                state.inventory.consume_selected();
             } else if let Some(hit) = &target {
                 let targeted = state.game.block_at(hit.block);
                 if targeted == block::WOODEN_DOOR {
@@ -1452,6 +1456,8 @@ impl ApplicationHandler for App {
                 for (i, &sp) in crate::entity::Species::ALL.iter().enumerate() {
                     game.spawn_mob(Vec3::new(4.5 + i as f32 * 1.7, 88.0, 24.0), sp);
                 }
+                // P17: a baby cow beside the adult cow to show the juvenile half-scale render.
+                game.spawn_baby(Vec3::new(4.5, 88.0, 26.5), crate::entity::Species::Cow);
                 for _ in 0..90 {
                     let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0, 1.0);
                 }

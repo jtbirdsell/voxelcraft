@@ -537,11 +537,15 @@ impl Game {
                 None => block::AIR, // unloaded → air (a mob just won't sense a hazard it can't see)
             }
         };
+        // P17: undead burn where it's daytime AND the cell is open to the sky (reuses the P16 sky-light
+        // free fn against the same block_at; no self-borrow, so it coexists with the &mut entities tick).
+        let top = WORLD_HEIGHT_CHUNKS * CHUNK_SIZE_I;
         let collected = self.entities.update(
             dt,
             camera_pos,
             |wp| block::is_solid(block_at(wp)),
             |wp| block_at(wp) == block::LAVA,
+            |wp| day > 0.6 && sky_light(wp, top, &block_at) == 15,
         );
 
         // Apply any creeper explosions: carve the crater, then add radial blast damage to the player.
@@ -951,6 +955,10 @@ impl Game {
         self.entities.spawn_mob(pos, species);
     }
 
+    pub fn spawn_baby(&mut self, pos: Vec3, species: crate::entity::Species) {
+        self.entities.spawn_baby(pos, species);
+    }
+
     pub fn spawn_item(&mut self, pos: Vec3, stack: crate::item::ItemStack) {
         self.entities.spawn_item(pos, stack);
     }
@@ -1228,6 +1236,12 @@ impl Game {
     /// Distance to the nearest mob the ray hits within `reach` (None = no mob in the way).
     pub fn nearest_mob_hit(&self, origin: Vec3, dir: Vec3, reach: f32) -> Option<f32> {
         self.entities.nearest_mob_hit(origin, dir, reach)
+    }
+
+    /// P17 feed: ray-find a breedable adult and (if `food` is its breeding food) flag it in love.
+    /// Returns true so the caller consumes one food.
+    pub fn try_feed_mob(&mut self, origin: Vec3, dir: Vec3, reach: f32, food: crate::item::ItemId) -> bool {
+        self.entities.try_feed(origin, dir, reach, food)
     }
 
     /// Melee the nearest mob the ray hits within `reach` (damage + knockback + hurt-flash). `crit`
