@@ -178,9 +178,13 @@ position, albedo + skylight) and an ACES tonemap.
   species **chase you on sight** (raycast line-of-sight) and close to attack range. They **spawn
   naturally** around you — passive species in daylight on grass, hostile species at night — capped in
   number and despawning once you roam far away. Dropped items + XP orbs share the same entity physics.
-- **Combat**: left-click melees the nearest mob in your reach (ray-vs-AABB beats mining when a mob is
-  closer than the block) — damage scaled by your weapon, **knockback**, a red **hurt-flash**, and an
-  XP drop on kill; hostile mobs in range hit **back** for contact damage, reduced by your armor.
+- **Combat (modern 1.9-style)**: left-click melees the nearest mob in your reach (ray-vs-AABB beats
+  mining when a mob is closer than the block). Each weapon has its own **attack-speed cooldown** shown
+  as a recharge bar under the crosshair — swing before it refills and the hit is weak (damage scales
+  `0.2 + 0.8·charge²`), so timed strikes beat spam. A fully-charged **fall attack** lands a **critical**
+  (+50%); a charged **sword** swing on the ground does a **sweep** (light AoE to nearby mobs); a
+  **sprint** attack trades the crit for extra knockback. Hits apply **knockback** + a red **hurt-flash**
+  and drop XP on kill; hostile mobs in range hit **back** for contact damage, reduced by your armor.
 - **Ranged + explosions**: **skeletons** loose arrows at you when they have a clear shot (gravity-arced
   projectiles that stick in blocks or deal damage on a hit); **creepers** prime a fuse in your face and
   **detonate** — a spherical crater blown out of the world plus radial blast damage that falls off with

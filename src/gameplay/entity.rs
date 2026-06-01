@@ -31,6 +31,8 @@ const ATTACK_RADIUS: f32 = 1.6; // hostile mobs lunge/attack when this close
 const CHASE_SPEED: f32 = 3.2;
 const FLEE_SPEED: f32 = 3.6;
 const KNOCKBACK: f32 = 6.0; // horizontal impulse imparted by a melee hit
+const SWEEP_RADIUS: f32 = 1.5; // a charged sword sweep hits OTHER mobs within this of the primary
+const SWEEP_KNOCKBACK: f32 = 2.5; // lighter shove (away from the player) for swept mobs
 const MOB_ATTACK_COOLDOWN: f32 = 1.0; // seconds between a hostile mob's contact hits
 // Projectiles + explosions (M30).
 const ARROW_DAMAGE: f32 = 3.0;
@@ -389,8 +391,20 @@ impl Entities {
     }
 
     /// Melee: damage the nearest mob the ray hits within `reach`, with knockback + a hurt-flash.
-    /// Returns true if a mob was struck.
-    pub fn attack(&mut self, origin: Vec3, dir: Vec3, reach: f32, damage: f32) -> bool {
+    /// `crit` lengthens the hurt-flash (the damage multiplier is applied by the caller). `kb_mult`
+    /// scales the horizontal knockback (a 1.9 sprint-attack passes >1). `sweep = Some(dmg)` also deals
+    /// that fixed light damage + a shove (away from the player) to OTHER mobs within `SWEEP_RADIUS` of
+    /// the primary target — the 1.9 sword sweep. Returns true if the primary mob was struck.
+    pub fn attack(
+        &mut self,
+        origin: Vec3,
+        dir: Vec3,
+        reach: f32,
+        damage: f32,
+        crit: bool,
+        sweep: Option<f32>,
+        kb_mult: f32,
+    ) -> bool {
         let dir = dir.normalize_or_zero();
         let mut best: Option<(usize, f32)> = None;
         for (i, e) in self.list.iter().enumerate() {
@@ -407,18 +421,44 @@ impl Entities {
             }
         }
         let Some((i, _)) = best else { return false };
-        let e = &mut self.list[i];
-        if let Kind::Mob(m) = &mut e.kind {
-            m.health -= damage;
-            m.hurt = 0.35;
+        let target_pos = self.list[i].pos;
+        {
+            let e = &mut self.list[i];
+            if let Kind::Mob(m) = &mut e.kind {
+                m.health -= damage;
+                m.hurt = if crit { 0.6 } else { 0.35 };
+            }
+            let mut kb = e.pos - origin;
+            kb.y = 0.0;
+            let kb = kb.normalize_or_zero();
+            e.vel.x = kb.x * KNOCKBACK * kb_mult;
+            e.vel.z = kb.z * KNOCKBACK * kb_mult;
+            e.vel.y = e.vel.y.max(0.0) + 3.0; // small pop-up
+            e.stun = 0.3; // suppress the AI velocity drive so the impulse actually integrates
         }
-        let mut kb = e.pos - origin;
-        kb.y = 0.0;
-        let kb = kb.normalize_or_zero();
-        e.vel.x = kb.x * KNOCKBACK;
-        e.vel.z = kb.z * KNOCKBACK;
-        e.vel.y = e.vel.y.max(0.0) + 3.0; // small pop-up
-        e.stun = 0.3; // suppress the AI velocity drive so the impulse actually integrates
+        // Sweep: a charged sword on the ground also lightly hits OTHER mobs near the primary (fixed
+        // damage, no crit/charge scaling, no pop-up), shoved away from the player.
+        if let Some(sweep_dmg) = sweep {
+            for (j, e) in self.list.iter_mut().enumerate() {
+                if j == i {
+                    continue;
+                }
+                if let Kind::Mob(m) = &mut e.kind {
+                    let mut to = e.pos - target_pos;
+                    to.y = 0.0;
+                    if to.length() <= SWEEP_RADIUS {
+                        m.health -= sweep_dmg;
+                        m.hurt = m.hurt.max(0.25);
+                        let mut push = e.pos - origin;
+                        push.y = 0.0;
+                        let push = push.normalize_or_zero();
+                        e.vel.x = push.x * SWEEP_KNOCKBACK;
+                        e.vel.z = push.z * SWEEP_KNOCKBACK;
+                        e.stun = e.stun.max(0.2);
+                    }
+                }
+            }
+        }
         true
     }
 
@@ -1137,11 +1177,37 @@ mod tests {
         let mut es = Entities::new();
         es.spawn_mob(Vec3::ZERO, Species::Chicken); // 4 hp
         let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
-        assert!(es.attack(o, d, 6.0, 2.0)); // 4 -> 2
-        assert!(es.attack(o, d, 6.0, 2.0)); // 2 -> 0
+        assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 4 -> 2
+        assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 2 -> 0
         // The dead mob is culled on the next tick (and drops an XP orb in its place).
         let _ = es.update(0.016, o, |_| false);
         assert_eq!(es.ai_summary(), "mobs idle:0 wander:0 flee:0 chase:0 attack:0");
+    }
+
+    #[test]
+    fn sweep_hits_neighbors_within_radius() {
+        // A charged-sword sweep (Some(dmg)) also damages OTHER mobs within SWEEP_RADIUS of the primary
+        // target; mobs beyond it are untouched. Lethal primary + lethal sweep kills exactly the two.
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::ZERO, Species::Chicken); // primary (the ray hits this one)
+        es.spawn_mob(Vec3::new(1.0, 0.0, 0.0), Species::Chicken); // 1.0 < 1.5 -> swept
+        es.spawn_mob(Vec3::new(3.0, 0.0, 0.0), Species::Chicken); // 3.0 > 1.5 -> safe
+        let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
+        assert!(es.attack(o, d, 6.0, 10.0, false, Some(10.0), 1.0));
+        let _ = es.update(0.016, o, |_| false);
+        assert_eq!(es.mob_count(), 1, "primary + the in-radius neighbor die; the far mob survives");
+    }
+
+    #[test]
+    fn no_sweep_leaves_neighbors_untouched() {
+        // Without a sweep (None), a lethal hit kills only the primary; the neighbor is untouched.
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::ZERO, Species::Chicken);
+        es.spawn_mob(Vec3::new(1.0, 0.0, 0.0), Species::Chicken);
+        let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
+        assert!(es.attack(o, d, 6.0, 10.0, false, None, 1.0));
+        let _ = es.update(0.016, o, |_| false);
+        assert_eq!(es.mob_count(), 1, "only the primary dies without a sweep");
     }
 
     #[test]
@@ -1176,7 +1242,7 @@ mod tests {
         es.spawn_mob(Vec3::ZERO, Species::Cow); // -> beef + leather + xp
         let (o, d) = (Vec3::new(0.0, 0.6, -3.0), Vec3::new(0.0, 0.0, 1.0));
         for _ in 0..3 {
-            es.attack(o, d, 6.0, 5.0); // 10 hp -> dead
+            es.attack(o, d, 6.0, 5.0, false, None, 1.0); // 10 hp -> dead
         }
         let _ = es.update(0.016, o, |_| false);
         assert_eq!(es.species_summary(), "passive:0 hostile:0", "the cow died");

@@ -667,6 +667,7 @@ pub fn build_ui(
     submerged: bool,
     level: u32,
     xp_frac: f32,
+    attack_charge: f32,
     debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
@@ -678,6 +679,19 @@ pub fn build_ui(
     let (cx, cy) = (sw * 0.5, sh * 0.5);
     push_px_rect(&mut v, sw, sh, cx - 9.0, cy - 1.5, 18.0, 3.0, white);
     push_px_rect(&mut v, sw, sh, cx - 1.5, cy - 9.0, 3.0, 18.0, white);
+
+    // Attack-cooldown meter (1.9): a thin bar just under the crosshair filling grey->white as the
+    // held weapon recharges. Hidden when full (matches vanilla's crosshair attack indicator).
+    if attack_charge < 0.999 {
+        let (bar_w, bar_h) = (40.0, 3.0);
+        let (bx, by) = (cx - bar_w * 0.5, cy + 12.0);
+        push_px_rect(&mut v, sw, sh, bx, by, bar_w, bar_h, [0.10, 0.10, 0.10, 0.55]);
+        let fw = bar_w * attack_charge.clamp(0.0, 1.0);
+        if fw > 0.0 {
+            let c = 0.4 + 0.55 * attack_charge;
+            push_px_rect(&mut v, sw, sh, bx, by, fw, bar_h, [c, c, c, 0.9]);
+        }
+    }
 
     // Hotbar (9 slots backed by the inventory; shows block swatch + stack count).
     let n = item::HOTBAR;

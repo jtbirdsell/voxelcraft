@@ -92,8 +92,12 @@ struct State {
     /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
     mine_target: Option<IVec3>,
     mine_progress: f32,
-    /// Cooldown between melee swings (seconds).
+    /// Remaining recharge before the held weapon is at full attack strength (seconds, P12).
     melee_cd: f32,
+    /// Last frame's LMB-held state, for click-edge swing detection (P12).
+    melee_was_held: bool,
+    /// Last frame's selected hotbar slot, to reset the cooldown on a weapon swap (P12).
+    melee_prev_sel: usize,
     /// Eat-hold progress (seconds) and the food id being eaten (right-click-hold on a food).
     eat_progress: f32,
     eat_item: Option<item::ItemId>,
@@ -482,7 +486,14 @@ impl App {
         // Melee: if a mob is nearer than the targeted block FACE, the left-click hits it (not the
         // block). Using the ray's face-hit distance (not the block center) means a mob standing
         // flush behind a block can't be struck through it.
+        // P12 (1.9): the recharge is per-weapon (item::attack_speed). A swing always lands but is weak
+        // until the meter refills — tap-spamming does ~20% damage, a charged hit does full.
         state.melee_cd = (state.melee_cd - dt).max(0.0);
+        // Switching the held weapon resets the cooldown (vanilla gives a fresh full-power swing).
+        if state.inventory.selected != state.melee_prev_sel {
+            state.melee_prev_sel = state.inventory.selected;
+            state.melee_cd = 0.0;
+        }
         let block_dist = target.as_ref().map_or(REACH, |h| h.dist);
         let mob_in_way = state.screen == Screen::None
             && state.input.break_held
@@ -490,19 +501,52 @@ impl App {
                 .game
                 .nearest_mob_hit(eye, fwd, REACH)
                 .is_some_and(|md| md <= block_dist);
-        if mob_in_way {
-            if state.melee_cd <= 0.0 {
-                let dmg = item::attack_damage(state.inventory.selected_item());
-                state.game.attack_nearest(eye, fwd, REACH, dmg);
-                state.melee_cd = 0.5; // ~2 swings/sec
-                if !state.inventory.creative {
-                    state.inventory.damage_selected(1); // weapons wear from hitting
-                }
+        // A swing fires on the click EDGE (so spamming yields partial-charge hits) or as an auto-swing
+        // when LMB is held and the meter is already full.
+        let pressed_now = state.input.break_held && !state.melee_was_held;
+        let auto_full = state.input.break_held && state.melee_cd <= 0.0;
+        if mob_in_way && (pressed_now || auto_full) {
+            let sel = state.inventory.selected_item();
+            let cd_max = 1.0 / item::attack_speed(sel);
+            let charge = (1.0 - state.melee_cd / cd_max).clamp(0.0, 1.0);
+            let mut dmg = item::charged_damage(item::attack_damage(sel), charge);
+            // Critical hit (+50%): a falling, non-sprinting, grounded-feet-off attack.
+            let crit = crate::player::is_critical_hit(
+                state.player.on_ground,
+                state.player.velocity.y,
+                state.input.sprint,
+                state.player.submerged,
+                state.player.flying,
+            );
+            if crit {
+                dmg *= 1.5;
             }
+            // Sweep: a full-charge sword swing standing on the ground (un-enchanted sweep = 1).
+            let sweep = if charge >= 0.999
+                && item::is_sword(sel)
+                && state.player.on_ground
+                && !state.input.sprint
+            {
+                Some(1.0)
+            } else {
+                None
+            };
+            // Sprint-attack: extra horizontal knockback (and it can't crit — see is_critical_hit).
+            let kb_mult = if state.input.sprint && state.player.on_ground { 1.5 } else { 1.0 };
+            state.game.attack_nearest(eye, fwd, REACH, dmg, crit, sweep, kb_mult);
+            state.melee_cd = cd_max;
+            if !state.inventory.creative {
+                state.inventory.damage_selected(1); // weapons wear from hitting
+            }
+        }
+        if mob_in_way {
             state.mine_target = None;
             state.mine_progress = 0.0;
             target = None; // swinging at a mob, not mining — no block highlight
         }
+        // Edge tracker for the click-to-swing logic; MUST update every frame (not just when a mob is
+        // in reach) so a fresh press is detected correctly even across screen opens / focus loss.
+        state.melee_was_held = state.input.break_held;
 
         // Mining: hold LMB to break the targeted block, timed by hardness (instant in creative).
         if state.screen == Screen::None && state.input.break_held && !mob_in_way {
@@ -863,6 +907,14 @@ impl App {
         } else {
             None
         };
+        let attack_charge = {
+            let cd_max = 1.0 / item::attack_speed(state.inventory.selected_item());
+            if cd_max > 0.0 {
+                (1.0 - state.melee_cd / cd_max).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        };
         let mut ui = overlay::build_ui(
             state.gpu.config.width,
             state.gpu.config.height,
@@ -875,6 +927,7 @@ impl App {
             state.player.submerged,
             state.player.level,
             state.player.xp_fraction(),
+            attack_charge,
             debug_lines.as_deref(),
         );
         if let Screen::Chest(pos) = state.screen {
@@ -1317,7 +1370,7 @@ impl ApplicationHandler for App {
                 log::info!("M28 AI after settle: {}", game.mob_ai_summary());
                 // M29: swing toward the mob stage (logs the hit), then flash them all red for the shot.
                 let aim = (Vec3::new(10.0, 85.5, 24.0) - camera.position).normalize_or_zero();
-                let hit = game.attack_nearest(camera.position, aim, 40.0, 6.0);
+                let hit = game.attack_nearest(camera.position, aim, 40.0, 6.0, false, None, 1.0);
                 log::info!("M29 melee: hit a mob = {hit}");
                 game.flash_mobs(0.45);
                 // Loot color check: a row of mob-drop items (should render in distinct colors).
@@ -1448,6 +1501,7 @@ impl ApplicationHandler for App {
                 survival_demo,
                 if survival_demo { 7 } else { 0 },
                 if survival_demo { 0.6 } else { 0.0 },
+                if survival_demo { 0.5 } else { 1.0 }, // attack_charge: show the cooldown bar in the demo
                 Some(&dbg),
             );
             let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();
@@ -1634,6 +1688,8 @@ impl ApplicationHandler for App {
             mine_target: None,
             mine_progress: 0.0,
             melee_cd: 0.0,
+            melee_was_held: false,
+            melee_prev_sel: 0,
             eat_progress: 0.0,
             eat_item: None,
             difficulty,

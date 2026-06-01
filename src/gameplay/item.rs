@@ -264,8 +264,8 @@ pub fn tool_max_durability(item: ItemId) -> u16 {
     }
 }
 
-/// Melee damage (used by combat in M21). Swords hit hardest; other tools ~2.
-#[allow(dead_code)]
+/// Base melee damage. Swords hit hardest; other tools ~2; the bare hand 1. This is the FULL-charge
+/// value — `charged_damage` scales it down for a not-yet-recharged swing (P12).
 pub fn attack_damage(item: ItemId) -> f32 {
     if !is_tool(item) {
         return 1.0; // bare hand / thrown block
@@ -280,6 +280,45 @@ pub fn attack_damage(item: ItemId) -> f32 {
     } else {
         2.0
     }
+}
+
+/// Melee attack speed in attacks/second (MC 1.9). The recharge cooldown is `1.0 / this`. The sword is
+/// the dedicated weapon (fast); axes are slow but hard-hitting; the bare hand is fastest.
+pub fn attack_speed(item: ItemId) -> f32 {
+    if !is_tool(item) {
+        return 4.0; // bare hand / holding a block
+    }
+    match tool_class(item) {
+        ToolClass::Sword => 1.6,
+        ToolClass::Axe => match tool_tier(item) {
+            Tier::Wood | Tier::Stone | Tier::Gold => 0.8,
+            Tier::Iron => 0.9,
+            Tier::Diamond => 1.0,
+        },
+        ToolClass::Pickaxe => 1.2,
+        ToolClass::Shovel => 1.0,
+        ToolClass::Hoe => match tool_tier(item) {
+            Tier::Wood | Tier::Gold => 1.0,
+            Tier::Stone => 2.0,
+            Tier::Iron => 3.0,
+            Tier::Diamond => 4.0,
+        },
+        ToolClass::None => 4.0,
+    }
+}
+
+/// Charge-scaled melee damage (MC 1.9): a swing always lands, but a low-charge (spammed) hit is weak.
+/// `charge` 0 → 20% of base, 1 → 100%. The curve is `base * (0.2 + 0.8*charge²)`.
+#[inline]
+pub fn charged_damage(base: f32, charge: f32) -> f32 {
+    let c = charge.clamp(0.0, 1.0);
+    base * (0.2 + 0.8 * c * c)
+}
+
+/// Whether this item is a sword — the only sweeping-capable weapon (no Sweeping enchant here).
+#[inline]
+pub fn is_sword(item: ItemId) -> bool {
+    is_tool(item) && tool_class(item) == ToolClass::Sword
 }
 
 /// The block an item places, if it is a block-item (tools place nothing).
@@ -920,6 +959,34 @@ mod tests {
         assert_eq!(max_stack(item_of_block(block::STONE)), 64);
         assert_eq!(block_of_item(DIAMOND_PICKAXE), None); // tools place nothing
         assert_eq!(block_of_item(item_of_block(block::STONE)), Some(block::STONE));
+    }
+
+    #[test]
+    fn combat_attack_speed_and_charge() {
+        // MC 1.9 attack-speed table (attacks/sec). Sword fast, axes slow, fist fastest.
+        assert_eq!(attack_speed(DIAMOND_SWORD), 1.6);
+        assert_eq!(attack_speed(tool_id(Tier::Wood, 3)), 1.6); // every sword tier = 1.6
+        assert_eq!(attack_speed(tool_id(Tier::Wood, 1)), 0.8); // wood axe
+        assert_eq!(attack_speed(tool_id(Tier::Iron, 1)), 0.9); // iron axe
+        assert_eq!(attack_speed(tool_id(Tier::Diamond, 1)), 1.0); // diamond axe
+        assert_eq!(attack_speed(tool_id(Tier::Stone, 4)), 2.0); // stone hoe
+        assert_eq!(attack_speed(tool_id(Tier::Iron, 4)), 3.0); // iron hoe
+        assert_eq!(attack_speed(DIAMOND_PICKAXE), 1.2);
+        assert_eq!(attack_speed(item_of_block(block::STONE)), 4.0); // bare hand / holding a block
+        // Diamond sword cooldown = 1/1.6 = 0.625 s.
+        assert!((1.0 / attack_speed(DIAMOND_SWORD) - 0.625).abs() < 1e-6);
+
+        // Charge curve: 0 -> 20%, 1 -> 100%, 0.5 -> 0.2+0.8*0.25 = 40%; monotonic increasing.
+        let base = 10.0;
+        assert!((charged_damage(base, 0.0) - 2.0).abs() < 1e-6);
+        assert!((charged_damage(base, 1.0) - 10.0).abs() < 1e-6);
+        assert!((charged_damage(base, 0.5) - 4.0).abs() < 1e-6);
+        assert!(charged_damage(base, 0.3) < charged_damage(base, 0.6));
+        // Out-of-range charge clamps (no negative / >base damage).
+        assert!((charged_damage(base, -1.0) - 2.0).abs() < 1e-6);
+        assert!((charged_damage(base, 2.0) - 10.0).abs() < 1e-6);
+
+        assert!(is_sword(DIAMOND_SWORD) && !is_sword(DIAMOND_PICKAXE));
     }
 
     #[test]

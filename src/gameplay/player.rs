@@ -117,6 +117,15 @@ fn comp(v: Vec3, axis: usize) -> f32 {
     }
 }
 
+/// Whether a melee hit lands as a CRITICAL (+50% damage, MC 1.9). The attacker must be falling
+/// (airborne + moving down), not sprinting (sprint-attacks can't crit), not in water, and not in
+/// creative flight. Vanilla keys on `fallDistance > 0`; with only velocity here we use a downward-
+/// velocity proxy, so a hit on the way *up* during a jump doesn't crit (which matches vanilla intent).
+#[inline]
+pub fn is_critical_hit(on_ground: bool, vel_y: f32, sprint: bool, submerged: bool, flying: bool) -> bool {
+    !on_ground && vel_y < 0.0 && !sprint && !submerged && !flying
+}
+
 #[inline]
 fn set_comp(v: &mut Vec3, axis: usize, value: f32) {
     match axis {
@@ -743,5 +752,16 @@ mod tests {
         armored.apply_damage(10.0, 20); // a full diamond set = 20 points = 80% reduction (the cap)
         assert!((bare.health - 10.0).abs() < 1e-3, "bare took full 10 (hp = {})", bare.health);
         assert!((armored.health - 18.0).abs() < 1e-3, "armor cut 10 -> 2 (hp = {})", armored.health);
+    }
+
+    #[test]
+    fn critical_hit_conditions() {
+        // Crit = airborne + falling + not sprinting + not in water + not creative-flying.
+        assert!(is_critical_hit(false, -2.0, false, false, false), "falling melee crits");
+        assert!(!is_critical_hit(true, -2.0, false, false, false), "grounded never crits");
+        assert!(!is_critical_hit(false, 1.0, false, false, false), "rising (jump up) doesn't crit");
+        assert!(!is_critical_hit(false, -2.0, true, false, false), "sprint-attacks can't crit");
+        assert!(!is_critical_hit(false, -2.0, false, true, false), "no crit underwater");
+        assert!(!is_critical_hit(false, -2.0, false, false, true), "no crit while creative-flying");
     }
 }

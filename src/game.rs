@@ -1075,9 +1075,20 @@ impl Game {
         self.entities.nearest_mob_hit(origin, dir, reach)
     }
 
-    /// Melee the nearest mob the ray hits within `reach` (damage + knockback + hurt-flash).
-    pub fn attack_nearest(&mut self, origin: Vec3, dir: Vec3, reach: f32, damage: f32) -> bool {
-        self.entities.attack(origin, dir, reach, damage)
+    /// Melee the nearest mob the ray hits within `reach` (damage + knockback + hurt-flash). `crit`
+    /// lengthens the flash, `sweep = Some(dmg)` adds the 1.9 sword AoE, `kb_mult` scales knockback
+    /// (a sprint-attack passes >1).
+    pub fn attack_nearest(
+        &mut self,
+        origin: Vec3,
+        dir: Vec3,
+        reach: f32,
+        damage: f32,
+        crit: bool,
+        sweep: Option<f32>,
+        kb_mult: f32,
+    ) -> bool {
+        self.entities.attack(origin, dir, reach, damage, crit, sweep, kb_mult)
     }
 
     /// Debug: flash every mob (headless hurt-flash verification).
