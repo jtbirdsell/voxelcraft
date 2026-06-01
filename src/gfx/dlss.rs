@@ -122,6 +122,7 @@ pub fn supersample_from_env() -> f32 {
         .clamp(1.0, 4.0)
 }
 
+
 /// Per-output-resolution DLSS Ray Reconstruction state. Recreated on resize. Owns the RR feature
 /// context, the render-resolution scene depth (also the RR hardware-depth guide), the two constant
 /// guide textures voxels don't vary (specular albedo = 0, roughness = 1), and the upscaled output.
@@ -399,9 +400,10 @@ impl DlssRender {
             reset: frame == 0,
             jitter_offset: jitter,
             partial_texture_size: Some(res),
-            // gmotion is a UV delta (cur-prev); NGX wants render-pixel units. Scale by render res.
-            // Sign/exact convention is an interactive-tuning item (only matters once history builds).
-            motion_vector_scale: Some(Vec2::new(res.x as f32, res.y as f32)),
+            // gmotion is a UV delta (cur-prev), but NGX reprojects with prev-cur, so scale by the
+            // NEGATED render res (= negate + convert UV→render pixels). This negate removes the motion
+            // smear/ghosting on moving content — verified interactively. (M33-G9 motion-blur fix.)
+            motion_vector_scale: Some(Vec2::new(-(res.x as f32), -(res.y as f32))),
         };
         if let Err(e) = self.rr.render(params, queue) {
             log::error!("DLSS Ray Reconstruction evaluate failed: {e}");

@@ -195,12 +195,14 @@ impl FrameGen {
             }
         };
 
-        // The G-buffer motion is a screen-space UV delta (cur - prev) that already carries the full
-        // camera motion, so `mvec_scale = (1,1)` (no pixel→UV rescale) and `camera_motion_included`.
-        // Camera matrices stay identity (DLSS-G then uses the mvecs verbatim). The exact mvec
-        // sign/convention is an interactive-tuning item.
+        // The G-buffer motion is a screen-space UV delta already in [-1,1] that carries the full camera
+        // motion, so `camera_motion_included` and identity camera matrices (DLSS-G uses the mvecs
+        // verbatim); the only scaling is the sign negate below.
         let mut consts = FgConstants::new();
-        consts.mvec_scale = Vec2::new(1.0, 1.0);
+        // gmotion is a UV delta (cur-prev) already in [-1,1], but DLSS-G (like RR) reprojects with
+        // prev-cur, so negate via the scale. Matches the RR motion-vector fix (M33-G9) — without it
+        // generated frames smear moving content.
+        consts.mvec_scale = Vec2::new(-1.0, -1.0);
         consts.camera_motion_included = true;
         consts.camera_aspect_ratio = aspect;
         consts.reset = reset;
