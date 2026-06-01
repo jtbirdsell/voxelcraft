@@ -488,12 +488,13 @@ dependencies = [
 [[package]]
 name = "dlss_wgpu_dx12"
 version = "0.1.0"
-source = "git+https://github.com/jtbirdsell/dlss_wgpu_dx12?rev=89e903f05129ce13b56ea7a8f057750464d8cb69#89e903f05129ce13b56ea7a8f057750464d8cb69"
+source = "git+https://github.com/jtbirdsell/dlss_wgpu_dx12?rev=2c415c5#2c415c5881382c7ca9852d4767df8121319b6950"
 dependencies = [
  "bindgen",
  "bitflags 2.11.1",
  "cc",
  "glam 0.29.3",
+ "libloading",
  "log",
  "thiserror 2.0.18",
  "uuid",

@@ -98,6 +98,12 @@ position, albedo + skylight) and an ACES tonemap.
   resolution and DLSS denoises that noisy GI **and** upscales to the output resolution on the Tensor
   cores. Quality presets via `VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance`; degrades
   gracefully to native resolution when unavailable.
+- **DLSS Frame Generation** (`VOXELCRAFT_FG=1`, NVIDIA RTX 40+): stacks on Ray Reconstruction — DLSS-G
+  (via NVIDIA **Streamline**) interpolates an extra frame between each rendered one (~2× FPS) on the
+  Optical-Flow hardware. The render-resolution depth/motion guides are point-upscaled to output res,
+  and the HUD is tagged as a separate UI layer so DLSS-G recomposites it crisply instead of
+  interpolating it. Needs the Streamline DLLs staged beside the exe (`STREAMLINE_SDK` set), a
+  composited/focused window, and a non-vsync present mode; degrades gracefully to no frame generation.
 - **Water reflections** via a Schlick-Fresnel mirror ray, with depth-based clarity (Beer–Lambert).
 - **Emissive blocks** (lava, glowstone, torches) that cast colored light into the scene and reflect.
 
@@ -192,8 +198,11 @@ verify each change without a human in the loop. Companion debug knobs: `VOXELCRA
 armor bars). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
 (software DDA vs hardware ray query), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
 `VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_DLSS=off|rr` +
-`VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance` (DLSS Ray Reconstruction). DLSS needs
-`DLSS_SDK` + `LIBCLANG_PATH` set at build time (see the dlss section). `VOXELCRAFT_PERSIST_TEST=1`
+`VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance` (DLSS Ray Reconstruction),
+`VOXELCRAFT_FG=1` (DLSS Frame Generation on top of RR; needs `STREAMLINE_SDK` set + a focused window).
+DLSS needs `DLSS_SDK` + `LIBCLANG_PATH` set at build time (see the dlss section). Frame Generation can
+be smoke-tested headlessly with `VOXELCRAFT_FG_TEST=N` (auto-pans the camera for N frames, logs the
+max `num_frames_actually_presented` — 2 means DLSS-G is generating — then exits). `VOXELCRAFT_PERSIST_TEST=1`
 round-trips a sample inventory/armor/furnace/survival state through the real save/load (no window).
 
 ## Roadmap

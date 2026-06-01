@@ -25,8 +25,15 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    pub async fn new(window: Arc<Window>) -> Self {
+    /// Returns the GPU context plus the DLSS-G Frame Generation context (if `VOXELCRAFT_FG=1` and
+    /// supported). FG lives outside `Gpu` so the present path can borrow it mutably while `Gpu` is
+    /// borrowed shared.
+    pub async fn new(window: Arc<Window>) -> (Self, Option<crate::frame_gen::FrameGen>) {
         let size = window.inner_size();
+        // M33-G8-FG: Streamline must initialize BEFORE the wgpu instance is created, so the patched
+        // fork's `Instance::init` upgrades its DXGI factory to a Streamline proxy (only if the
+        // interposer is already loaded). `None` unless `VOXELCRAFT_FG=1`. Consumed by the FG context.
+        let streamline = crate::frame_gen::init_streamline();
         let (_instance, surface, adapter) = init_adapter(window).await;
 
         let info = adapter.get_info();
@@ -101,12 +108,35 @@ impl Gpu {
             format.is_srgb(),
             caps.formats
         );
+        // M33-G8-FG: create the DLSS-G context AFTER the device but BEFORE `surface.configure`
+        // (`slSetD3DDevice` must precede swapchain creation). `None` unless FG was requested + bound.
+        let frame_gen = crate::frame_gen::FrameGen::create(
+            streamline,
+            &device,
+            &adapter,
+            format,
+            size.width.max(1),
+            size.height.max(1),
+        );
+        // DLSS-G owns frame pacing (Reflex), so it needs a non-vsync present mode; otherwise vsync.
+        let present_mode = if frame_gen.is_some() {
+            if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+                wgpu::PresentMode::Mailbox
+            } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+                wgpu::PresentMode::Immediate
+            } else {
+                wgpu::PresentMode::Fifo
+            }
+        } else {
+            wgpu::PresentMode::AutoVsync
+        };
+        log::info!("Present mode: {present_mode:?}");
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -116,7 +146,7 @@ impl Gpu {
 
         // The instance must outlive the surface; the surface holds an Arc to the window and
         // an internal reference, so dropping `_instance` here is fine (kept implicitly alive).
-        Self {
+        let gpu = Self {
             surface,
             device,
             queue,
@@ -125,7 +155,8 @@ impl Gpu {
             size,
             backend: info.backend,
             rt_enabled,
-        }
+        };
+        (gpu, frame_gen)
     }
 
     pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {

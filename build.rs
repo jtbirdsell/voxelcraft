@@ -10,22 +10,63 @@ const DLLS: [&str; 2] = ["dxcompiler.dll", "dxil.dll"];
 
 fn main() {
     println!("cargo:rerun-if-changed=dll");
+    println!("cargo:rerun-if-env-changed=STREAMLINE_SDK");
+    println!("cargo:rerun-if-env-changed=DLSS_SDK");
 
     let Some(exe_dir) = exe_output_dir() else {
         return;
     };
-    let Some(src_dir) = dxc_source_dir() else {
-        println!(
+
+    // DXC (hardware RT on DX12). Missing DXC is non-fatal — DX12 falls back to FXC (software DDA);
+    // Vulkan hardware RT is unaffected.
+    match dxc_source_dir() {
+        Some(src_dir) => {
+            for dll in DLLS {
+                let src = src_dir.join(dll);
+                if let Err(e) = std::fs::copy(&src, exe_dir.join(dll)) {
+                    println!("cargo:warning=failed to stage {} next to the exe: {e}", src.display());
+                }
+            }
+        }
+        None => println!(
             "cargo:warning=DXC not found (looked in ./dll and the Windows SDK); the DX12 backend \
              will fall back to FXC = software DDA tracer. Vulkan hardware RT is unaffected."
-        );
-        return;
-    };
-    for dll in DLLS {
-        let src = src_dir.join(dll);
-        let dst = exe_dir.join(dll);
-        if let Err(e) = std::fs::copy(&src, &dst) {
-            println!("cargo:warning=failed to stage {} next to the exe: {e}", src.display());
+        ),
+    }
+
+    stage_frame_generation_dlls(&exe_dir);
+}
+
+/// Stage the NVIDIA Streamline interposer + plugins (`$STREAMLINE_SDK/bin/x64`) and `nvngx_dlssg.dll`
+/// (`$DLSS_SDK/lib/Windows_x86_64/rel`) next to the exe, for DLSS Frame Generation at runtime
+/// (M33-G8-FG). Skips quietly when the SDK env vars aren't set (FG just stays unavailable). These
+/// DLLs are NVIDIA-redistributable and are never committed. (build.rs reruns when the env vars change.)
+fn stage_frame_generation_dlls(exe_dir: &Path) {
+    if let Ok(sl) = std::env::var("STREAMLINE_SDK") {
+        let bin = Path::new(&sl).join("bin").join("x64");
+        for dll in [
+            "sl.interposer.dll",
+            "sl.common.dll",
+            "sl.dlss_g.dll",
+            "sl.reflex.dll",
+            "sl.pcl.dll",
+        ] {
+            let src = bin.join(dll);
+            if src.exists() {
+                let _ = std::fs::copy(&src, exe_dir.join(dll));
+            } else {
+                println!("cargo:warning=FG: Streamline DLL not found: {}", src.display());
+            }
+        }
+    }
+    if let Ok(dlss) = std::env::var("DLSS_SDK") {
+        let src = Path::new(&dlss)
+            .join("lib")
+            .join("Windows_x86_64")
+            .join("rel")
+            .join("nvngx_dlssg.dll");
+        if src.exists() {
+            let _ = std::fs::copy(&src, exe_dir.join("nvngx_dlssg.dll"));
         }
     }
 }

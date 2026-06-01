@@ -184,6 +184,8 @@ pub fn screenshot(
             as_bg.as_ref(),
             highlight,
             ui_verts,
+            None,
+            None,
             dlss.as_deref_mut(),
         );
         if save_frames {

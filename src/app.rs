@@ -65,6 +65,8 @@ struct State {
     /// native resolution. Declared before `dlss` so the RR feature context drops before the SDK.
     dlss_render: Option<crate::dlss::DlssRender>,
     dlss: Option<crate::dlss::Dlss>,
+    /// DLSS Frame Generation (DLSS-G) context, driven in the present path. `None` => no FG. (M33-G8-FG)
+    frame_gen: Option<crate::frame_gen::FrameGen>,
     game: Game,
     camera: Camera,
     player: Player,
@@ -563,6 +565,15 @@ impl App {
         }
 
         // Render.
+        // FG self-test (VOXELCRAFT_FG_TEST=N): auto-rotate for consistent motion — DLSS-G needs
+        // genuine motion to generate frames — and auto-exit after N frames logging the max generated
+        // count, so Frame Generation can be verified without a human watching the window.
+        let fg_test: Option<u32> = std::env::var("VOXELCRAFT_FG_TEST")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        if fg_test.is_some() {
+            state.camera.yaw += 0.012;
+        }
         let aspect = state.gpu.aspect();
         state.camera_uniform.update(&state.camera, aspect);
         state
@@ -673,7 +684,24 @@ impl App {
             highlight,
             &ui,
             state.dlss_render.as_mut(),
+            state.frame_gen.as_mut(),
         );
+
+        // FG self-test: after N frames, log the max generated-frame count and exit (DLSS-G generates
+        // an interpolated frame between each rendered one => max presented == 2).
+        if let Some(n) = fg_test {
+            if let Some(fg) = &state.frame_gen {
+                if fg.frames() >= n {
+                    log::info!(
+                        "FG SELF-TEST: max presented = {} over {} frames => generating = {}",
+                        fg.max_presented(),
+                        fg.frames(),
+                        fg.max_presented() >= 2
+                    );
+                    std::process::exit(0);
+                }
+            }
+        }
 
         // Stats.
         state.fps_accum += dt;
@@ -882,11 +910,17 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("Voxelcraft")
-            .with_inner_size(LogicalSize::new(1600.0, 900.0));
+            .with_inner_size(LogicalSize::new(1600.0, 900.0))
+            // DLSS-G only presents generated frames to a foreground/composited window, so request
+            // an active window and pull it to the foreground when FG is on. (M33-G8-FG)
+            .with_active(true);
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        if crate::frame_gen::requested() {
+            window.focus_window();
+        }
         self.window = Some(window.clone());
 
-        let gpu = pollster::block_on(Gpu::new(window.clone()));
+        let (gpu, frame_gen) = pollster::block_on(Gpu::new(window.clone()));
         // Surface the active backend + hardware-RT status in the title — at-a-glance confirmation
         // during the Vulkan/RT migration (M33-G0).
         window.set_title(&format!(
@@ -1227,7 +1261,10 @@ impl ApplicationHandler for App {
         renderer.set_sky(environment.wgpu_clear());
 
         // M33-G8: build the DLSS Ray Reconstruction context (if available); scene targets are then
-        // sized to its render resolution, else to the output resolution.
+        // sized to its render resolution, else to the output resolution. M33-G8-FG Phase 3: RR and
+        // Frame Generation now stack — RR denoises + upscales the scene, FG generates intermediate
+        // frames from the (point-upscaled) output-res guides. RR off (VOXELCRAFT_DLSS=off) → FG runs
+        // standalone over the native-res frame.
         let dlss_render = dlss.as_ref().and_then(|d| {
             crate::dlss::DlssRender::new(d, &renderer, &gpu, (gpu.config.width, gpu.config.height))
         });
@@ -1243,6 +1280,7 @@ impl ApplicationHandler for App {
             rt_scene,
             dlss_render,
             dlss,
+            frame_gen,
             game,
             camera,
             player,
@@ -1276,6 +1314,10 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
                     state.gpu.resize(size);
+                    // M33-G8-FG (Phase 4): the DLSS-G recomposition textures are swapchain-sized.
+                    if let Some(fg) = state.frame_gen.as_mut() {
+                        fg.resize(&state.gpu.device, state.gpu.config.width, state.gpu.config.height);
+                    }
                     // M33-G8: the DLSS context is output-resolution-bound — recreate it (which
                     // re-derives the render resolution), then size the scene targets to match.
                     state.dlss_render = state.dlss.as_ref().and_then(|d| {

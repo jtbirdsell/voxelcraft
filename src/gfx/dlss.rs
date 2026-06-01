@@ -16,7 +16,7 @@ use dlss_wgpu_dx12::{
 // dlss_wgpu_dx12's API speaks glam 0.29; alias it here so our types match at the RR boundary.
 use glam029::{UVec2, Vec2};
 
-use crate::gfx::graph::{RenderTargets, HDR_FORMAT};
+use crate::gfx::graph::{RenderTargets, GDEPTH_FORMAT, GMOTION_FORMAT, HDR_FORMAT};
 use crate::gpu::{Gpu, DEPTH_FORMAT};
 use crate::renderer::ChunkRenderer;
 
@@ -132,6 +132,12 @@ pub struct DlssRender {
     roughness_tex: wgpu::Texture,
     output_tex: wgpu::Texture,
     output_tonemap_bg: wgpu::BindGroup,
+    /// M33-G8-FG (Phase 3): output-resolution depth + motion, point-upscaled from the render-res
+    /// guides, tagged for DLSS Frame Generation (which interpolates the output-res presented frame).
+    output_gdepth_tex: wgpu::Texture,
+    output_gdepth_view: wgpu::TextureView,
+    output_gmotion_tex: wgpu::Texture,
+    output_gmotion_view: wgpu::TextureView,
 }
 
 impl DlssRender {
@@ -213,6 +219,14 @@ impl DlssRender {
             device,
             &output_tex.create_view(&wgpu::TextureViewDescriptor::default()),
         );
+        // Output-resolution depth/motion guides for DLSS Frame Generation (written by the renderer's
+        // nearest-upscale pass; tagged by FG). Render attachment (upscale target) + texture binding
+        // (NGX reads them).
+        let output_gdepth_tex = make("dlss-fg-gdepth", output_res, GDEPTH_FORMAT, attach);
+        let output_gdepth_view = output_gdepth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_gmotion_tex = make("dlss-fg-gmotion", output_res, GMOTION_FORMAT, attach);
+        let output_gmotion_view =
+            output_gmotion_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // One-time clear of the constant guides: specular -> 0, roughness -> 1.
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -254,6 +268,10 @@ impl DlssRender {
             roughness_tex,
             output_tex,
             output_tonemap_bg,
+            output_gdepth_tex,
+            output_gdepth_view,
+            output_gmotion_tex,
+            output_gmotion_view,
         })
     }
 
@@ -270,6 +288,21 @@ impl DlssRender {
     /// Tonemap bind group over the upscaled output (the tonemap pass resolves this to the swapchain).
     pub fn output_tonemap_bg(&self) -> &wgpu::BindGroup {
         &self.output_tonemap_bg
+    }
+
+    /// Output-resolution depth/motion guides for DLSS Frame Generation. The `_view`s are the
+    /// nearest-upscale render targets; the textures are cloned (cheap, Arc-backed) for the FG tag.
+    pub fn output_gdepth(&self) -> &wgpu::Texture {
+        &self.output_gdepth_tex
+    }
+    pub fn output_gmotion(&self) -> &wgpu::Texture {
+        &self.output_gmotion_tex
+    }
+    pub fn output_gdepth_view(&self) -> &wgpu::TextureView {
+        &self.output_gdepth_view
+    }
+    pub fn output_gmotion_view(&self) -> &wgpu::TextureView {
+        &self.output_gmotion_view
     }
 
     /// The subpixel camera jitter (in render-resolution pixels) to apply this frame — must match

@@ -5,6 +5,7 @@ pub(crate) mod camera;
 pub(crate) mod capture;
 pub(crate) mod device;
 pub(crate) mod dlss;
+pub(crate) mod frame_gen;
 pub(crate) mod environment;
 pub(crate) mod frustum;
 pub(crate) mod graph;
