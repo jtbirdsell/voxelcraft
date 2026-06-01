@@ -374,7 +374,6 @@ fn emit_box(
             let shade = [block::emission(id), block::tint_class(id, foff)];
             // Plane position along d, and the face's extent along u,v (so the tile isn't stretched).
             let pd = if positive { wmax[d] } else { wmin[d] };
-            let (su, sv) = (hi[u] - lo[u], hi[v] - lo[v]);
             // Four corners in (u,v) order, expressed in world space.
             let corner = |cu: f32, cv: f32| -> [f32; 3] {
                 let mut p = [0.0f32; 3];
@@ -389,13 +388,23 @@ fn emit_box(
                 corner(1.0, 1.0),
                 corner(0.0, 1.0),
             ];
-            let uvs = [[0.0, 0.0], [su, 0.0], [su, sv], [0.0, sv]];
+            // Stand side-face tiles upright (V tracks world-Y, row 0 at the box top); top/bottom
+            // faces project onto the (u,v) ground plane. Mirrors `emit_quad`. Using world-space
+            // corner deltas keeps a non-unit sub-box extent from stretching the tile.
+            let horiz = if u == 1 { v } else { u };
+            let uv_for = |pos: [f32; 3]| -> [f32; 2] {
+                if d == 1 {
+                    [pos[u] - wmin[u], pos[v] - wmin[v]]
+                } else {
+                    [pos[horiz] - wmin[horiz], wmax[1] - pos[1]]
+                }
+            };
             let base = geom.vertices.len() as u32;
-            for (pos, uv) in p.iter().zip(uvs.iter()) {
+            for pos in p.iter() {
                 geom.vertices.push(Vertex {
                     position: *pos,
                     normal,
-                    uv: *uv,
+                    uv: uv_for(*pos),
                     tile,
                     light,
                     shade,
@@ -489,23 +498,29 @@ fn emit_quad(
     let foff = normal_offset(d, positive);
     let tile = block::log_face_tile(block_id, foff, axis);
     let shade = [block::emission(block_id), block::tint_class(block_id, foff)];
-    // Tiled UV: one unit per block so a greedy w*h quad repeats the tile, not stretches it.
-    let uvs = [
-        [0.0, 0.0],
-        [w as f32, 0.0],
-        [w as f32, h as f32],
-        [0.0, h as f32],
-    ];
+    // Tiled UV: one unit per block so a greedy w*h quad repeats the tile (fract wrap), not
+    // stretches it. Side faces (normal along X/Z) must stand the tile UPRIGHT — its V axis tracks
+    // world-Y with row 0 (the tile top, e.g. grass's cap or bark) at the block's top, and its U
+    // axis tracks the horizontal in-plane axis. Top/bottom faces project onto the ground (u,v) plane.
+    let y_top = base[1] + du[1] + dv[1]; // local Y of the quad's highest corner
+    let horiz = if u == 1 { v } else { u }; // the in-plane axis that isn't world-Y (side faces)
+    let uv_for = |c: [i32; 3]| -> [f32; 2] {
+        if d == 1 {
+            [(c[u] - base[u]) as f32, (c[v] - base[v]) as f32]
+        } else {
+            [(c[horiz] - base[horiz]) as f32, (y_top - c[1]) as f32]
+        }
+    };
     let light = [
         (face_light >> 4) as f32 / 15.0,
         (face_light & 0x0F) as f32 / 15.0,
     ];
     let v = geom.vertices.len() as u32;
-    for (p, uv) in [p0, p1, p2, p3].iter().zip(uvs.iter()) {
+    for p in [p0, p1, p2, p3].iter() {
         geom.vertices.push(Vertex {
             position: corner(*p),
             normal,
-            uv: *uv,
+            uv: uv_for(*p),
             tile,
             light,
             shade,
