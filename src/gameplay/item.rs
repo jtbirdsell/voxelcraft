@@ -807,6 +807,28 @@ mod tests {
     }
 
     #[test]
+    fn log_axis_remaps_end_grain() {
+        use crate::block::{self, tile, AXIS_X, AXIS_Y, AXIS_Z};
+        // Y (default = state 0): end-grain on top/bottom, bark on the 4 sides (today's behavior).
+        assert_eq!(block::log_face_tile(block::WOOD, [0, 1, 0], AXIS_Y), tile::WOOD_TOP);
+        assert_eq!(block::log_face_tile(block::WOOD, [1, 0, 0], AXIS_Y), tile::WOOD_SIDE);
+        // X: end-grain on ±X.
+        assert_eq!(block::log_face_tile(block::WOOD, [1, 0, 0], AXIS_X), tile::WOOD_TOP);
+        assert_eq!(block::log_face_tile(block::WOOD, [0, 1, 0], AXIS_X), tile::WOOD_SIDE);
+        // Z: end-grain on ±Z.
+        assert_eq!(block::log_face_tile(block::WOOD, [0, 0, 1], AXIS_Z), tile::WOOD_TOP);
+        assert_eq!(block::log_face_tile(block::WOOD, [0, 1, 0], AXIS_Z), tile::WOOD_SIDE);
+        // Non-log blocks ignore the axis and match face_tile.
+        assert_eq!(
+            block::log_face_tile(block::STONE, [0, 1, 0], AXIS_X),
+            block::face_tile(block::STONE, [0, 1, 0])
+        );
+        // State 0 decodes to upright (Y); round-trips otherwise.
+        assert_eq!(block::log_axis(0), AXIS_Y);
+        assert_eq!(block::log_axis(block::log_state(AXIS_Z)), AXIS_Z);
+    }
+
+    #[test]
     fn tool_id_layout() {
         assert!(is_tool(DIAMOND_PICKAXE) && !is_tool(block::STONE));
         assert_eq!(tool_class(DIAMOND_PICKAXE), block::ToolClass::Pickaxe);

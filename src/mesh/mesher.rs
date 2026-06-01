@@ -64,10 +64,11 @@ impl MeshData {
     }
 }
 
-/// A merged face: which block, whether the face normal points toward +axis, and the packed light
-/// (sky<<4|block) of the air voxel just outside the face. Light is part of the key so greedy merge
-/// only fuses faces with identical lighting.
-type Mask = Option<(u16, bool, u8)>;
+/// A merged face: which block, whether the face normal points toward +axis, the packed light
+/// (sky<<4|block) of the air voxel just outside the face, and the owner's log-axis (0 for every
+/// non-log block). Light + axis are part of the key so greedy merge only fuses faces with identical
+/// lighting AND orientation (so two logs of different axes never merge into one quad).
+type Mask = Option<(u16, bool, u8, u8)>;
 
 fn normal_vec(axis: usize, positive: bool) -> [f32; 3] {
     let s = if positive { 1.0 } else { -1.0 };
@@ -118,11 +119,21 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     let a = if block::is_cube(a) { a } else { block::AIR };
                     let b = if block::is_cube(b) { b } else { block::AIR };
                     mask[n] = if block::renders(a) && !block::occludes(a, b) {
-                        // a's +face: lit by the air voxel on b's side.
-                        Some((a, true, crate::light::at(&lightgrid, xb[0], xb[1], xb[2])))
+                        // a's +face: lit by the air voxel on b's side; axis read from the solid cell a.
+                        let axis = if a == block::WOOD {
+                            block::log_axis(neigh.state_at(x[0], x[1], x[2]))
+                        } else {
+                            0
+                        };
+                        Some((a, true, crate::light::at(&lightgrid, xb[0], xb[1], xb[2]), axis))
                     } else if block::renders(b) && !block::occludes(b, a) {
-                        // b's -face: lit by the air voxel on a's side.
-                        Some((b, false, crate::light::at(&lightgrid, x[0], x[1], x[2])))
+                        // b's -face: lit by the air voxel on a's side; axis read from the solid cell b.
+                        let axis = if b == block::WOOD {
+                            block::log_axis(neigh.state_at(xb[0], xb[1], xb[2]))
+                        } else {
+                            0
+                        };
+                        Some((b, false, crate::light::at(&lightgrid, x[0], x[1], x[2]), axis))
                     } else {
                         None
                     };
@@ -156,7 +167,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                         h += 1;
                     }
 
-                    let (blk, positive, face_light) = cell.unwrap();
+                    let (blk, positive, face_light, axis) = cell.unwrap();
                     let geom = if block::is_water(blk) {
                         &mut mesh.water
                     } else if block::is_glass(blk) {
@@ -164,7 +175,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     } else {
                         &mut mesh.opaque
                     };
-                    emit_quad(geom, origin, d, u, v, i + 1, k, j, w, h, blk, positive, face_light);
+                    emit_quad(geom, origin, d, u, v, i + 1, k, j, w, h, blk, positive, face_light, axis);
 
                     // Clear the consumed region.
                     for jj in 0..h {
@@ -357,6 +368,7 @@ fn emit_quad(
     block_id: u16,
     positive: bool,
     face_light: u8,
+    axis: u8,
 ) {
     let mut base = [0i32; 3];
     base[d] = d_plane;
@@ -385,7 +397,7 @@ fn emit_quad(
 
     let normal = normal_vec(d, positive);
     let foff = normal_offset(d, positive);
-    let tile = block::face_tile(block_id, foff);
+    let tile = block::log_face_tile(block_id, foff, axis);
     let shade = [block::emission(block_id), block::tint_class(block_id, foff)];
     // Tiled UV: one unit per block so a greedy w*h quad repeats the tile, not stretches it.
     let uvs = [

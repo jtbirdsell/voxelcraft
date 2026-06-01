@@ -88,6 +88,27 @@ pub fn slab_state(half: u8) -> u8 {
     half & 0b11
 }
 
+/// Log axis (bits 0-1 of the WOOD state byte): 0 = Y upright (DEFAULT = state 0, so worldgen trunks +
+/// legacy saves stay upright with no migration), 1 = X (east-west), 2 = Z (north-south). The end-grain
+/// (WOOD_TOP) shows on the two faces perpendicular to the axis; bark (WOOD_SIDE) on the other four.
+pub const AXIS_Y: u8 = 0;
+pub const AXIS_X: u8 = 1;
+pub const AXIS_Z: u8 = 2;
+
+#[inline]
+pub fn log_axis(state: u8) -> u8 {
+    match state & 0b11 {
+        1 => AXIS_X,
+        2 => AXIS_Z,
+        _ => AXIS_Y,
+    }
+}
+
+#[inline]
+pub fn log_state(axis: u8) -> u8 {
+    axis & 0b11
+}
+
 /// How a block is meshed: a full greedy cube, a cross billboard (plants), or a non-greedy partial
 /// shape (slab / stairs) emitted one cell at a time like a billboard.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -648,4 +669,25 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         WOOD_SLAB => tile::PLANKS,
         _ => tile::MAGENTA,
     }
+}
+
+/// Atlas tile for a block face accounting for log axis (WOOD only): the end-grain (WOOD_TOP) lands on
+/// the two faces perpendicular to the log's axis, bark (WOOD_SIDE) on the other four. Every other
+/// block ignores `axis` and defers to `face_tile`. Called by the mesher; icons use `face_tile`
+/// (default axis Y), which keeps the inventory log looking upright.
+pub fn log_face_tile(id: BlockId, face_offset: [i32; 3], axis: u8) -> u32 {
+    if id == WOOD {
+        // Map the axis constant (Y=0, X=1, Z=2) to the face_offset component it runs parallel to.
+        let comp = match axis {
+            AXIS_X => 0,
+            AXIS_Z => 2,
+            _ => 1, // AXIS_Y
+        };
+        return if face_offset[comp] != 0 {
+            tile::WOOD_TOP
+        } else {
+            tile::WOOD_SIDE
+        };
+    }
+    face_tile(id, face_offset)
 }

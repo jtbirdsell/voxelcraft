@@ -656,6 +656,18 @@ impl App {
                                 block::SLAB_BOTTOM
                             };
                             block::slab_state(half)
+                        } else if id == block::WOOD {
+                            // A log's axis is the axis of the clicked face's normal: a top/bottom
+                            // face gives the upright default (Y), side faces give X or Z.
+                            let n = hit.normal;
+                            let axis = if n.x != 0 {
+                                block::AXIS_X
+                            } else if n.z != 0 {
+                                block::AXIS_Z
+                            } else {
+                                block::AXIS_Y
+                            };
+                            block::log_state(axis)
                         } else {
                             0
                         };
