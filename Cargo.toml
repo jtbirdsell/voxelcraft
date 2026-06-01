@@ -21,12 +21,12 @@ log = "0.4.30"
 lz4_flex = "0.13.1"
 pollster = "0.4.0"
 rustc-hash = "2.1.2"
-# Stable project GUID for the DLSS/NGX init (M33-G8). Base crate only (Uuid::from_u128).
-uuid = "1"
+# Stable project GUID for the DLSS/NGX init (M33-G8). Base crate only (Uuid::from_u128). DLSS-only.
+uuid = { version = "1", optional = true }
 # dlss_wgpu_dx12's public API speaks glam 0.29 (our engine uses 0.33 — semver-incompatible). Alias
 # 0.29 so the DLSS boundary in gfx/dlss.rs can name its UVec2/Vec2; convert to plain tuples for the
 # rest of the engine. (M33-G8)
-glam029 = { package = "glam", version = "0.29" }
+glam029 = { package = "glam", version = "0.29", optional = true }
 # Pinned exact: wgpu's experimental hardware-RT API breaks ~every quarterly release, so a bump
 # is a deliberate mini-project (re-probe -> re-spike -> re-parity -> re-WSI), not a routine update.
 # Hardware RT on the DX12 fallback needs the DXC compiler (FXC can't compile RT shaders): shipped
@@ -35,13 +35,22 @@ glam029 = { package = "glam", version = "0.29" }
 wgpu = "=29.0.3"
 winit = "0.30.13"
 
-# M33-G8: NVIDIA DLSS (Super Resolution + Ray Reconstruction) for the wgpu DX12 backend, via the
+# M33-G8: NVIDIA DLSS (Ray Reconstruction + Frame Generation) for the wgpu DX12 backend, via the
 # raw_command_list accessor from the patched wgpu above. Windows + RTX only; degrades gracefully to
-# off (native res + SVGF) when the NGX DLLs/adapter are absent. Build needs DLSS_SDK + LIBCLANG_PATH
-# in the environment (see README). Pinned to the pushed jtbirdsell/dlss_wgpu_dx12 fork (its wgpu pin
-# must match the [patch.crates-io] rev below). Rev-pinned for reproducibility; the fork's main also
-# carries in-progress Frame Generation (off by default, doesn't affect our ray-reconstruction build).
-dlss_wgpu_dx12 = { git = "https://github.com/jtbirdsell/dlss_wgpu_dx12", rev = "57c5b67f16fe3a0fa34a27c4fe00c6b10408655d", features = ["ray-reconstruction", "frame-generation"] }
+# off (native res) when the NGX DLLs/adapter are absent. **OPTIONAL + feature-gated** (M33-G9b): the
+# `dlss` feature enables Ray Reconstruction (needs DLSS_SDK + LIBCLANG_PATH at build time), and
+# `frame-generation` adds DLSS-G (needs STREAMLINE_SDK). `cargo build --no-default-features` builds
+# WITHOUT this dep — no NVIDIA SDK / libclang / Streamline required. Pinned to the fork's release main
+# (3e79f06 = v0.1.0 + the render_resolution()->optimal fix); its wgpu pin must match [patch] below.
+dlss_wgpu_dx12 = { git = "https://github.com/jtbirdsell/dlss_wgpu_dx12", rev = "3e79f0693965bba4fd2329116a19a7b0a75b9f96", default-features = false, optional = true }
+
+# M33-G9b feature gates. `dlss` (Ray Reconstruction + supersampling) and `frame-generation` (DLSS-G,
+# implies dlss) are on by default; `--no-default-features` compiles the engine natively with no DLSS
+# code and no NVIDIA SDK. The optional dlss_wgpu_dx12/glam029/uuid deps are pulled in only by `dlss`.
+[features]
+default = ["dlss", "frame-generation"]
+dlss = ["dep:dlss_wgpu_dx12", "dep:glam029", "dep:uuid", "dlss_wgpu_dx12/ray-reconstruction"]
+frame-generation = ["dlss", "dlss_wgpu_dx12/frame-generation"]
 
 # `cargo run --release` is the day-to-day build. LTO off + many codegen units + incremental keeps
 # relinks short on the 32-thread CPU; opt-level 3 keeps worldgen/mesher/gameplay fast. The 4090 is

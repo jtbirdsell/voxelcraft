@@ -1398,7 +1398,8 @@ impl ChunkRenderer {
 
     /// Build a tonemap bind group over an arbitrary HDR source view (e.g. the DLSS output texture),
     /// reusing the tonemap layout + sampler. Lets the DLSS path resolve its upscaled output through
-    /// the same ACES pass. (M33-G8)
+    /// the same ACES pass. (M33-G8) — only used by the DLSS path.
+    #[cfg_attr(not(feature = "dlss"), allow(dead_code))]
     pub fn make_tonemap_bg(&self, device: &wgpu::Device, hdr: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tonemap-bg-dlss"),

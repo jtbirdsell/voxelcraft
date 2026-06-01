@@ -34,7 +34,11 @@ fn main() {
         ),
     }
 
-    stage_frame_generation_dlls(&exe_dir);
+    // Stage the Streamline + DLSS-G DLLs only when Frame Generation is built. Build scripts see
+    // enabled cargo features via CARGO_FEATURE_<NAME> (not cfg!); "frame-generation" -> _FRAME_GENERATION.
+    if std::env::var("CARGO_FEATURE_FRAME_GENERATION").is_ok() {
+        stage_frame_generation_dlls(&exe_dir);
+    }
 }
 
 /// Stage the NVIDIA Streamline interposer + plugins (`$STREAMLINE_SDK/bin/x64`) and `nvngx_dlssg.dll`
