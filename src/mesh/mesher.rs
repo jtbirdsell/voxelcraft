@@ -253,6 +253,43 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     );
                 }
             }
+            // Fence/wall/pane: a post + a thin arm toward each connecting horizontal neighbor (the
+            // shape is derived from neighbors here, not stored). A lone glass pane is a flat sheet.
+            block::RenderKind::Connect => {
+                let geom = if id == block::GLASS_PANE {
+                    &mut mesh.translucent
+                } else {
+                    &mut mesh.opaque
+                };
+                let dims = block::connect_dims(id);
+                let sides = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)];
+                let conn = sides.map(|(dx, dz)| block::connects(id, neigh.block_at(x + dx, y, z + dz)));
+                if id == block::GLASS_PANE && !conn.iter().any(|&c| c) {
+                    let s = block::PANE_SHEET;
+                    emit_box(geom, origin, x, y, z, [s[0], s[1], s[2]], [s[3], s[4], s[5]], id, l, 0);
+                } else {
+                    let p = dims.post;
+                    emit_box(geom, origin, x, y, z, [p[0], p[1], p[2]], [p[3], p[4], p[5]], id, l, 0);
+                    let (a0, a1) = dims.arm_perp;
+                    for (i, &(dx, dz)) in sides.iter().enumerate() {
+                        if !conn[i] {
+                            continue;
+                        }
+                        for &(ry0, ry1) in dims.rails {
+                            let (lo, hi) = if dx > 0 {
+                                ([p[3], ry0, a0], [1.0, ry1, a1])
+                            } else if dx < 0 {
+                                ([0.0, ry0, a0], [p[0], ry1, a1])
+                            } else if dz > 0 {
+                                ([a0, ry0, p[5]], [a1, ry1, 1.0])
+                            } else {
+                                ([a0, ry0, 0.0], [a1, ry1, p[2]])
+                            };
+                            emit_box(geom, origin, x, y, z, lo, hi, id, l, 0);
+                        }
+                    }
+                }
+            }
             block::RenderKind::Cube => {}
         }
     }

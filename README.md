@@ -89,6 +89,10 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   (facing + half + open), both **right-click to open/close** — a closed door blocks the doorway, an
   open one swings aside so you can walk through; breaking either door half removes both. Thin oriented
   panels that don't occlude light or cast full-cube shadows.
+- **Fences, walls & glass panes**: **connection-aware** blocks — a central post grows a thin arm
+  toward each adjacent fence/wall/pane or solid block, so a row reads as a continuous rail/wall/window
+  (a lone pane is a flat sheet). The shape is derived from neighbors at mesh time; fences are 1.5 blocks
+  tall so they can't be jumped.
 - **Day/night** cycle with a dynamic sky, distance fog, translucent **water**, and **flowing fluids**
   (water/lava cellular simulation). Animated water ripples and lava.
 - **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /

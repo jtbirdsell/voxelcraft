@@ -51,9 +51,75 @@ pub const WOOD_SLAB: BlockId = 41;
 // block-state byte (P2), so those ids were retired. P9 reuses 42-43 for the new interactive blocks.)
 pub const WOODEN_DOOR: BlockId = 42; // 2-tall; state = facing+open+hinge+half
 pub const WOODEN_TRAPDOOR: BlockId = 43; // 1x1 thin; state = facing+half+open
+// Connection-aware blocks (P10): shape derived from neighbors at mesh time (post + per-side arms).
+pub const WOODEN_FENCE: BlockId = 44;
+pub const COBBLESTONE_WALL: BlockId = 45;
+pub const GLASS_PANE: BlockId = 46;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = WOODEN_TRAPDOOR;
+pub const MAX_BLOCK: BlockId = GLASS_PANE;
+
+#[inline]
+pub fn is_fence(id: BlockId) -> bool {
+    id == WOODEN_FENCE
+}
+#[inline]
+pub fn is_wall(id: BlockId) -> bool {
+    id == COBBLESTONE_WALL
+}
+#[inline]
+pub fn is_pane(id: BlockId) -> bool {
+    id == GLASS_PANE
+}
+
+/// Whether a connection-aware block (`self_id`) grows an arm toward a horizontal neighbor `n`.
+/// Every family attaches to a SOLID full cube face; otherwise each connects only within its own
+/// family (panes also to glass). `is_cube && is_opaque` excludes doors/trapdoors/slabs/stairs/glass.
+pub fn connects(self_id: BlockId, n: BlockId) -> bool {
+    if is_cube(n) && is_opaque(n) {
+        return true;
+    }
+    match self_id {
+        WOODEN_FENCE => is_fence(n),
+        COBBLESTONE_WALL => is_wall(n),
+        GLASS_PANE => is_pane(n) || n == GLASS,
+        _ => false,
+    }
+}
+
+/// Render dimensions of a connection block (post + arm rails). Collision is separate (a conservative
+/// centered box in `solid_boxes`). Arms run from the post edge to the cell edge along the connection
+/// axis, centered `arm_perp` on the other axis, at each `rails` (y_lo, y_hi).
+pub struct ConnectDims {
+    pub post: Aabb,
+    pub arm_perp: (f32, f32),
+    pub rails: &'static [(f32, f32)],
+}
+const FENCE_RAILS: [(f32, f32); 2] = [(0.375, 0.5625), (0.75, 0.9375)];
+const WALL_RAILS: [(f32, f32); 1] = [(0.0, 0.8125)];
+const PANE_RAILS: [(f32, f32); 1] = [(0.0, 1.0)];
+pub fn connect_dims(id: BlockId) -> ConnectDims {
+    match id {
+        WOODEN_FENCE => ConnectDims {
+            post: [0.3125, 0.0, 0.3125, 0.6875, 1.0, 0.6875],
+            arm_perp: (0.4375, 0.5625),
+            rails: &FENCE_RAILS,
+        },
+        COBBLESTONE_WALL => ConnectDims {
+            post: [0.25, 0.0, 0.25, 0.75, 1.0, 0.75],
+            arm_perp: (0.3125, 0.6875),
+            rails: &WALL_RAILS,
+        },
+        _ => ConnectDims {
+            // glass pane
+            post: [0.4375, 0.0, 0.4375, 0.5625, 1.0, 0.5625],
+            arm_perp: (0.4375, 0.5625),
+            rails: &PANE_RAILS,
+        },
+    }
+}
+/// A lone glass pane (no connections) renders as a full-cell flat sheet (a window), not a nub.
+pub const PANE_SHEET: Aabb = [0.0, 0.0, 0.4375, 1.0, 1.0, 0.5625];
 
 /// Block-state layout for stairs: bits 0-1 = facing (0:+z, 1:+x, 2:-z, 3:-x — the direction the high
 /// step faces); bit 2 (top half) is reserved for the stairs-polish milestone — placement currently
@@ -167,6 +233,8 @@ pub enum RenderKind {
     Door,
     /// 1x1 thin trapdoor flap (oriented by facing/half/open). Emitted per-cell.
     Trapdoor,
+    /// Fence / wall / glass-pane: a post + arms toward connecting neighbors (derived at mesh time).
+    Connect,
 }
 
 #[inline]
@@ -179,6 +247,7 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         STONE_STAIRS => RenderKind::Stairs,
         WOODEN_DOOR => RenderKind::Door,
         WOODEN_TRAPDOOR => RenderKind::Trapdoor,
+        WOODEN_FENCE | COBBLESTONE_WALL | GLASS_PANE => RenderKind::Connect,
         _ => RenderKind::Cube,
     }
 }
@@ -262,6 +331,11 @@ const TRAP_OPEN: [[Aabb; 1]; 4] = [
     [[0.0, 0.0, 0.0, 1.0, 1.0, DT]],  // -Z
     [[0.0, 0.0, 0.0, DT, 1.0, 1.0]],  // -X
 ];
+// Connection-block COLLISION (separate from the thin render geometry): a centered 0.5-wide box so a
+// fence/wall/pane LINE can't be slipped through (0.5 gap < the 0.6-wide player), 1.5 tall for
+// fences/walls (unjumpable) and 1.0 for panes. A lone post is thus slightly over-conservative.
+const FENCE_COLLIDE: [Aabb; 1] = [[0.25, 0.0, 0.25, 0.75, 1.5, 0.75]];
+const PANE_COLLIDE: [Aabb; 1] = [[0.25, 0.0, 0.25, 0.75, 1.0, 0.75]];
 
 /// The upper-step box (above the bottom slab) of a stair, given its facing.
 #[inline]
@@ -312,6 +386,15 @@ pub fn solid_boxes(id: BlockId, state: u8) -> &'static [Aabb] {
                 &TRAP_BOTTOM
             }
         }
+        // Fence/wall/pane: a conservative centered collision box (render geometry is the thin
+        // post+arms, emitted separately by the mesher).
+        RenderKind::Connect => {
+            if id == GLASS_PANE {
+                &PANE_COLLIDE
+            } else {
+                &FENCE_COLLIDE
+            }
+        }
         _ => &BOX_FULL,
     }
 }
@@ -331,6 +414,9 @@ pub fn is_opaque(id: BlockId) -> bool {
         && id != GLASS
         && id != WOODEN_DOOR
         && id != WOODEN_TRAPDOOR
+        && id != WOODEN_FENCE
+        && id != COBBLESTONE_WALL
+        && id != GLASS_PANE
         && !is_plant(id)
         && !is_partial(id)
 }
@@ -407,6 +493,9 @@ pub fn display_name(id: BlockId) -> &'static str {
         WOOD_SLAB => "Wood Slab",
         WOODEN_DOOR => "Wooden Door",
         WOODEN_TRAPDOOR => "Wooden Trapdoor",
+        WOODEN_FENCE => "Wooden Fence",
+        COBBLESTONE_WALL => "Cobblestone Wall",
+        GLASS_PANE => "Glass Pane",
         _ => "Unknown",
     }
 }
@@ -476,7 +565,9 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         ICE => [0.66, 0.80, 0.92],
         GLASS => [0.82, 0.91, 0.98],
         STONE_SLAB | STONE_STAIRS => [0.49, 0.49, 0.52], // stone
-        WOODEN_DOOR | WOODEN_TRAPDOOR => [0.60, 0.46, 0.28], // wood
+        WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => [0.60, 0.46, 0.28], // wood
+        COBBLESTONE_WALL => [0.42, 0.42, 0.44],                            // cobble
+        GLASS_PANE => [0.82, 0.91, 0.98],                                  // glass
         WOOD_SLAB => [0.62, 0.48, 0.30], // planks
         _ => [1.0, 0.0, 1.0],
     }
@@ -566,14 +657,15 @@ pub fn hardness(id: BlockId) -> f32 {
         AIR | WATER | LAVA => 0.0,
         LEAVES | TORCH | GLOWSTONE => 0.3,
         DIRT | GRASS | SAND | GRAVEL | SNOW => 0.6,
-        WOOD | PLANKS | CRAFTING_TABLE | CHEST | WOODEN_DOOR | WOODEN_TRAPDOOR => 1.2,
+        WOOD | PLANKS | CRAFTING_TABLE | CHEST | WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => 1.2,
+        COBBLESTONE_WALL => 2.0,
         STONE | COBBLESTONE | BRICKS | COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE
         | REDSTONE_ORE | LAPIS_ORE => 1.5,
         DEEPSLATE | FURNACE => 2.0,
         OBSIDIAN => 8.0,
         ICE => 0.5,
         PUMPKIN => 1.0,
-        GLASS => 0.3,
+        GLASS | GLASS_PANE => 0.3,
         STONE_SLAB | STONE_STAIRS => 1.5,
         WOOD_SLAB => 1.2,
         _ if is_plant(id) => 0.0,
@@ -588,7 +680,8 @@ pub fn tool_class(id: BlockId) -> ToolClass {
         | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE => ToolClass::Pickaxe,
         ICE | STONE_SLAB | STONE_STAIRS => ToolClass::Pickaxe,
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB | WOODEN_DOOR
-        | WOODEN_TRAPDOOR => ToolClass::Axe,
+        | WOODEN_TRAPDOOR | WOODEN_FENCE => ToolClass::Axe,
+        COBBLESTONE_WALL => ToolClass::Pickaxe,
         DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
         _ => ToolClass::None,
     }
@@ -612,8 +705,8 @@ pub fn drops(id: BlockId, state: u8) -> Option<(crate::item::ItemId, u8)> {
         STONE => (COBBLESTONE, 1),
         GRASS => (DIRT, 1),
         LEAVES => return None, // saplings/apples arrive with tree variety + farming
-        ICE => return None,    // melts away (no silk touch yet)
-        GLASS => return None,  // shatters
+        ICE => return None,             // melts away (no silk touch yet)
+        GLASS | GLASS_PANE => return None, // shatters
         // A double slab drops two slab items; a single drops one.
         STONE_SLAB | WOOD_SLAB => (id, if slab_half(state) == SLAB_DOUBLE { 2 } else { 1 }),
         COAL_ORE => (item::COAL, 1),
@@ -774,7 +867,9 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         ICE => tile::ICE,
         GLASS => tile::GLASS,
         STONE_SLAB | STONE_STAIRS => tile::STONE,
-        WOOD_SLAB | WOODEN_DOOR | WOODEN_TRAPDOOR => tile::PLANKS,
+        WOOD_SLAB | WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => tile::PLANKS,
+        COBBLESTONE_WALL => tile::COBBLE,
+        GLASS_PANE => tile::GLASS,
         _ => tile::MAGENTA,
     }
 }

@@ -520,6 +520,9 @@ impl Inventory {
                 block::COBBLESTONE,
                 block::WOODEN_DOOR,
                 block::WOODEN_TRAPDOOR,
+                block::WOODEN_FENCE,
+                block::COBBLESTONE_WALL,
+                block::GLASS_PANE,
             ]
             .iter()
             .enumerate()
@@ -852,6 +855,30 @@ mod tests {
         // Doors/trapdoors don't occlude/cast full-cube shadows, but are raycast-targetable.
         assert!(!block::is_opaque(block::WOODEN_DOOR) && !block::is_volume_solid(block::WOODEN_DOOR));
         assert!(block::is_solid(block::WOODEN_DOOR) && block::is_solid(block::WOODEN_TRAPDOOR));
+    }
+
+    #[test]
+    fn connection_blocks() {
+        use crate::block;
+        // Fence: connects to fences + solid full cubes, not walls/panes/doors/glass/air.
+        assert!(block::connects(block::WOODEN_FENCE, block::WOODEN_FENCE));
+        assert!(block::connects(block::WOODEN_FENCE, block::STONE));
+        assert!(!block::connects(block::WOODEN_FENCE, block::COBBLESTONE_WALL));
+        assert!(!block::connects(block::WOODEN_FENCE, block::GLASS)); // non-opaque cube
+        assert!(!block::connects(block::WOODEN_FENCE, block::WOODEN_DOOR)); // thin, non-cube
+        assert!(!block::connects(block::WOODEN_FENCE, block::AIR));
+        // Pane: connects to panes, glass, and solid cubes.
+        assert!(block::connects(block::GLASS_PANE, block::GLASS_PANE));
+        assert!(block::connects(block::GLASS_PANE, block::GLASS));
+        assert!(block::connects(block::GLASS_PANE, block::STONE));
+        assert!(!block::connects(block::GLASS_PANE, block::WOODEN_FENCE));
+        // Wall: walls + solid only.
+        assert!(block::connects(block::COBBLESTONE_WALL, block::COBBLESTONE_WALL));
+        assert!(!block::connects(block::COBBLESTONE_WALL, block::WOODEN_FENCE));
+        // Non-occluding, but solid; the fence collision box is 1.5 tall (unjumpable).
+        assert!(!block::is_opaque(block::WOODEN_FENCE) && !block::is_volume_solid(block::WOODEN_FENCE));
+        assert!(block::is_solid(block::WOODEN_FENCE) && block::is_solid(block::GLASS_PANE));
+        assert_eq!(block::solid_boxes(block::WOODEN_FENCE, 0)[0][4], 1.5);
     }
 
     #[test]
