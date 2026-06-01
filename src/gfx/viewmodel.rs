@@ -20,6 +20,8 @@ const BASE_YAW: f32 = -0.30; // toed inward toward the screen center
 const BASE_PITCH: f32 = 0.20; // tipped up a touch
 /// Held-block cube half-extent (≈0.4-unit cube).
 const BLOCK_HALF: f32 = 0.2;
+/// Seconds for one swing arc (≈ Minecraft's 6-tick swing).
+const SWING_TIME: f32 = 0.28;
 
 /// Per-frame uniform for the view-model pass: the fixed near-perspective projection + a brightness
 /// (local-light) scalar. 80 bytes, std140-friendly.
@@ -74,20 +76,65 @@ impl Default for ViewModel {
 }
 
 impl ViewModel {
+    /// Advance the animation. `swing_start` is a one-shot trigger (an attack landed / a block was
+    /// placed); `swing_loop` keeps the arc repeating while the player mines/attacks. Later milestones
+    /// extend this with equip / bob / sway.
+    pub fn update(&mut self, dt: f32, swing_start: bool, swing_loop: bool) {
+        if swing_start {
+            self.swing = 0.0;
+            self.swinging = true;
+        }
+        if self.swinging {
+            self.swing += dt / SWING_TIME;
+            if self.swing >= 1.0 {
+                if swing_loop {
+                    self.swing -= 1.0; // keep swinging while held
+                } else {
+                    self.swing = 0.0;
+                    self.swinging = false;
+                }
+            }
+        } else if swing_loop {
+            self.swinging = true; // begin a held swing loop
+            self.swing = 0.0;
+        }
+    }
+
+    /// The swing arc contribution this frame: a (translation, extra pitch, extra roll) that dips the
+    /// item down-forward and rotates it, peaking mid-swing. Zero when not swinging.
+    fn swing_pose(&self) -> (Vec3, f32, f32) {
+        if !self.swinging {
+            return (Vec3::ZERO, 0.0, 0.0);
+        }
+        let p = self.swing.clamp(0.0, 1.0);
+        let a = (p * std::f32::consts::PI).sin(); // 0 → 1 → 0 envelope
+        let trans = Vec3::new(
+            -0.10 * a,
+            -0.18 * a + 0.10 * (p * std::f32::consts::TAU).sin(),
+            -0.16 * a,
+        );
+        (trans, 1.1 * a, 0.5 * a)
+    }
+
+    /// Compose a pose from a base anchor + orientation plus the current swing arc.
+    fn pose(&self, base_t: Vec3, yaw: f32, base_pitch: f32, base_roll: f32) -> Mat4 {
+        let (st, sp, sr) = self.swing_pose();
+        Mat4::from_translation(base_t + st)
+            * Mat4::from_rotation_y(yaw)
+            * Mat4::from_rotation_x(base_pitch + sp)
+            * Mat4::from_rotation_z(base_roll + sr)
+    }
+
     /// The view-space pose transform for a 3D held item (block cube / arm). A noticeable tilt shows
-    /// the cube's faces. Later milestones compose equip / swing / use / bob / sway offsets here.
+    /// the cube's faces.
     fn transform(&self) -> Mat4 {
-        Mat4::from_translation(REST)
-            * Mat4::from_rotation_y(BASE_YAW)
-            * Mat4::from_rotation_x(BASE_PITCH)
+        self.pose(REST, BASE_YAW, BASE_PITCH, 0.0)
     }
 
     /// Pose for a flat sprite card (tools/materials/food). Held nearly face-on — only a slight turn +
     /// tip — so the 2D sprite stays readable instead of going edge-on like the 3D pose would.
     fn card_transform(&self) -> Mat4 {
-        Mat4::from_translation(Vec3::new(0.42, -0.42, -0.78))
-            * Mat4::from_rotation_y(-0.16)
-            * Mat4::from_rotation_x(0.10)
+        self.pose(Vec3::new(0.42, -0.42, -0.78), -0.16, 0.10, 0.0)
     }
 
     /// Build the view-space geometry for the currently-held item. `light` is the local brightness

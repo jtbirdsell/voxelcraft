@@ -736,6 +736,11 @@ impl App {
             state.eat_item = None;
         }
 
+        // M34-VM3: a use/place click pulses one view-model swing (captured before the flag is consumed).
+        let vm_use_click = state.input.place_pressed
+            && state.screen == Screen::None
+            && !item::is_bow(sel_item)
+            && !item::is_shield(sel_item);
         if state.input.place_pressed {
             state.input.place_pressed = false;
             if item::is_bow(state.inventory.selected_item()) {
@@ -1123,6 +1128,9 @@ impl App {
         } else {
             None
         };
+        // M34-VM3: advance the view-model swing — loop while mining/attacking, one-shot on use/place.
+        let swing_loop = state.input.break_held && (state.mine_target.is_some() || mob_in_way);
+        state.view_model.update(dt, vm_use_click, swing_loop);
         // M34-VM: build the first-person held-item geometry (view space) + its projection/brightness
         // uniform. VM1 uses a constant brightness; VM5 will sample the local block light.
         let vm_light = 0.95;
@@ -1813,8 +1821,19 @@ impl ApplicationHandler for App {
                 all.push(em);
             }
             // M34-VM: build the held-item view-model for the shot (forced via VOXELCRAFT_HELD).
+            // VOXELCRAFT_VM_POSE=swing|… + VOXELCRAFT_VM_T=<0..1> force an animation pose for verification.
             let vm_light = 0.95;
-            let vm_state = crate::viewmodel::ViewModel::default();
+            let mut vm_state = crate::viewmodel::ViewModel::default();
+            let vm_pose = std::env::var("VOXELCRAFT_VM_POSE").unwrap_or_default();
+            let vm_t: f32 = std::env::var("VOXELCRAFT_VM_T")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .unwrap_or(0.5)
+                .clamp(0.0, 1.0);
+            if vm_pose == "swing" {
+                vm_state.swing = vm_t;
+                vm_state.swinging = true;
+            }
             let vm_geom = vm_state.build_geometry(shot_inv.selected_item(), vm_light);
             let vm_part = vm_geom
                 .as_ref()
