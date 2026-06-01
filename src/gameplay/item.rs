@@ -85,6 +85,11 @@ pub const SHIELD: ItemId = MATERIAL_BASE + 30;
 pub const WHEAT: ItemId = MATERIAL_BASE + 31;
 pub const SEEDS: ItemId = MATERIAL_BASE + 32;
 pub const CARROT: ItemId = MATERIAL_BASE + 33;
+// Underground overhaul (U2): copper line + emerald gem. Copper/emerald have no tools/armor in vanilla,
+// so these feed only blocks/decoration — the Tier enum + tool id layout are deliberately untouched.
+pub const RAW_COPPER: ItemId = MATERIAL_BASE + 34;
+pub const COPPER_INGOT: ItemId = MATERIAL_BASE + 35;
+pub const EMERALD: ItemId = MATERIAL_BASE + 36;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -125,6 +130,9 @@ fn material_name(item: ItemId) -> &'static str {
         WHEAT => "Wheat",
         SEEDS => "Seeds",
         CARROT => "Carrot",
+        RAW_COPPER => "Raw Copper",
+        COPPER_INGOT => "Copper Ingot",
+        EMERALD => "Emerald",
         _ => "Material",
     }
 }
@@ -165,6 +173,9 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         WHEAT => [0.85, 0.78, 0.30],
         SEEDS => [0.55, 0.70, 0.30],
         CARROT => [0.90, 0.50, 0.15],
+        RAW_COPPER => [0.80, 0.50, 0.32],
+        COPPER_INGOT => [0.85, 0.55, 0.40],
+        EMERALD => [0.20, 0.80, 0.40],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -927,6 +938,24 @@ mod tests {
         assert_eq!(block::drops(block::STONE_SLAB, block::SLAB_BOTTOM), Some((block::STONE_SLAB, 1)));
         assert_eq!(block::drops(block::STONE_SLAB, block::SLAB_TOP), Some((block::STONE_SLAB, 1)));
         assert_eq!(block::drops(block::STONE_SLAB, block::SLAB_DOUBLE), Some((block::STONE_SLAB, 2)));
+    }
+
+    #[test]
+    fn u2_new_ore_drops_and_materials() {
+        // Copper/emerald + the deepslate variants drop the right material item.
+        assert_eq!(block::drops(block::COPPER_ORE, 0), Some((RAW_COPPER, 3)));
+        assert_eq!(block::drops(block::DEEPSLATE_COPPER_ORE, 0), Some((RAW_COPPER, 3)));
+        assert_eq!(block::drops(block::EMERALD_ORE, 0), Some((EMERALD, 1)));
+        assert_eq!(block::drops(block::DEEPSLATE_DIAMOND_ORE, 0), Some((DIAMOND, 1)));
+        assert_eq!(block::drops(block::DEEPSLATE_LAPIS_ORE, 0), Some((LAPIS, 6)));
+        assert_eq!(block::drops(block::DEEPSLATE_REDSTONE_ORE, 0), Some((REDSTONE_DUST, 4)));
+        // New materials are known + named; new ore blocks are known.
+        assert!(is_known(RAW_COPPER) && is_known(COPPER_INGOT) && is_known(EMERALD));
+        assert_eq!(item_name(RAW_COPPER), "Raw Copper");
+        assert!(is_known(block::COPPER_ORE) && is_known(block::DEEPSLATE_DIAMOND_ORE));
+        // Deepslate ore is tougher than its stone variant; emerald needs an iron pickaxe.
+        assert!(block::hardness(block::DEEPSLATE_IRON_ORE) > block::hardness(block::IRON_ORE));
+        assert_eq!(block::required_harvest(block::EMERALD_ORE), 2);
     }
 
     #[test]

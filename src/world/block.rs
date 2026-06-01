@@ -59,9 +59,20 @@ pub const GLASS_PANE: BlockId = 46;
 // and non-occluding; the torch keeps its block-light glow (id-keyed). state = attach face + on/pressed.
 pub const LEVER: BlockId = 47;
 pub const BUTTON: BlockId = 48;
+// ── Underground overhaul (U2): copper + emerald ores, and a deepslate variant of every ore ──
+pub const COPPER_ORE: BlockId = 49;
+pub const EMERALD_ORE: BlockId = 50;
+pub const DEEPSLATE_COAL_ORE: BlockId = 51;
+pub const DEEPSLATE_IRON_ORE: BlockId = 52;
+pub const DEEPSLATE_COPPER_ORE: BlockId = 53;
+pub const DEEPSLATE_GOLD_ORE: BlockId = 54;
+pub const DEEPSLATE_REDSTONE_ORE: BlockId = 55;
+pub const DEEPSLATE_EMERALD_ORE: BlockId = 56;
+pub const DEEPSLATE_LAPIS_ORE: BlockId = 57;
+pub const DEEPSLATE_DIAMOND_ORE: BlockId = 58;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = BUTTON;
+pub const MAX_BLOCK: BlockId = DEEPSLATE_DIAMOND_ORE;
 
 #[inline]
 pub fn is_fence(id: BlockId) -> bool {
@@ -605,6 +616,16 @@ pub fn display_name(id: BlockId) -> &'static str {
         GLASS_PANE => "Glass Pane",
         LEVER => "Lever",
         BUTTON => "Button",
+        COPPER_ORE => "Copper Ore",
+        EMERALD_ORE => "Emerald Ore",
+        DEEPSLATE_COAL_ORE => "Deepslate Coal Ore",
+        DEEPSLATE_IRON_ORE => "Deepslate Iron Ore",
+        DEEPSLATE_COPPER_ORE => "Deepslate Copper Ore",
+        DEEPSLATE_GOLD_ORE => "Deepslate Gold Ore",
+        DEEPSLATE_REDSTONE_ORE => "Deepslate Redstone Ore",
+        DEEPSLATE_EMERALD_ORE => "Deepslate Emerald Ore",
+        DEEPSLATE_LAPIS_ORE => "Deepslate Lapis Ore",
+        DEEPSLATE_DIAMOND_ORE => "Deepslate Diamond Ore",
         _ => "Unknown",
     }
 }
@@ -680,6 +701,18 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         WOOD_SLAB => [0.62, 0.48, 0.30], // planks
         LEVER => [0.62, 0.48, 0.30],     // planks (matches tile::PLANKS average)
         BUTTON => [0.49, 0.49, 0.52],    // stone (matches tile::STONE average)
+        // U2 ores: tile-average reflectance (stone/deepslate host blended with the ore fleck). Kept in
+        // lockstep with the texture.rs base_color + the rtx_common.wgsl voxel_color cases.
+        COPPER_ORE => [0.58, 0.49, 0.44],
+        EMERALD_ORE => [0.46, 0.58, 0.49],
+        DEEPSLATE_COAL_ORE => [0.20, 0.20, 0.22],
+        DEEPSLATE_IRON_ORE => [0.34, 0.30, 0.30],
+        DEEPSLATE_COPPER_ORE => [0.36, 0.30, 0.29],
+        DEEPSLATE_GOLD_ORE => [0.36, 0.33, 0.27],
+        DEEPSLATE_REDSTONE_ORE => [0.33, 0.23, 0.25],
+        DEEPSLATE_EMERALD_ORE => [0.24, 0.36, 0.30],
+        DEEPSLATE_LAPIS_ORE => [0.22, 0.26, 0.38],
+        DEEPSLATE_DIAMOND_ORE => [0.27, 0.37, 0.39],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -754,8 +787,11 @@ pub fn requires_tool(id: BlockId) -> bool {
 /// redstone need iron, obsidian needs diamond.
 pub fn required_harvest(id: BlockId) -> u8 {
     match id {
-        IRON_ORE | LAPIS_ORE => 1,
-        GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE => 2,
+        IRON_ORE | LAPIS_ORE | COPPER_ORE
+        | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE | DEEPSLATE_LAPIS_ORE => 1,
+        GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | EMERALD_ORE
+        | DEEPSLATE_GOLD_ORE | DEEPSLATE_DIAMOND_ORE | DEEPSLATE_REDSTONE_ORE
+        | DEEPSLATE_EMERALD_ORE => 2,
         OBSIDIAN => 3,
         _ => 0,
     }
@@ -771,8 +807,11 @@ pub fn hardness(id: BlockId) -> f32 {
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => 1.2,
         COBBLESTONE_WALL => 2.0,
         STONE | COBBLESTONE | BRICKS | COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE
-        | REDSTONE_ORE | LAPIS_ORE => 1.5,
+        | REDSTONE_ORE | LAPIS_ORE | COPPER_ORE | EMERALD_ORE => 1.5,
         DEEPSLATE | FURNACE => 2.0,
+        DEEPSLATE_COAL_ORE | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE | DEEPSLATE_GOLD_ORE
+        | DEEPSLATE_REDSTONE_ORE | DEEPSLATE_EMERALD_ORE | DEEPSLATE_LAPIS_ORE
+        | DEEPSLATE_DIAMOND_ORE => 3.0,
         OBSIDIAN => 8.0,
         ICE => 0.5,
         PUMPKIN => 1.0,
@@ -791,6 +830,9 @@ pub fn tool_class(id: BlockId) -> ToolClass {
         STONE | COBBLESTONE | BRICKS | DEEPSLATE | OBSIDIAN | FURNACE | COAL_ORE | IRON_ORE
         | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE => ToolClass::Pickaxe,
         ICE | STONE_SLAB | STONE_STAIRS => ToolClass::Pickaxe,
+        COPPER_ORE | EMERALD_ORE | DEEPSLATE_COAL_ORE | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE
+        | DEEPSLATE_GOLD_ORE | DEEPSLATE_REDSTONE_ORE | DEEPSLATE_EMERALD_ORE | DEEPSLATE_LAPIS_ORE
+        | DEEPSLATE_DIAMOND_ORE => ToolClass::Pickaxe,
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB | WOODEN_DOOR
         | WOODEN_TRAPDOOR | WOODEN_FENCE => ToolClass::Axe,
         COBBLESTONE_WALL | BUTTON => ToolClass::Pickaxe,
@@ -821,12 +863,14 @@ pub fn drops(id: BlockId, state: u8) -> Option<(crate::item::ItemId, u8)> {
         GLASS | GLASS_PANE => return None, // shatters
         // A double slab drops two slab items; a single drops one.
         STONE_SLAB | WOOD_SLAB => (id, if slab_half(state) == SLAB_DOUBLE { 2 } else { 1 }),
-        COAL_ORE => (item::COAL, 1),
-        IRON_ORE => (item::RAW_IRON, 1),
-        GOLD_ORE => (item::RAW_GOLD, 1),
-        DIAMOND_ORE => (item::DIAMOND, 1),
-        REDSTONE_ORE => (item::REDSTONE_DUST, 4),
-        LAPIS_ORE => (item::LAPIS, 6),
+        COAL_ORE | DEEPSLATE_COAL_ORE => (item::COAL, 1),
+        IRON_ORE | DEEPSLATE_IRON_ORE => (item::RAW_IRON, 1),
+        GOLD_ORE | DEEPSLATE_GOLD_ORE => (item::RAW_GOLD, 1),
+        DIAMOND_ORE | DEEPSLATE_DIAMOND_ORE => (item::DIAMOND, 1),
+        REDSTONE_ORE | DEEPSLATE_REDSTONE_ORE => (item::REDSTONE_DUST, 4),
+        LAPIS_ORE | DEEPSLATE_LAPIS_ORE => (item::LAPIS, 6),
+        COPPER_ORE | DEEPSLATE_COPPER_ORE => (item::RAW_COPPER, 3),
+        EMERALD_ORE | DEEPSLATE_EMERALD_ORE => (item::EMERALD, 1),
         _ => (id, 1),
     })
 }
@@ -835,9 +879,10 @@ pub fn drops(id: BlockId, state: u8) -> Option<(crate::item::ItemId, u8)> {
 /// here — their XP comes from smelting the ore in a furnace.
 pub fn mining_xp(id: BlockId) -> u32 {
     match id {
-        COAL_ORE => 1,
-        REDSTONE_ORE | LAPIS_ORE => 2,
-        DIAMOND_ORE => 4,
+        COAL_ORE | DEEPSLATE_COAL_ORE => 1,
+        REDSTONE_ORE | LAPIS_ORE | DEEPSLATE_REDSTONE_ORE | DEEPSLATE_LAPIS_ORE => 2,
+        EMERALD_ORE | DEEPSLATE_EMERALD_ORE => 3,
+        DIAMOND_ORE | DEEPSLATE_DIAMOND_ORE => 4,
         _ => 0,
     }
 }
@@ -910,6 +955,18 @@ pub mod tile {
     pub const MOB_SLIME: u32 = SUGAR_CANE; // gel green
     pub const MOB_VILLAGER: u32 = MOB_COW; // brown robe (biped silhouette ≠ the cow quadruped)
     pub const MAGENTA: u32 = 63; // missing/unknown sentinel
+    // Underground overhaul (U2): copper/emerald ore + a deepslate-host variant of every ore. The
+    // 16x16 grid has free slots 64..=255; deepslate variants reuse the stone-ore flecks on a slate host.
+    pub const COPPER: u32 = 64;
+    pub const EMERALD: u32 = 65;
+    pub const DS_COAL: u32 = 66;
+    pub const DS_IRON: u32 = 67;
+    pub const DS_COPPER: u32 = 68;
+    pub const DS_GOLD: u32 = 69;
+    pub const DS_REDSTONE: u32 = 70;
+    pub const DS_EMERALD: u32 = 71;
+    pub const DS_LAPIS: u32 = 72;
+    pub const DS_DIAMOND: u32 = 73;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
@@ -992,6 +1049,16 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         GLASS_PANE => tile::GLASS,
         LEVER => tile::PLANKS,
         BUTTON => tile::STONE,
+        COPPER_ORE => tile::COPPER,
+        EMERALD_ORE => tile::EMERALD,
+        DEEPSLATE_COAL_ORE => tile::DS_COAL,
+        DEEPSLATE_IRON_ORE => tile::DS_IRON,
+        DEEPSLATE_COPPER_ORE => tile::DS_COPPER,
+        DEEPSLATE_GOLD_ORE => tile::DS_GOLD,
+        DEEPSLATE_REDSTONE_ORE => tile::DS_REDSTONE,
+        DEEPSLATE_EMERALD_ORE => tile::DS_EMERALD,
+        DEEPSLATE_LAPIS_ORE => tile::DS_LAPIS,
+        DEEPSLATE_DIAMOND_ORE => tile::DS_DIAMOND,
         _ => tile::MAGENTA,
     }
 }

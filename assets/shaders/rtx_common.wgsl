@@ -131,6 +131,17 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 39u: { return vec3<f32>(0.49, 0.49, 0.52); } // stone slab
         case 40u, 42u, 43u, 44u: { return vec3<f32>(0.49, 0.49, 0.52); } // stone stairs (4 facings)
         case 41u: { return vec3<f32>(0.62, 0.48, 0.30); } // wood slab
+        // U2 ores (opaque cubes): tile-average reflectance, in lockstep with block::face_color.
+        case 49u: { return vec3<f32>(0.58, 0.49, 0.44); } // copper ore
+        case 50u: { return vec3<f32>(0.46, 0.58, 0.49); } // emerald ore
+        case 51u: { return vec3<f32>(0.20, 0.20, 0.22); } // deepslate coal ore
+        case 52u: { return vec3<f32>(0.34, 0.30, 0.30); } // deepslate iron ore
+        case 53u: { return vec3<f32>(0.36, 0.30, 0.29); } // deepslate copper ore
+        case 54u: { return vec3<f32>(0.36, 0.33, 0.27); } // deepslate gold ore
+        case 55u: { return vec3<f32>(0.33, 0.23, 0.25); } // deepslate redstone ore
+        case 56u: { return vec3<f32>(0.24, 0.36, 0.30); } // deepslate emerald ore
+        case 57u: { return vec3<f32>(0.22, 0.26, 0.38); } // deepslate lapis ore
+        case 58u: { return vec3<f32>(0.27, 0.37, 0.39); } // deepslate diamond ore
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }

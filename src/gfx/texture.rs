@@ -92,6 +92,17 @@ fn base_color(tile: u32) -> [f32; 3] {
         t if (T::MATERIAL_DROP..T::MATERIAL_DROP + 11).contains(&t) => {
             crate::item::material_color(crate::item::BEEF + (t - T::MATERIAL_DROP) as u16)
         }
+        // U2 ores: tile averages (must match block::face_color + the rtx_common.wgsl voxel_color cases).
+        T::COPPER => [0.58, 0.49, 0.44],
+        T::EMERALD => [0.46, 0.58, 0.49],
+        T::DS_COAL => [0.20, 0.20, 0.22],
+        T::DS_IRON => [0.34, 0.30, 0.30],
+        T::DS_COPPER => [0.36, 0.30, 0.29],
+        T::DS_GOLD => [0.36, 0.33, 0.27],
+        T::DS_REDSTONE => [0.33, 0.23, 0.25],
+        T::DS_EMERALD => [0.24, 0.36, 0.30],
+        T::DS_LAPIS => [0.22, 0.26, 0.38],
+        T::DS_DIAMOND => [0.27, 0.37, 0.39],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -195,16 +206,21 @@ fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
     }
 }
 
-/// Stone-host ore tile: stone with chunky colored ore lumps (a brighter core + a darker rim so the
-/// lumps read as faceted gems/metal rather than flat dots).
-fn ore(fleck: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3] {
-    let host = base_color(T::STONE);
+/// Host-parameterized ore tile: chunky colored lumps (a brighter core + a darker rim so the lumps
+/// read as faceted gems/metal) on an arbitrary host rock. Stone ores pass STONE; deepslate ores (U2)
+/// pass the DEEPSLATE host with the SAME fleck color, so the variant reads as "the same ore in slate".
+fn ore_on(host: [f32; 3], fleck: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3] {
     let n = hashf(x, y, 77);
     match ore_lump(x, y, salt) {
         2 => shade(fleck, 0.12 + (n - 0.5) * 0.10), // bright core
         1 => shade(fleck, -0.22),                   // darker rim, for depth
         _ => shade(host, (n - 0.5) * 0.14),
     }
+}
+
+/// Stone-host ore tile (the common case): chunky colored lumps on a stone background.
+fn ore(fleck: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3] {
+    ore_on(base_color(T::STONE), fleck, x, y, salt)
 }
 
 /// Ore-lump mask with a rim: 2 = lump core, 1 = lump edge, 0 = host stone. Chunkier than a single
@@ -369,6 +385,17 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
         T::DIAMOND => c = ore([0.45, 0.92, 0.90], x, y, 14),
         T::REDSTONE => c = ore([0.85, 0.12, 0.12], x, y, 21),
         T::LAPIS => c = ore([0.15, 0.28, 0.85], x, y, 28),
+        // U2: copper/emerald on stone, and a deepslate-host variant of every ore (same flecks on slate).
+        T::COPPER => c = ore([0.85, 0.45, 0.30], x, y, 33),
+        T::EMERALD => c = ore([0.20, 0.80, 0.40], x, y, 37),
+        T::DS_COAL => c = ore_on(base_color(T::DEEPSLATE), [0.10, 0.10, 0.11], x, y, 40),
+        T::DS_IRON => c = ore_on(base_color(T::DEEPSLATE), [0.78, 0.62, 0.45], x, y, 49),
+        T::DS_COPPER => c = ore_on(base_color(T::DEEPSLATE), [0.85, 0.45, 0.30], x, y, 73),
+        T::DS_GOLD => c = ore_on(base_color(T::DEEPSLATE), [0.95, 0.78, 0.25], x, y, 43),
+        T::DS_REDSTONE => c = ore_on(base_color(T::DEEPSLATE), [0.85, 0.12, 0.12], x, y, 61),
+        T::DS_EMERALD => c = ore_on(base_color(T::DEEPSLATE), [0.20, 0.80, 0.40], x, y, 77),
+        T::DS_LAPIS => c = ore_on(base_color(T::DEEPSLATE), [0.15, 0.28, 0.85], x, y, 68),
+        T::DS_DIAMOND => c = ore_on(base_color(T::DEEPSLATE), [0.45, 0.92, 0.90], x, y, 54),
         T::CRAFTING => {
             c = shade(base, (m - 0.5) * 0.16);
             if x < 2 || y < 2 || x > 13 {
@@ -485,8 +512,9 @@ mod tests {
         assert_eq!(build_atlas().len(), (ATLAS_W * ATLAS_H * 4) as usize);
         assert!(ATLAS_W.is_power_of_two() && ATLAS_H.is_power_of_two(), "PoT for any future mips");
         // An unassigned slot reads the magenta missing-texture color (the base_color `_` fallback).
+        // (Tiles 64+ are being filled by the underground overhaul; pick a far slot that stays free.)
         assert_eq!(crate::block::tile::MAGENTA, 63);
-        assert_eq!(base_color(64), [1.0, 0.0, 1.0]);
+        assert_eq!(base_color(200), [1.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -500,5 +528,50 @@ mod tests {
         );
         assert!(wgsl.contains(&format!("ATLAS_COLS_F: f32 = {:.1}", ATLAS_COLS as f32)));
         assert!(wgsl.contains(&format!("ATLAS_ROWS_F: f32 = {:.1}", ATLAS_ROWS as f32)));
+    }
+
+    /// GI-sync guard (U2): every OPAQUE block that lands in the RTX voxel volume must have a `case Nu:`
+    /// in rtx_common.wgsl `voxel_color`, or it GI-bounces the default grey. Non-opaque blocks store 0
+    /// in the volume and are correctly absent. Fails loudly the moment a new opaque block forgets its
+    /// case — closing the long-standing "new ore bounces grey" gap permanently.
+    #[test]
+    fn voxel_color_covers_every_opaque_block() {
+        let wgsl = include_str!("../../assets/shaders/rtx_common.wgsl");
+        // Isolate the voxel_color switch body so case ids from other functions aren't counted (notably
+        // voxel_emission, which also has `Nu` literals).
+        let start = wgsl.find("fn voxel_color").expect("voxel_color present");
+        let rest = &wgsl[start..];
+        let end = rest[1..].find("\nfn ").map(|e| e + 1).unwrap_or(rest.len());
+        let body = rest[..end].as_bytes();
+        // Collect every integer N that appears as a `Nu` case label (handles `case 40u, 42u, ...:`).
+        let mut covered = std::collections::HashSet::new();
+        let mut i = 0;
+        while i < body.len() {
+            if body[i].is_ascii_digit() {
+                let mut j = i;
+                while j < body.len() && body[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let is_u = j < body.len() && body[j] == b'u';
+                if is_u {
+                    if let Ok(n) = std::str::from_utf8(&body[i..j]).unwrap().parse::<u16>() {
+                        covered.insert(n);
+                    }
+                }
+                i = if is_u { j + 1 } else { j };
+            } else {
+                i += 1;
+            }
+        }
+        for id in 1..=crate::block::MAX_BLOCK {
+            if crate::block::is_opaque(id) {
+                assert!(
+                    covered.contains(&id),
+                    "rtx_common.wgsl voxel_color is missing opaque block id {} ({})",
+                    id,
+                    crate::block::display_name(id)
+                );
+            }
+        }
     }
 }

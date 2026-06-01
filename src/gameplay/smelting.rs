@@ -13,8 +13,10 @@ pub const SMELT_TIME: f32 = 6.0;
 pub fn smelt_output(input: ItemId) -> Option<ItemId> {
     Some(match input {
         // Ores + raw ore -> ingots (P5a: mining drops raw ore; the block also smelts for convenience).
-        block::IRON_ORE | item::RAW_IRON => item::IRON_INGOT,
-        block::GOLD_ORE | item::RAW_GOLD => item::GOLD_INGOT,
+        // U2: the deepslate variant of each smeltable ore + copper join here.
+        block::IRON_ORE | block::DEEPSLATE_IRON_ORE | item::RAW_IRON => item::IRON_INGOT,
+        block::GOLD_ORE | block::DEEPSLATE_GOLD_ORE | item::RAW_GOLD => item::GOLD_INGOT,
+        block::COPPER_ORE | block::DEEPSLATE_COPPER_ORE | item::RAW_COPPER => item::COPPER_INGOT,
         block::COBBLESTONE => block::STONE, // cobble re-smelts to smooth stone
         block::SAND => block::GLASS,        // sand -> glass
         block::WOOD => item::CHARCOAL,      // a log (in the input slot) chars to charcoal
@@ -68,6 +70,21 @@ mod tests {
         assert_eq!(smelt_output(block::WOOD), Some(item::CHARCOAL));
         // Coal is a strong fuel (smelts more than a plank).
         assert!(fuel_value(item::COAL).unwrap() > fuel_value(block::PLANKS).unwrap());
+    }
+
+    #[test]
+    fn u2_copper_and_deepslate_ores_smelt() {
+        // Copper (ore + deepslate + raw) smelts to a copper ingot.
+        assert_eq!(smelt_output(block::COPPER_ORE), Some(item::COPPER_INGOT));
+        assert_eq!(smelt_output(item::RAW_COPPER), Some(item::COPPER_INGOT));
+        assert_eq!(smelt_output(block::DEEPSLATE_COPPER_ORE), Some(item::COPPER_INGOT));
+        // Deepslate iron/gold smelt like their stone variants.
+        assert_eq!(smelt_output(block::DEEPSLATE_IRON_ORE), Some(item::IRON_INGOT));
+        assert_eq!(smelt_output(block::DEEPSLATE_GOLD_ORE), Some(item::GOLD_INGOT));
+        // Gem (and deepslate-gem) ores drop their material directly and don't smelt (matches MC).
+        assert_eq!(smelt_output(block::EMERALD_ORE), None);
+        assert_eq!(smelt_output(block::DEEPSLATE_DIAMOND_ORE), None);
+        assert_eq!(smelt_output(item::COPPER_INGOT), None); // ingots don't re-smelt
     }
 
     #[test]
