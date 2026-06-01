@@ -598,7 +598,21 @@ impl App {
             state.input.place_pressed = false;
             if let Some(hit) = &target {
                 let targeted = state.game.block_at(hit.block);
-                if targeted == block::CRAFTING_TABLE {
+                if targeted == block::WOODEN_DOOR {
+                    // Right-click toggles the door open/closed — both halves together.
+                    let (_, st) = state.game.block_state_at(hit.block);
+                    let half = block::door_half(st);
+                    let (f, h, no) = (block::door_facing(st), block::door_hinge(st), !block::door_open(st));
+                    let partner = if half == block::DOOR_LOWER { hit.block + IVec3::Y } else { hit.block - IVec3::Y };
+                    let p_half = if half == block::DOOR_LOWER { block::DOOR_UPPER } else { block::DOOR_LOWER };
+                    state.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_DOOR, block::door_state(f, no, h, half));
+                    state.game.set_block_state(&state.gpu, &state.renderer, partner, block::WOODEN_DOOR, block::door_state(f, no, h, p_half));
+                } else if targeted == block::WOODEN_TRAPDOOR {
+                    // Right-click toggles the trapdoor open/closed.
+                    let (_, st) = state.game.block_state_at(hit.block);
+                    let ns = block::trapdoor_state(block::trapdoor_facing(st), block::trapdoor_half(st), !block::trapdoor_open(st));
+                    state.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_TRAPDOOR, ns);
+                } else if targeted == block::CRAFTING_TABLE {
                     // Right-clicking a crafting table opens the 3x3 crafting screen instead.
                     state.pending_open = Some(Screen::Crafting);
                 } else if targeted == block::FURNACE {
@@ -609,6 +623,51 @@ impl App {
                     state.pending_open = Some(Screen::Chest(hit.block));
                 } else {
                     let id = state.inventory.selected_block();
+                    if id == block::WOODEN_DOOR {
+                        // 2-tall door: needs a solid block below + air in both cells. Facing from the
+                        // camera; hinge defaults left (double-door auto-pairing deferred).
+                        let lower = hit.block + hit.normal;
+                        let upper = lower + IVec3::Y;
+                        let support = block::is_solid(state.game.block_at(lower - IVec3::Y));
+                        let space = state.game.block_at(lower) == block::AIR
+                            && state.game.block_at(upper) == block::AIR;
+                        if support && space {
+                            let f = state.camera.forward();
+                            let facing = if f.x.abs() > f.z.abs() {
+                                if f.x > 0.0 { 1 } else { 3 }
+                            } else if f.z > 0.0 {
+                                0
+                            } else {
+                                2
+                            };
+                            state.game.set_block_state(&state.gpu, &state.renderer, lower, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_LOWER));
+                            state.game.set_block_state(&state.gpu, &state.renderer, upper, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_UPPER));
+                            state.inventory.consume_selected();
+                        }
+                    } else if id == block::WOODEN_TRAPDOOR {
+                        let place = hit.block + hit.normal;
+                        // half: top face → bottom flap, bottom face → top flap, side → by click height.
+                        let half = if hit.normal.y == 1 {
+                            0
+                        } else if hit.normal.y == -1 {
+                            1
+                        } else if hit.hit_point.y.rem_euclid(1.0) > 0.5 {
+                            1
+                        } else {
+                            0
+                        };
+                        let f = state.camera.forward();
+                        let facing = if f.x.abs() > f.z.abs() {
+                            if f.x > 0.0 { 1 } else { 3 }
+                        } else if f.z > 0.0 {
+                            0
+                        } else {
+                            2
+                        };
+                        if state.game.set_block_state(&state.gpu, &state.renderer, place, block::WOODEN_TRAPDOOR, block::trapdoor_state(facing, half, false)) {
+                            state.inventory.consume_selected();
+                        }
+                    } else {
                     let is_slab = matches!(id, block::STONE_SLAB | block::WOOD_SLAB);
                     // Double-slab merge: clicking the empty-half face of a matching single slab with
                     // the same slab item fills it into a full (double) block — no new neighbor block.
@@ -689,6 +748,7 @@ impl App {
                                 state.game.add_fluid_source(place, id);
                             }
                         }
+                    }
                     }
                 }
             }

@@ -635,17 +635,18 @@ impl Game {
             (wp.z - origin.z) as usize,
         );
 
-        let old = {
+        let (old, old_state) = {
             let Some(arc) = self.world.chunks.get_mut(&cpos) else {
                 return false;
             };
             let chunk = Arc::make_mut(arc);
             let old = chunk.get(lx, ly, lz);
-            if old == id && chunk.state(lx, ly, lz) == state {
+            let old_state = chunk.state(lx, ly, lz);
+            if old == id && old_state == state {
                 return false;
             }
             chunk.set_state(lx, ly, lz, id, state);
-            old
+            (old, old_state)
         };
 
         // Breaking/replacing a furnace spills its contents so smelted goods and fuel aren't lost.
@@ -664,6 +665,19 @@ impl Game {
                 for stack in c.contents() {
                     self.entities.spawn_item(center, stack);
                 }
+            }
+        }
+        // Breaking either half of a 2-tall door removes its partner half. The drop (one door item)
+        // comes from the player-mined cell only; this direct removal bypasses the drop path. The
+        // recursion terminates: the partner's own hook finds this cell already non-door.
+        if old == block::WOODEN_DOOR && id != block::WOODEN_DOOR {
+            let partner = if block::door_half(old_state) == block::DOOR_LOWER {
+                wp + IVec3::Y
+            } else {
+                wp - IVec3::Y
+            };
+            if self.block_at(partner) == block::WOODEN_DOOR {
+                self.set_block_state(gpu, renderer, partner, block::AIR, 0);
             }
         }
 

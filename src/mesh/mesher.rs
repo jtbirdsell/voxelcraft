@@ -234,6 +234,25 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     1 << 2,
                 );
             }
+            // Doors + trapdoors: thin oriented panel(s). Render geometry == collision (block::
+            // solid_boxes), so an open door draws its swung side-panel while the doorway opens up.
+            block::RenderKind::Door | block::RenderKind::Trapdoor => {
+                let st = neigh.state_at(x, y, z);
+                for b in block::solid_boxes(id, st) {
+                    emit_box(
+                        &mut mesh.opaque,
+                        origin,
+                        x,
+                        y,
+                        z,
+                        [b[0], b[1], b[2]],
+                        [b[3], b[4], b[5]],
+                        id,
+                        l,
+                        0,
+                    );
+                }
+            }
             block::RenderKind::Cube => {}
         }
     }

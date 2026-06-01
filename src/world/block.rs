@@ -48,10 +48,12 @@ pub const STONE_SLAB: BlockId = 39;
 pub const STONE_STAIRS: BlockId = 40; // orientation (facing + half) lives in the block-state byte
 pub const WOOD_SLAB: BlockId = 41;
 // (ids 42-44 were the old fixed-orientation stair variants STONE_STAIRS_E/_S/_W; orientation is now a
-// block-state byte (P2), so those ids are retired and free for reuse. Old saves are migrated on load.)
+// block-state byte (P2), so those ids were retired. P9 reuses 42-43 for the new interactive blocks.)
+pub const WOODEN_DOOR: BlockId = 42; // 2-tall; state = facing+open+hinge+half
+pub const WOODEN_TRAPDOOR: BlockId = 43; // 1x1 thin; state = facing+half+open
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = WOOD_SLAB;
+pub const MAX_BLOCK: BlockId = WOODEN_TRAPDOOR;
 
 /// Block-state layout for stairs: bits 0-1 = facing (0:+z, 1:+x, 2:-z, 3:-x — the direction the high
 /// step faces); bit 2 (top half) is reserved for the stairs-polish milestone — placement currently
@@ -109,6 +111,50 @@ pub fn log_state(axis: u8) -> u8 {
     axis & 0b11
 }
 
+// Door state byte: bits 0-1 facing (0:+z 1:+x 2:-z 3:-x — the wall the closed panel sits against),
+// bit 2 open, bit 3 hinge (0 left, 1 right), bit 4 half (0 lower, 1 upper). Both stacked cells carry
+// the same facing/hinge/open; the half bit distinguishes them so each cell is self-describing.
+pub const DOOR_LOWER: u8 = 0;
+pub const DOOR_UPPER: u8 = 1;
+#[inline]
+pub fn door_facing(state: u8) -> u8 {
+    state & 0b11
+}
+#[inline]
+pub fn door_open(state: u8) -> bool {
+    state & 0b100 != 0
+}
+#[inline]
+pub fn door_hinge(state: u8) -> u8 {
+    (state >> 3) & 1
+}
+#[inline]
+pub fn door_half(state: u8) -> u8 {
+    (state >> 4) & 1
+}
+#[inline]
+pub fn door_state(facing: u8, open: bool, hinge: u8, half: u8) -> u8 {
+    (facing & 0b11) | ((open as u8) << 2) | ((hinge & 1) << 3) | ((half & 1) << 4)
+}
+
+// Trapdoor state byte: bits 0-1 facing, bit 2 half (0 bottom, 1 top), bit 3 open.
+#[inline]
+pub fn trapdoor_facing(state: u8) -> u8 {
+    state & 0b11
+}
+#[inline]
+pub fn trapdoor_half(state: u8) -> u8 {
+    (state >> 2) & 1
+}
+#[inline]
+pub fn trapdoor_open(state: u8) -> bool {
+    state & 0b1000 != 0
+}
+#[inline]
+pub fn trapdoor_state(facing: u8, half: u8, open: bool) -> u8 {
+    (facing & 0b11) | ((half & 1) << 2) | ((open as u8) << 3)
+}
+
 /// How a block is meshed: a full greedy cube, a cross billboard (plants), or a non-greedy partial
 /// shape (slab / stairs) emitted one cell at a time like a billboard.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,6 +163,10 @@ pub enum RenderKind {
     Cross,
     Slab,
     Stairs,
+    /// 2-tall door panel (thin, oriented by facing/hinge/open). Emitted per-cell.
+    Door,
+    /// 1x1 thin trapdoor flap (oriented by facing/half/open). Emitted per-cell.
+    Trapdoor,
 }
 
 #[inline]
@@ -127,6 +177,8 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         }
         STONE_SLAB | WOOD_SLAB => RenderKind::Slab,
         STONE_STAIRS => RenderKind::Stairs,
+        WOODEN_DOOR => RenderKind::Door,
+        WOODEN_TRAPDOOR => RenderKind::Trapdoor,
         _ => RenderKind::Cube,
     }
 }
@@ -183,6 +235,34 @@ const BOX_STAIRS_E: [Aabb; 2] = [SLAB_HALF, [0.5, 0.5, 0.0, 1.0, 1.0, 1.0]];
 const BOX_STAIRS_S: [Aabb; 2] = [SLAB_HALF, [0.0, 0.5, 0.0, 1.0, 1.0, 0.5]];
 const BOX_STAIRS_W: [Aabb; 2] = [SLAB_HALF, [0.0, 0.5, 0.0, 0.5, 1.0, 1.0]];
 
+// Door / trapdoor panels are 3/16 thick. The same box drives BOTH render (mesher) and collision
+// (solid_boxes), so an open door's swung side-panel still blocks while the doorway opens up.
+const DT: f32 = 0.1875; // thickness
+const DTI: f32 = 0.8125; // 1.0 - DT
+// Closed door panel, flush against the facing wall (0:+z 1:+x 2:-z 3:-x); hinge-independent.
+const DOOR_CLOSED: [[Aabb; 1]; 4] = [
+    [[0.0, 0.0, DTI, 1.0, 1.0, 1.0]], // +Z
+    [[DTI, 0.0, 0.0, 1.0, 1.0, 1.0]], // +X
+    [[0.0, 0.0, 0.0, 1.0, 1.0, DT]],  // -Z
+    [[0.0, 0.0, 0.0, DT, 1.0, 1.0]],  // -X
+];
+// Open door panel, swung 90° to a perpendicular wall on the hinge side. [facing][hinge].
+const DOOR_OPEN: [[[Aabb; 1]; 2]; 4] = [
+    [[[0.0, 0.0, 0.0, DT, 1.0, 1.0]], [[DTI, 0.0, 0.0, 1.0, 1.0, 1.0]]], // +Z -> X wall
+    [[[0.0, 0.0, 0.0, 1.0, 1.0, DT]], [[0.0, 0.0, DTI, 1.0, 1.0, 1.0]]], // +X -> Z wall
+    [[[0.0, 0.0, 0.0, DT, 1.0, 1.0]], [[DTI, 0.0, 0.0, 1.0, 1.0, 1.0]]], // -Z -> X wall
+    [[[0.0, 0.0, 0.0, 1.0, 1.0, DT]], [[0.0, 0.0, DTI, 1.0, 1.0, 1.0]]], // -X -> Z wall
+];
+// Trapdoor: closed flat flap (bottom/top of the cell) + open vertical flap against the facing wall.
+const TRAP_BOTTOM: [Aabb; 1] = [[0.0, 0.0, 0.0, 1.0, DT, 1.0]];
+const TRAP_TOP: [Aabb; 1] = [[0.0, DTI, 0.0, 1.0, 1.0, 1.0]];
+const TRAP_OPEN: [[Aabb; 1]; 4] = [
+    [[0.0, 0.0, DTI, 1.0, 1.0, 1.0]], // +Z
+    [[DTI, 0.0, 0.0, 1.0, 1.0, 1.0]], // +X
+    [[0.0, 0.0, 0.0, 1.0, 1.0, DT]],  // -Z
+    [[0.0, 0.0, 0.0, DT, 1.0, 1.0]],  // -X
+];
+
 /// The upper-step box (above the bottom slab) of a stair, given its facing.
 #[inline]
 pub fn stair_upper_box(facing: u8) -> Aabb {
@@ -214,6 +294,24 @@ pub fn solid_boxes(id: BlockId, state: u8) -> &'static [Aabb] {
             3 => &BOX_STAIRS_W,
             _ => &BOX_STAIRS_N,
         },
+        // Door/trapdoor: thin panel — collision == the visible geometry. An open door's swung panel
+        // still blocks its thin side, leaving the doorway walkable.
+        RenderKind::Door => {
+            if door_open(state) {
+                &DOOR_OPEN[door_facing(state) as usize][door_hinge(state) as usize]
+            } else {
+                &DOOR_CLOSED[door_facing(state) as usize]
+            }
+        }
+        RenderKind::Trapdoor => {
+            if trapdoor_open(state) {
+                &TRAP_OPEN[trapdoor_facing(state) as usize]
+            } else if trapdoor_half(state) == 1 {
+                &TRAP_TOP
+            } else {
+                &TRAP_BOTTOM
+            }
+        }
         _ => &BOX_FULL,
     }
 }
@@ -228,7 +326,13 @@ pub fn is_fluid(id: BlockId) -> bool {
 /// Water and cross-billboard plants are non-opaque; leaves stay opaque (rendered as solid foliage).
 #[inline]
 pub fn is_opaque(id: BlockId) -> bool {
-    id != AIR && id != WATER && id != GLASS && !is_plant(id) && !is_partial(id)
+    id != AIR
+        && id != WATER
+        && id != GLASS
+        && id != WOODEN_DOOR
+        && id != WOODEN_TRAPDOOR
+        && !is_plant(id)
+        && !is_partial(id)
 }
 
 /// Whether a block produces any geometry at all.
@@ -301,6 +405,8 @@ pub fn display_name(id: BlockId) -> &'static str {
         STONE_SLAB => "Stone Slab",
         STONE_STAIRS => "Stone Stairs",
         WOOD_SLAB => "Wood Slab",
+        WOODEN_DOOR => "Wooden Door",
+        WOODEN_TRAPDOOR => "Wooden Trapdoor",
         _ => "Unknown",
     }
 }
@@ -370,6 +476,7 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         ICE => [0.66, 0.80, 0.92],
         GLASS => [0.82, 0.91, 0.98],
         STONE_SLAB | STONE_STAIRS => [0.49, 0.49, 0.52], // stone
+        WOODEN_DOOR | WOODEN_TRAPDOOR => [0.60, 0.46, 0.28], // wood
         WOOD_SLAB => [0.62, 0.48, 0.30], // planks
         _ => [1.0, 0.0, 1.0],
     }
@@ -459,7 +566,7 @@ pub fn hardness(id: BlockId) -> f32 {
         AIR | WATER | LAVA => 0.0,
         LEAVES | TORCH | GLOWSTONE => 0.3,
         DIRT | GRASS | SAND | GRAVEL | SNOW => 0.6,
-        WOOD | PLANKS | CRAFTING_TABLE | CHEST => 1.2,
+        WOOD | PLANKS | CRAFTING_TABLE | CHEST | WOODEN_DOOR | WOODEN_TRAPDOOR => 1.2,
         STONE | COBBLESTONE | BRICKS | COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE
         | REDSTONE_ORE | LAPIS_ORE => 1.5,
         DEEPSLATE | FURNACE => 2.0,
@@ -480,7 +587,8 @@ pub fn tool_class(id: BlockId) -> ToolClass {
         STONE | COBBLESTONE | BRICKS | DEEPSLATE | OBSIDIAN | FURNACE | COAL_ORE | IRON_ORE
         | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE => ToolClass::Pickaxe,
         ICE | STONE_SLAB | STONE_STAIRS => ToolClass::Pickaxe,
-        WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB => ToolClass::Axe,
+        WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB | WOODEN_DOOR
+        | WOODEN_TRAPDOOR => ToolClass::Axe,
         DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
         _ => ToolClass::None,
     }
@@ -666,7 +774,7 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         ICE => tile::ICE,
         GLASS => tile::GLASS,
         STONE_SLAB | STONE_STAIRS => tile::STONE,
-        WOOD_SLAB => tile::PLANKS,
+        WOOD_SLAB | WOODEN_DOOR | WOODEN_TRAPDOOR => tile::PLANKS,
         _ => tile::MAGENTA,
     }
 }

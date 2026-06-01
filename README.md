@@ -52,7 +52,7 @@ GL has no hardware RT (software DDA tracer only).
 | **Left-Ctrl** | Sprint (widens FOV) / fly boost |
 | **F** | Toggle fly / walk |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
-| **Right-click** | Place block; open a crafting table / furnace / chest; **hold to eat** the selected food |
+| **Right-click** | Place block; open a crafting table / furnace / chest; **open/close a door or trapdoor**; **hold to eat** the selected food |
 | **Q** | Drop one of the selected item |
 | **1–9 / scroll** | Select hotbar slot |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
@@ -85,6 +85,10 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   **Logs** orient to the axis of the face you place them against (upright / east-west / north-south),
   with the end-grain on the two perpendicular faces. All carried in a per-block **block-state byte**
   (the same mechanism that orients stairs), baked into geometry at mesh time so the GPU path is untouched.
+- **Doors & trapdoors**: a **2-tall wooden door** (facing + hinge + open) and a **wooden trapdoor**
+  (facing + half + open), both **right-click to open/close** — a closed door blocks the doorway, an
+  open one swings aside so you can walk through; breaking either door half removes both. Thin oriented
+  panels that don't occlude light or cast full-cube shadows.
 - **Day/night** cycle with a dynamic sky, distance fog, translucent **water**, and **flowing fluids**
   (water/lava cellular simulation). Animated water ripples and lava.
 - **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /

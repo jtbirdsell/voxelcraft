@@ -512,12 +512,14 @@ impl Inventory {
             {
                 slots[HOTBAR + i] = Some(ItemStack::new(t, 1));
             }
-            // Crafting materials in the next main row.
+            // Crafting materials + interactive blocks in the next main row.
             for (i, &b) in [
                 block::CRAFTING_TABLE,
                 block::WOOD,
                 block::PLANKS,
                 block::COBBLESTONE,
+                block::WOODEN_DOOR,
+                block::WOODEN_TRAPDOOR,
             ]
             .iter()
             .enumerate()
@@ -826,6 +828,30 @@ mod tests {
         // State 0 decodes to upright (Y); round-trips otherwise.
         assert_eq!(block::log_axis(0), AXIS_Y);
         assert_eq!(block::log_axis(block::log_state(AXIS_Z)), AXIS_Z);
+    }
+
+    #[test]
+    fn door_trapdoor_state_and_collision() {
+        use crate::block::{self, DOOR_LOWER, DOOR_UPPER};
+        // Door state pack/unpack.
+        let s = block::door_state(2, true, 1, DOOR_UPPER);
+        assert_eq!(block::door_facing(s), 2);
+        assert!(block::door_open(s));
+        assert_eq!(block::door_hinge(s), 1);
+        assert_eq!(block::door_half(s), DOOR_UPPER);
+        // A door is a thin panel whether open or closed (one collision box, full height).
+        let closed = block::solid_boxes(block::WOODEN_DOOR, block::door_state(0, false, 0, DOOR_LOWER));
+        let open = block::solid_boxes(block::WOODEN_DOOR, block::door_state(0, true, 0, DOOR_LOWER));
+        assert_eq!((closed.len(), open.len()), (1, 1));
+        assert!(closed[0] != open[0], "open door panel sits on a different edge");
+        // Trapdoor state + the closed-bottom flat flap (y 0..3/16).
+        let t = block::trapdoor_state(1, 1, true);
+        assert_eq!((block::trapdoor_facing(t), block::trapdoor_half(t), block::trapdoor_open(t)), (1, 1, true));
+        let flat = block::solid_boxes(block::WOODEN_TRAPDOOR, block::trapdoor_state(0, 0, false))[0];
+        assert_eq!((flat[1], flat[4]), (0.0, 0.1875));
+        // Doors/trapdoors don't occlude/cast full-cube shadows, but are raycast-targetable.
+        assert!(!block::is_opaque(block::WOODEN_DOOR) && !block::is_volume_solid(block::WOODEN_DOOR));
+        assert!(block::is_solid(block::WOODEN_DOOR) && block::is_solid(block::WOODEN_TRAPDOOR));
     }
 
     #[test]
