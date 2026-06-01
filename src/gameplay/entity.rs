@@ -427,6 +427,13 @@ impl Entities {
         self.list.retain(|e| !matches!(e.kind, Kind::Mob(_)));
     }
 
+    /// Remove all HOSTILE mobs (keeps passive animals, items, XP). Called once when the world
+    /// switches to Peaceful — Minecraft makes hostiles vanish but leaves the animals.
+    pub fn despawn_hostiles(&mut self) {
+        self.list
+            .retain(|e| !matches!(e.kind, Kind::Mob(m) if m.species.hostile()));
+    }
+
     /// Debug: flash every mob red (headless hurt-flash verification screenshot).
     pub fn flash_all(&mut self, amount: f32) {
         for e in &mut self.list {

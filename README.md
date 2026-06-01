@@ -57,7 +57,8 @@ GL has no hardware RT (software DDA tracer only).
 | **1–9 / scroll** | Select hotbar slot |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
 | **R** | Cycle ray-traced lighting: off → shadows → shadows + GI |
-| **F3** | Toggle debug overlay (fps, position, biome, facing) |
+| **G** | Cycle difficulty: Peaceful → Easy → Normal → Hard |
+| **F3** | Toggle debug overlay (fps, position, biome, facing, difficulty) |
 | **P** | Save world |
 | **Esc** | Close menu, or quit |
 
@@ -142,6 +143,11 @@ position, albedo + skylight) and an ACES tonemap.
 - **Eating**: hold right-click on a food to eat it (~1.6 s), restoring hunger + saturation. Raw mob
   drops (beef/pork/chicken/mutton) are edible but weak; **cook them in a furnace** (→ steak, cooked
   porkchop/chicken/mutton) for far more, plus bread and apples.
+- **Difficulty** (cycle with **G**, saved per world): **Peaceful** (no hostile spawns, existing
+  hostiles vanish, hunger never depletes and health regenerates passively), **Easy** / **Normal** /
+  **Hard** scale incoming hostile damage (0.5× / 1× / 1.5×) and how far starvation can hurt you (Easy
+  floors at 10 HP, Normal at 1 HP, Hard can kill). Environmental damage (fall/lava/drowning) is never
+  scaled. Shown on the F3 overlay.
 - **Experience**: mining ores (coal/redstone/lapis/diamond) drops glowing **XP orbs** that home in and
   grant points; an XP bar + level counter on the HUD.
 - **Armor**: 4 equip slots (helmet/chestplate/leggings/boots) × leather/iron/gold/diamond, drag-to-equip

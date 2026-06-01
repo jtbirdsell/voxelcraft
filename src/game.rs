@@ -188,6 +188,9 @@ pub struct Game {
     /// Chests the player has opened/placed, keyed by block position (27-slot containers).
     chests: FxHashMap<IVec3, crate::container::Container>,
 
+    /// World difficulty (P6): gates hostile spawning; mirrored from the app via `set_difficulty`.
+    difficulty: crate::rules::Difficulty,
+
     /// Natural-spawn cadence + a small RNG for spawn placement (M31).
     spawn_timer: f32,
     spawn_rng: u64,
@@ -251,6 +254,7 @@ impl Game {
             entities: Entities::new(),
             furnaces: FxHashMap::default(),
             chests: FxHashMap::default(),
+            difficulty: crate::rules::Difficulty::Normal,
             spawn_timer: 0.0,
             spawn_rng: seed ^ 0x5FA1_2E37_9B1D_C0DE,
         }
@@ -928,7 +932,7 @@ impl Game {
         };
         let pos = Vec3::new(wx as f32 + 0.5, (sy + 1) as f32, wz as f32 + 0.5);
         let pick = ((r >> 32) & 3) as usize;
-        if day < 0.35 {
+        if day < 0.35 && self.difficulty.spawns_hostiles() {
             self.entities.spawn_mob(pos, HOSTILE[pick]);
             true
         } else if day > 0.6 && surf == block::GRASS {
@@ -1020,6 +1024,16 @@ impl Game {
             }
             self.chests.insert(c.pos, container);
         }
+    }
+
+    /// Mirror the world difficulty (gates hostile spawning in `try_spawn`).
+    pub fn set_difficulty(&mut self, d: crate::rules::Difficulty) {
+        self.difficulty = d;
+    }
+
+    /// Remove hostile mobs immediately (called once when the world switches to Peaceful).
+    pub fn despawn_hostiles(&mut self) {
+        self.entities.despawn_hostiles();
     }
 
     pub fn entity_count(&self) -> usize {

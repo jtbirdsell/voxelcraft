@@ -97,6 +97,8 @@ struct State {
     /// Eat-hold progress (seconds) and the food id being eaten (right-click-hold on a food).
     eat_progress: f32,
     eat_item: Option<item::ItemId>,
+    /// World difficulty (P6); mirrored to player + game, persisted in level.bin, cycled with G.
+    difficulty: crate::rules::Difficulty,
 }
 
 pub struct App {
@@ -145,6 +147,7 @@ impl App {
                 saturation: state.player.saturation(),
                 xp: state.player.xp,
                 level: state.player.level,
+                difficulty: state.difficulty.as_u8(),
             };
             state.game.save(&level);
             let dir = persistence::save_dir();
@@ -369,6 +372,16 @@ impl App {
             }
             KeyCode::F3 if pressed && !repeat => {
                 state.debug_f3 = !state.debug_f3;
+            }
+            KeyCode::KeyG if pressed && !repeat => {
+                // Cycle difficulty Peaceful→Easy→Normal→Hard→… (suppressed while a screen is open).
+                state.difficulty = state.difficulty.next();
+                state.player.difficulty = state.difficulty;
+                state.game.set_difficulty(state.difficulty);
+                if !state.difficulty.spawns_hostiles() {
+                    state.game.despawn_hostiles();
+                }
+                log::info!("Difficulty: {}", state.difficulty.name());
             }
             KeyCode::KeyQ if pressed && !repeat => state.input.drop_pressed = true,
             KeyCode::Digit1 => maybe_select(state, pressed, 0),
@@ -694,6 +707,7 @@ impl App {
                 state.game.entity_count(),
                 state.player.flying,
                 state.game.rtx_mode_name(),
+                state.difficulty.name(),
             ))
         } else {
             None
@@ -924,6 +938,7 @@ pub fn persist_selftest() {
         saturation: 2.0,
         xp: 7.0,
         level: 3,
+        difficulty: 3, // Hard
     };
     let mut chest_slots = vec![None; crate::container::CHEST_SLOTS];
     chest_slots[2] = Some(item::ItemStack::new(block::DIAMOND_ORE, 9));
@@ -947,7 +962,8 @@ pub fn persist_selftest() {
         && lc[0].slots[2].map(|s| s.item) == Some(block::DIAMOND_ORE)
         && (ll.health - 11.0).abs() < 1e-6
         && (ll.air - 5.0).abs() < 1e-6
-        && ll.level == 3;
+        && ll.level == 3
+        && ll.difficulty == 3;
     let _ = std::fs::remove_dir_all(&dir);
     if ok {
         log::info!("PERSIST_TEST: PASS — inventory + armor + furnace + survival all round-tripped on disk");
@@ -982,6 +998,7 @@ fn build_debug_lines(
     entities: usize,
     flying: bool,
     rtx: &str,
+    difficulty: &str,
 ) -> Vec<String> {
     let (cx, cy, cz) = (
         (pos.x.floor() as i32).div_euclid(32),
@@ -1003,6 +1020,7 @@ fn build_debug_lines(
         format!("Biome {biome}"),
         format!("Chunks {chunks}  Meshes {meshes}  Entities {entities}"),
         format!("Mode {}  RTX {rtx}", if flying { "fly" } else { "walk" }),
+        format!("Difficulty {difficulty}"),
     ]
 }
 
@@ -1046,6 +1064,12 @@ impl ApplicationHandler for App {
                 RENDER_DISTANCE,
                 FxHashMap::default(),
             );
+            // Headless difficulty (P6): VOXELCRAFT_DIFFICULTY gates hostile spawning + the F3 line.
+            let headless_difficulty = std::env::var("VOXELCRAFT_DIFFICULTY")
+                .ok()
+                .and_then(|s| crate::rules::Difficulty::from_env(&s))
+                .unwrap_or_default();
+            game.set_difficulty(headless_difficulty);
             // Offscreen render is one-shot, so trace many more GI rays for a clean image.
             // VOXELCRAFT_GI_RAYS overrides (e.g. to match an interactive setting for A/B).
             let shot_rays = std::env::var("VOXELCRAFT_GI_RAYS")
@@ -1245,6 +1269,7 @@ impl ApplicationHandler for App {
                 game.entity_count(),
                 false,
                 game.rtx_mode_name(),
+                headless_difficulty.name(),
             );
             // A few stacks so the headless shot exercises count + inventory-screen rendering.
             let mut shot_inv = Inventory::new(true);
@@ -1371,6 +1396,13 @@ impl ApplicationHandler for App {
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
         game.restore_furnaces(saved_furnaces);
         game.restore_chests(saved_chests);
+        // World difficulty (P6): VOXELCRAFT_DIFFICULTY overrides; else the saved value; else Normal.
+        let difficulty = std::env::var("VOXELCRAFT_DIFFICULTY")
+            .ok()
+            .and_then(|s| crate::rules::Difficulty::from_env(&s))
+            .or_else(|| level.as_ref().map(|l| crate::rules::Difficulty::from_u8(l.difficulty)))
+            .unwrap_or_default();
+        game.set_difficulty(difficulty);
         // VOXELCRAFT_GI_RAYS overrides the hemisphere GI sample count (default 8) — more samples =
         // less grain for DLSS-RR to denoise; the GPU has headroom. (M33-G9)
         if let Ok(n) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
@@ -1386,8 +1418,13 @@ impl ApplicationHandler for App {
                 *species,
             );
         }
+        // Peaceful clears the spawn ring's hostiles immediately (animals stay).
+        if !difficulty.spawns_hostiles() {
+            game.despawn_hostiles();
+        }
         let environment = Environment::new(time);
         let mut player = Player::new(spawn, flying);
+        player.difficulty = difficulty;
         // Restore persisted survival state (from a loaded level; a new world keeps fresh defaults).
         if let Some(l) = &level {
             player.restore_state(l.health, l.hunger, l.air, l.saturation, l.xp, l.level);
@@ -1448,6 +1485,7 @@ impl ApplicationHandler for App {
             melee_cd: 0.0,
             eat_progress: 0.0,
             eat_item: None,
+            difficulty,
         });
         self.set_grab(true);
     }

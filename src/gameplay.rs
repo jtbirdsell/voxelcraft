@@ -7,4 +7,5 @@ pub(crate) mod food;
 pub(crate) mod item;
 pub(crate) mod player;
 pub(crate) mod raycast;
+pub(crate) mod rules;
 pub(crate) mod smelting;

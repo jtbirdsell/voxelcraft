@@ -36,6 +36,7 @@ const REGEN_RATE: f32 = 1.2; // hp/sec regenerated
 const REGEN_COST: f32 = 0.6; // hunger/sec spent regenerating
 const STARVE_RATE: f32 = 0.8; // hp/sec lost at zero hunger
 const MAX_SATURATION: f32 = 5.0; // hidden food reserve: drains before hunger, fuels faster regen
+const PEACEFUL_REGEN: f32 = 1.0; // hp/sec passive health regen on Peaceful (no hunger cost)
 
 // Air + environmental damage.
 const MAX_AIR: f32 = 11.0; // ~seconds of breath underwater
@@ -96,6 +97,8 @@ pub struct Player {
     pub level: u32,
     /// Total equipped-armor defense points, refreshed from the inventory each frame.
     armor_points: u32,
+    /// World difficulty, mirrored from the app each frame; scales combat damage + starvation/regen.
+    pub difficulty: crate::rules::Difficulty,
     /// Post-hit invulnerability timer (seconds); incoming combat damage is ignored while it's >0.
     hurt_cooldown: f32,
     drown_timer: f32,
@@ -138,6 +141,7 @@ impl Player {
             xp: 0.0,
             level: 0,
             armor_points: 0,
+            difficulty: crate::rules::Difficulty::Normal,
             hurt_cooldown: 0.0,
             drown_timer: 0.0,
             air_max_y: position.y,
@@ -155,11 +159,14 @@ impl Player {
     /// External combat hit (mob contact / arrow), reduced by armor. A short post-hit invulnerability
     /// window drops further hits so a swarm can't stack a frame of damage into an instant kill.
     pub fn take_hit(&mut self, raw: f32) {
-        if self.hurt_cooldown > 0.0 || raw <= 0.0 {
+        // All hostile-sourced damage (mob melee, arrows, creeper blasts) scales with difficulty
+        // (Peaceful = 0). Environmental damage bypasses take_hit — it calls apply_damage directly —
+        // so fall/lava/drowning/starvation are never difficulty-scaled.
+        let scaled = raw * self.difficulty.damage_mult();
+        if self.hurt_cooldown > 0.0 || scaled <= 0.0 {
             return;
         }
-        let armor = self.armor_points;
-        self.apply_damage(raw, armor);
+        self.apply_damage(scaled, self.armor_points);
         self.hurt_cooldown = 0.5;
     }
 
@@ -230,6 +237,17 @@ impl Player {
     /// Hunger drain, regen when well-fed (faster while saturation lasts), starvation at empty hunger.
     /// `env_damage` suppresses regen so the player can't heal mid-lava / mid-drown.
     fn update_survival(&mut self, dt: f32, input: &Input, env_damage: bool) {
+        // Peaceful: hunger never depletes and health regenerates passively at no hunger cost (like
+        // Minecraft). Environmental damage still applies (handled in update_environment_damage).
+        if self.difficulty == crate::rules::Difficulty::Peaceful {
+            self.hunger = MAX_HUNGER;
+            self.saturation = MAX_SATURATION;
+            if !env_damage && self.health < MAX_HEALTH {
+                self.health = (self.health + PEACEFUL_REGEN * dt).min(MAX_HEALTH);
+            }
+            return;
+        }
+
         let moving = input.forward || input.back || input.left || input.right;
         // Hunger only drains through activity (no AFK starvation) — saturation absorbs it first.
         if moving {
@@ -251,7 +269,12 @@ impl Player {
                 self.hunger = (self.hunger - REGEN_COST * dt).max(0.0);
             }
         } else if self.hunger <= 0.0 {
-            self.apply_damage(STARVE_RATE * dt, 0); // starvation ignores armor
+            // Starvation can't push health below the difficulty's floor (Easy 10, Normal 1, Hard 0).
+            let floor = self.difficulty.starve_floor();
+            if self.health > floor {
+                let dmg = (STARVE_RATE * dt).min(self.health - floor);
+                self.apply_damage(dmg, 0); // starvation ignores armor
+            }
         }
     }
 
@@ -651,6 +674,50 @@ mod tests {
         p.hunger = MAX_HUNGER;
         assert!(!p.can_eat(false));
         assert!(p.can_eat(true), "always-edible foods ignore the full-hunger gate");
+    }
+
+    #[test]
+    fn difficulty_starvation_floors_and_peaceful_regen() {
+        use crate::rules::Difficulty;
+        let input = Input::default();
+        // Hard: starvation is lethal (floor 0).
+        let mut p = Player::new(Vec3::ZERO, false);
+        p.difficulty = Difficulty::Hard;
+        (p.health, p.hunger, p.saturation) = (3.0, 0.0, 0.0);
+        for _ in 0..600 {
+            p.update_survival(1.0 / 60.0, &input, false);
+        }
+        assert!(p.health <= 0.0, "Hard starvation should kill, got {}", p.health);
+        // Easy: starvation can't drop below 10 HP.
+        let mut p = Player::new(Vec3::ZERO, false);
+        p.difficulty = Difficulty::Easy;
+        (p.health, p.hunger, p.saturation) = (20.0, 0.0, 0.0);
+        for _ in 0..1800 {
+            p.update_survival(1.0 / 60.0, &input, false);
+        }
+        assert!((p.health - 10.0).abs() < 0.2, "Easy floors starvation at 10, got {}", p.health);
+        // Peaceful: health regenerates with zero hunger, and hunger stays full.
+        let mut p = Player::new(Vec3::ZERO, false);
+        p.difficulty = Difficulty::Peaceful;
+        (p.health, p.hunger, p.saturation) = (5.0, 0.0, 0.0);
+        for _ in 0..600 {
+            p.update_survival(1.0 / 60.0, &input, false);
+        }
+        assert!(p.health > 5.0, "Peaceful should passively regen, got {}", p.health);
+        assert_eq!(p.hunger, MAX_HUNGER, "Peaceful keeps hunger full");
+    }
+
+    #[test]
+    fn difficulty_scales_combat_damage() {
+        use crate::rules::Difficulty;
+        let mut p = Player::new(Vec3::ZERO, false); // no armor
+        p.difficulty = Difficulty::Peaceful;
+        p.take_hit(10.0);
+        assert_eq!(p.health, MAX_HEALTH, "Peaceful negates combat damage");
+        let mut p = Player::new(Vec3::ZERO, false);
+        p.difficulty = Difficulty::Hard;
+        p.take_hit(4.0); // Hard = 1.5x => 6 damage
+        assert!((p.health - (MAX_HEALTH - 6.0)).abs() < 0.01, "Hard scales 1.5x, got {}", p.health);
     }
 
     #[test]

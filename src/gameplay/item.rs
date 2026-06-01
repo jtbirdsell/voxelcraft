@@ -35,7 +35,6 @@ pub const fn tool_id(tier: Tier, class_idx: u16) -> ItemId {
 
 // Named tool ids used by the creative palette + tests (the recipe builder generates the rest via
 // `tool_id(tier, class)`).
-pub const WOOD_PICKAXE: ItemId = tool_id(Tier::Wood, 0);
 pub const STONE_PICKAXE: ItemId = tool_id(Tier::Stone, 0);
 pub const DIAMOND_PICKAXE: ItemId = tool_id(Tier::Diamond, 0);
 pub const DIAMOND_AXE: ItemId = tool_id(Tier::Diamond, 1);
@@ -715,10 +714,11 @@ mod tests {
     fn insert_preserves_tool_durability() {
         // A damaged tool returned to the inventory must keep its wear (no free repair).
         let mut inv = Inventory::new(false);
-        let mut pick = ItemStack::new(WOOD_PICKAXE, 1);
+        let wood_pickaxe = tool_id(Tier::Wood, 0);
+        let mut pick = ItemStack::new(wood_pickaxe, 1);
         pick.durability = 10;
         assert!(inv.insert(pick).is_none());
-        let found = inv.slots.iter().flatten().find(|s| s.item == WOOD_PICKAXE).copied();
+        let found = inv.slots.iter().flatten().find(|s| s.item == wood_pickaxe).copied();
         assert_eq!(found.map(|s| s.durability), Some(10), "durability must survive insert");
     }
 

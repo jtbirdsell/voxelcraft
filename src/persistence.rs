@@ -31,6 +31,9 @@ pub struct Level {
     pub saturation: f32,
     pub xp: f32,
     pub level: u32,
+    /// World difficulty (P6) as a u8 (0 Peaceful … 3 Hard). Appended after the survival block;
+    /// absent in older saves → defaults to Normal (2).
+    pub difficulty: u8,
 }
 
 /// One chest's persisted contents (P3), saved in the chest section of `save_state.bin` (v4+).
@@ -89,6 +92,8 @@ pub fn load_level(dir: &Path) -> Option<Level> {
         saturation: sv(45, 5.0),
         xp: sv(49, 0.0),
         level: if has_survival { rd_u32(&d, 53) } else { 0 },
+        // Difficulty byte at offset 57 (after the 24-byte survival block); default Normal (2).
+        difficulty: if d.len() >= 58 { d[57] } else { 2 },
     })
 }
 
@@ -110,6 +115,7 @@ pub fn save_level(dir: &Path, level: &Level) -> std::io::Result<()> {
     b.extend_from_slice(&level.saturation.to_le_bytes());
     b.extend_from_slice(&level.xp.to_le_bytes());
     b.extend_from_slice(&level.level.to_le_bytes());
+    b.push(level.difficulty); // P6: difficulty byte, after the survival block
     fs::write(dir.join("level.bin"), b)
 }
 
@@ -458,6 +464,7 @@ mod tests {
             saturation: 1.5,
             xp: 3.0,
             level: 4,
+            difficulty: 3, // Hard
         };
         save_level(&dir, &level).unwrap();
         let ll = load_level(&dir).unwrap();
@@ -469,6 +476,7 @@ mod tests {
         assert!((ll.health - 12.5).abs() < 1e-6);
         assert!((ll.air - 4.0).abs() < 1e-6);
         assert_eq!(ll.level, 4);
+        assert_eq!(ll.difficulty, 3); // P6 difficulty round-trips
 
         let _ = fs::remove_dir_all(&dir);
     }
