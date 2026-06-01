@@ -22,6 +22,16 @@ const BASE_PITCH: f32 = 0.20; // tipped up a touch
 const BLOCK_HALF: f32 = 0.2;
 /// Seconds for one swing arc (≈ Minecraft's 6-tick swing).
 const SWING_TIME: f32 = 0.28;
+/// Seconds to lower + raise the item on a hotbar swap.
+const EQUIP_TIME: f32 = 0.18;
+/// Walk-bob phase rate (rad/s) at full walk speed, and the speed that maps to full bob strength.
+const BOB_CADENCE: f32 = 6.5;
+const WALK_SPEED_REF: f32 = 4.3;
+const BOB_SMOOTH: f32 = 8.0; // bob-strength low-pass rate
+/// Look-sway: view-space offset per unit look delta, low-pass rate, and the max offset.
+const SWAY_GAIN: f32 = 0.9;
+const SWAY_SMOOTH: f32 = 10.0;
+const SWAY_CLAMP: f32 = 0.05;
 
 /// Per-frame uniform for the view-model pass: the fixed near-perspective projection + a brightness
 /// (local-light) scalar. 80 bytes, std140-friendly.
@@ -53,9 +63,8 @@ pub struct UsePose {
     pub shield: f32, // shield_progress / SHIELD_RAISE_DELAY
 }
 
-/// Animation state for the first-person view-model. Fields beyond the rest pose are filled in by the
-/// later milestones (swing/use/bob/sway/equip); VM1 renders the static rest pose only.
-#[allow(dead_code)] // equip/bob/sway are consumed by VM5; staged here so the struct is stable.
+/// Animation state for the first-person view-model: swing arc, equip lower→raise, walk-bob, look-sway,
+/// and the active use pose. Composed into the per-frame pose transform.
 pub struct ViewModel {
     /// Swing arc progress 0..1 (one-shot, retriggerable) and whether one is playing.
     pub swing: f32,
@@ -88,29 +97,62 @@ impl Default for ViewModel {
 }
 
 impl ViewModel {
-    /// Advance the animation. `swing_start` is a one-shot trigger (an attack landed / a block was
-    /// placed); `swing_loop` keeps the arc repeating while the player mines/attacks; `use_pose` carries
-    /// the active eat/draw/shield progress. Later milestones extend this with equip / bob / sway.
-    pub fn update(&mut self, dt: f32, swing_start: bool, swing_loop: bool, use_pose: UsePose) {
+    /// Advance the animation. `sel_item` detects a hotbar swap (equip dip); `horiz_speed`/`on_ground`
+    /// drive the walk-bob; `(yaw_d, pitch_d)` drive the look-sway; `swing_start`/`swing_loop` the swing
+    /// arc; `use_pose` the eat/draw/shield pose.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(
+        &mut self,
+        dt: f32,
+        sel_item: ItemId,
+        horiz_speed: f32,
+        on_ground: bool,
+        yaw_d: f32,
+        pitch_d: f32,
+        swing_start: bool,
+        swing_loop: bool,
+        use_pose: UsePose,
+    ) {
         self.use_pose = use_pose;
-        if swing_start {
+        // Equip: a hotbar swap drops the item, then it eases back up. While lowered, suppress swings.
+        if sel_item != self.prev_item {
+            self.equip = 0.0;
+            self.prev_item = sel_item;
+        }
+        self.equip = (self.equip + dt / EQUIP_TIME).min(1.0);
+        let equipped = self.equip >= 1.0;
+        // Swing.
+        if swing_start && equipped {
             self.swing = 0.0;
             self.swinging = true;
         }
         if self.swinging {
             self.swing += dt / SWING_TIME;
             if self.swing >= 1.0 {
-                if swing_loop {
+                if swing_loop && equipped {
                     self.swing -= 1.0; // keep swinging while held
                 } else {
                     self.swing = 0.0;
                     self.swinging = false;
                 }
             }
-        } else if swing_loop {
+        } else if swing_loop && equipped {
             self.swinging = true; // begin a held swing loop
             self.swing = 0.0;
         }
+        // Walk-bob: strength low-passes toward (speed / ref) while grounded; phase advances with it.
+        let target = if on_ground {
+            (horiz_speed / WALK_SPEED_REF).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.bob_strength += (target - self.bob_strength) * (BOB_SMOOTH * dt).min(1.0);
+        self.bob_phase =
+            (self.bob_phase + BOB_CADENCE * self.bob_strength * dt) % std::f32::consts::TAU;
+        // Look-sway: a smoothed, clamped offset opposite the turn direction.
+        let target_sway =
+            (glam::Vec2::new(-yaw_d, pitch_d) * SWAY_GAIN).clamp_length_max(SWAY_CLAMP);
+        self.sway += (target_sway - self.sway) * (SWAY_SMOOTH * dt).min(1.0);
     }
 
     /// The swing arc contribution this frame: a (translation, extra pitch, extra roll) that dips the
@@ -153,16 +195,48 @@ impl ViewModel {
         (Vec3::ZERO, 0.0, 0.0, 0.0)
     }
 
-    /// Compose a pose from a base anchor + orientation plus the swing arc and any active use pose
-    /// (the use pose damps the swing/idle motion by its weight).
+    /// Idle walk-bob + look-sway contribution: (translation, extra roll).
+    fn idle_offset(&self) -> (Vec3, f32) {
+        let amp = self.bob_strength;
+        let bob = Vec3::new(
+            self.bob_phase.cos() * 0.018 * amp,
+            -(self.bob_phase * 2.0).sin().abs() * 0.020 * amp,
+            0.0,
+        );
+        let roll = self.bob_phase.sin() * 0.03 * amp;
+        (bob + Vec3::new(self.sway.x, self.sway.y, 0.0), roll)
+    }
+
+    /// Equip lower→raise contribution: (translation, extra pitch). 1 = fully raised.
+    fn equip_offset(&self) -> (Vec3, f32) {
+        let e = self.equip;
+        let s = e * e * (3.0 - 2.0 * e); // smoothstep ease
+        (Vec3::new(0.0, -0.9 * (1.0 - s), 0.0), 1.2 * (1.0 - s))
+    }
+
+    /// World-space-ish camera head-bob (local right.x, world up.y), driven by the same walk-bob phase.
+    /// Subtle; the caller maps `.x` along the camera's right vector and `.y` to world up.
+    pub fn camera_bob(&self) -> Vec3 {
+        let amp = self.bob_strength;
+        Vec3::new(
+            self.bob_phase.cos() * 0.022 * amp,
+            -(self.bob_phase * 2.0).sin().abs() * 0.028 * amp,
+            0.0,
+        )
+    }
+
+    /// Compose a pose from a base anchor + orientation plus the swing arc, use pose, equip, and idle
+    /// motion (a use pose damps the swing + idle by its weight).
     fn pose(&self, base_t: Vec3, yaw: f32, base_pitch: f32, base_roll: f32) -> Mat4 {
         let (st, sp, sr) = self.swing_pose();
         let (ut, up, uy, uw) = self.use_offset();
+        let (it, ir) = self.idle_offset();
+        let (et, ep) = self.equip_offset();
         let damp = 1.0 - uw;
-        Mat4::from_translation(base_t + st * damp + ut)
+        Mat4::from_translation(base_t + st * damp + ut + it * damp + et)
             * Mat4::from_rotation_y(yaw + uy)
-            * Mat4::from_rotation_x(base_pitch + sp * damp + up)
-            * Mat4::from_rotation_z(base_roll + sr * damp)
+            * Mat4::from_rotation_x(base_pitch + sp * damp + up + ep)
+            * Mat4::from_rotation_z(base_roll + sr * damp + ir * damp)
     }
 
     /// The view-space pose transform for a 3D held item (block cube / arm). A noticeable tilt shows

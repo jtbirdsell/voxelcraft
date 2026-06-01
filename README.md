@@ -160,6 +160,12 @@ position, albedo + skylight) and an ACES tonemap.
   render as **textured icons** (sampled from the block atlas) in every slot, not flat color swatches.
   In creative the inventory shows a **paged palette** of every block, tool, material, and armor piece
   (click a slot to grab it; scroll to page) so the full ~110-block library is reachable directly.
+- A **first-person view-model**: the held item is drawn in front of the camera — a textured 3D cube
+  for blocks, a painted sprite for tools/weapons/food, a fist for the empty hand. It **swings** when
+  you mine/attack/use and animates per action (raise food to eat, draw a bow, raise a shield), with
+  walk-bob, look-sway, and an equip lower→raise on hotbar swaps. It's lit by the local block light
+  (dims in caves) and renders in its own LDR pass after the DLSS resolve, isolated from the denoiser.
+  A subtle camera head-bob accompanies it (`VOXELCRAFT_VIEWBOB=0` to disable).
 - **Chests**: right-click a chest for a 27-slot storage screen (drag/drop against your inventory);
   breaking a chest spills its contents. A generic `Container` so future storage blocks reuse it.
 - **Persistence**: edited chunks (LZ4 blocks **+ block-state**), the level header, the full inventory +
@@ -270,7 +276,9 @@ Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
 `VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft|furnace`,
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
-armor bars), `VOXELCRAFT_DARK=1` (the Warden's pulsing **Darkness** screen dim). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
+armor bars), `VOXELCRAFT_DARK=1` (the Warden's pulsing **Darkness** screen dim),
+`VOXELCRAFT_HELD=<item_id>` + `VOXELCRAFT_VM_POSE=swing|eat|draw|shield|equip|idle` +
+`VOXELCRAFT_VM_T=<0..1>` (force the first-person held item + an animation pose). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
 (software DDA vs hardware ray query), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
 `VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_GI_RAYS=N` (GI samples/pixel,
 default 8), `VOXELCRAFT_GI_ACCUM=1` (opt-in GI temporal accumulation), `VOXELCRAFT_DLSS=off|rr` +

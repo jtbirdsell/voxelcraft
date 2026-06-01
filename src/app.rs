@@ -116,6 +116,8 @@ struct State {
     creative_page: usize,
     /// M34-VM first-person view-model animation state (held item + swing/use/bob).
     view_model: crate::viewmodel::ViewModel,
+    /// M34-VM5: whether the world camera also head-bobs when walking (VOXELCRAFT_VIEWBOB=0 disables).
+    viewbob: bool,
 }
 
 pub struct App {
@@ -455,6 +457,14 @@ impl App {
             armor,
         );
         state.camera.position = state.player.eye();
+        // M34-VM5: optional camera head-bob, folded into the real camera transform BEFORE the camera
+        // uniform rolls prev_view_proj — so DLSS motion vectors include it and stay correct. Uses the
+        // previous frame's smoothed walk-bob phase (a one-frame lag is imperceptible).
+        if state.viewbob {
+            let b = state.view_model.camera_bob();
+            let right = state.camera.forward().cross(Vec3::Y).normalize_or_zero();
+            state.camera.position += right * b.x + Vec3::Y * b.y;
+        }
 
         // Sprinting widens the FOV slightly (and swimming narrows it); ease toward the target.
         let target_fov = if state.player.flying {
@@ -1146,10 +1156,25 @@ impl App {
                 0.0
             },
         };
-        state.view_model.update(dt, vm_use_click, swing_loop, use_pose);
+        let horiz_speed =
+            Vec3::new(state.player.velocity.x, 0.0, state.player.velocity.z).length();
+        state.view_model.update(
+            dt,
+            state.inventory.selected_item(),
+            horiz_speed,
+            state.player.on_ground,
+            yaw_d,
+            pitch_d,
+            vm_use_click,
+            swing_loop,
+            use_pose,
+        );
         // M34-VM: build the first-person held-item geometry (view space) + its projection/brightness
-        // uniform. VM1 uses a constant brightness; VM5 will sample the local block light.
-        let vm_light = 0.95;
+        // uniform. Brightness samples the local block light so the item dims in caves.
+        let vm_light = state.game.held_item_light(
+            state.camera.position.floor().as_ivec3(),
+            state.environment.day_factor(),
+        );
         let vm_geom = state
             .view_model
             .build_geometry(state.inventory.selected_item(), vm_light);
@@ -1837,8 +1862,11 @@ impl ApplicationHandler for App {
                 all.push(em);
             }
             // M34-VM: build the held-item view-model for the shot (forced via VOXELCRAFT_HELD).
-            // VOXELCRAFT_VM_POSE=swing|… + VOXELCRAFT_VM_T=<0..1> force an animation pose for verification.
-            let vm_light = 0.95;
+            // VOXELCRAFT_VM_POSE=swing|eat|draw|shield|equip|idle + VOXELCRAFT_VM_T=<0..1> force a pose.
+            let vm_light = game.held_item_light(
+                camera.position.floor().as_ivec3(),
+                environment.day_factor(),
+            );
             let mut vm_state = crate::viewmodel::ViewModel::default();
             let vm_pose = std::env::var("VOXELCRAFT_VM_POSE").unwrap_or_default();
             let vm_t: f32 = std::env::var("VOXELCRAFT_VM_T")
@@ -1854,6 +1882,11 @@ impl ApplicationHandler for App {
                 "eat" => vm_state.use_pose.eat = vm_t,
                 "draw" => vm_state.use_pose.draw = vm_t,
                 "shield" => vm_state.use_pose.shield = vm_t,
+                "equip" => vm_state.equip = vm_t,
+                "idle" => {
+                    vm_state.bob_strength = 1.0;
+                    vm_state.bob_phase = vm_t * std::f32::consts::TAU;
+                }
                 _ => {}
             }
             let vm_geom = vm_state.build_geometry(shot_inv.selected_item(), vm_light);
@@ -2006,6 +2039,7 @@ impl ApplicationHandler for App {
             creative_palette: item::creative_palette(),
             creative_page: 0,
             view_model: crate::viewmodel::ViewModel::default(),
+            viewbob: std::env::var("VOXELCRAFT_VIEWBOB").map_or(true, |v| v != "0" && v != "off"),
         });
         self.set_grab(true);
     }

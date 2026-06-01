@@ -1671,6 +1671,14 @@ impl Game {
         block_light(wp, &|p| self.block_at(p))
     }
 
+    /// M34-VM5: brightness for the first-person held item (0..1) — the local sky+block light at the
+    /// player's eye cell, floored so the held item never goes fully black. `day` = daylight factor.
+    pub fn held_item_light(&self, eye: IVec3, day: f32) -> f32 {
+        let sky = self.sky_light_at(eye) as f32 / 15.0; // binary open-to-sky column
+        let blk = self.block_light_at(eye) as f32 / 15.0; // torch flood
+        (sky * (0.25 + 0.75 * day)).max(blk).max(0.18)
+    }
+
     /// Live hostile / passive mob counts (P16 spawn caps).
     pub fn hostile_count(&self) -> usize {
         self.entities.hostile_count()
