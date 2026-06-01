@@ -94,6 +94,13 @@ pub struct ChunkRenderer {
     composite_pipeline: Option<wgpu::RenderPipeline>,
     gi_io_bgl: Option<wgpu::BindGroupLayout>,
     composite_bgl: Option<wgpu::BindGroupLayout>,
+    /// M33-G9 (opt-in, `VOXELCRAFT_GI_ACCUM=1`): temporally accumulate the GI irradiance before the
+    /// composite (reproject prev via motion vectors + EMA blend, disocclusion-rejected). Default off
+    /// so it can't ghost the already-clean supersampled default; the pipeline/layout are `Some` only
+    /// when both deferred GI and this are enabled.
+    gi_accum: bool,
+    gi_temporal_bgl: Option<wgpu::BindGroupLayout>,
+    gi_temporal_pipeline: Option<wgpu::ComputePipeline>,
     sky_color: Cell<wgpu::Color>,
 }
 
@@ -114,10 +121,15 @@ impl ChunkRenderer {
         // in-fragment G5b gather as a switchable parity oracle / non-deferred fallback.
         let defer_gi = std::env::var("VOXELCRAFT_GI").map_or(true, |v| v != "fragment");
         let gi_raw = std::env::var("VOXELCRAFT_GI_RAW").is_ok();
+        // M33-G9: opt-in GI temporal accumulation (off by default — the supersampled default is already
+        // clean, and temporal accumulation risks ghosting). Only meaningful with deferred GI.
+        let gi_accum = defer_gi
+            && matches!(std::env::var("VOXELCRAFT_GI_ACCUM").ok().as_deref(), Some("1") | Some("on"));
         log::info!(
-            "tracer: {} | GI: {}",
+            "tracer: {} | GI: {}{}",
             if use_hw_rt { "hardware ray query (shadows + GI)" } else { "software DDA" },
-            if defer_gi { "deferred compute pass" } else { "in-fragment (G5b oracle)" }
+            if defer_gi { "deferred compute pass" } else { "in-fragment (G5b oracle)" },
+            if gi_accum { " + temporal accumulation" } else { "" }
         );
         let rtx_common = include_str!("../../assets/shaders/rtx_common.wgsl");
         // Atlas bindings + sample_tile (textureSample, fragment-only) — prepended to the render
@@ -1050,6 +1062,62 @@ impl ChunkRenderer {
             (None, None, None, None)
         };
 
+        // M33-G9: GI temporal-accumulation compute pipeline (opt-in). Group 0: gi_cur, g_depth,
+        // g_motion, gi_hist (all textureLoad) + gi_accum (storage write).
+        let (gi_temporal_bgl, gi_temporal_pipeline) = if gi_accum {
+            let in_tex = |binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("gi-temporal-bgl"),
+                entries: &[
+                    in_tex(0),
+                    in_tex(1),
+                    in_tex(2),
+                    in_tex(3),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: IRRADIANCE_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gi-temporal-shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../../assets/shaders/gi_temporal.wgsl").into(),
+                ),
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gi-temporal-layout"),
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("gi-temporal-pipeline"),
+                layout: Some(&layout),
+                module: &shader,
+                entry_point: Some("gi_temporal_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+            (Some(bgl), Some(pipeline))
+        } else {
+            (None, None)
+        };
+
         Self {
             pipeline,
             water_pipeline,
@@ -1075,6 +1143,9 @@ impl ChunkRenderer {
             composite_pipeline,
             gi_io_bgl,
             composite_bgl,
+            gi_accum,
+            gi_temporal_bgl,
+            gi_temporal_pipeline,
             sky_color: Cell::new(wgpu::Color {
                 r: 0.46,
                 g: 0.64,
@@ -1172,11 +1243,11 @@ impl ChunkRenderer {
         // normal, irradiance) bind groups — built only in deferred-GI mode (the layouts are `Some`).
         // The irradiance texture (compute-written storage, composite-sampled) is created here and
         // kept alive by the bind groups, so it isn't allocated at all in the in-fragment path.
-        let (gi_compute_bg, composite_bg) = match (&self.gi_io_bgl, &self.composite_bgl) {
-            (Some(gi_io_bgl), Some(composite_bgl)) => {
-                let irradiance_view = device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some("gi-irradiance"),
+        let (gi_compute_bg, composite_bg, gi_temporal_bg, gi_accum_tex, gi_history_tex) =
+            match (&self.gi_io_bgl, &self.composite_bgl) {
+                (Some(gi_io_bgl), Some(composite_bgl)) => {
+                    let irr_desc = |label, usage| wgpu::TextureDescriptor {
+                        label: Some(label),
                         size: wgpu::Extent3d {
                             width,
                             height,
@@ -1186,55 +1257,107 @@ impl ChunkRenderer {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: IRRADIANCE_FORMAT,
-                        usage: wgpu::TextureUsages::STORAGE_BINDING
-                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        usage,
                         view_formats: &[],
-                    })
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                let gi_compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("gi-compute-bg"),
-                    layout: gi_io_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&gpos_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&gnormal_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&irradiance_view),
-                        },
-                    ],
-                });
-                let composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("gi-composite-bg"),
-                    layout: composite_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&galbedo_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&gpos_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&gnormal_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&irradiance_view),
-                        },
-                    ],
-                });
-                (Some(gi_compute_bg), Some(composite_bg))
-            }
-            _ => (None, None),
-        };
+                    };
+                    let irradiance_view = device
+                        .create_texture(&irr_desc(
+                            "gi-irradiance",
+                            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                        ))
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    let gi_compute_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("gi-compute-bg"),
+                        layout: gi_io_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&gpos_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&gnormal_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&irradiance_view),
+                            },
+                        ],
+                    });
+                    // M33-G9 opt-in: temporal-accumulation buffers. `gi_accum` is the temporal output
+                    // (composite reads it); `gi_history` is the previous frame's accum (copied each
+                    // frame after the pass). When off, the composite reads the raw irradiance.
+                    let (gi_temporal_bg, gi_accum_tex, gi_history_tex, accum_view) = if self.gi_accum {
+                        let tbgl = self
+                            .gi_temporal_bgl
+                            .as_ref()
+                            .expect("gi_temporal_bgl exists when gi_accum");
+                        let accum = device.create_texture(&irr_desc(
+                            "gi-accum",
+                            wgpu::TextureUsages::STORAGE_BINDING
+                                | wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_SRC,
+                        ));
+                        let accum_view = accum.create_view(&wgpu::TextureViewDescriptor::default());
+                        let history = device.create_texture(&irr_desc(
+                            "gi-history",
+                            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        ));
+                        let history_view =
+                            history.create_view(&wgpu::TextureViewDescriptor::default());
+                        let view_entry = |binding, v| wgpu::BindGroupEntry {
+                            binding,
+                            resource: wgpu::BindingResource::TextureView(v),
+                        };
+                        let tbg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("gi-temporal-bg"),
+                            layout: tbgl,
+                            entries: &[
+                                view_entry(0, &irradiance_view),
+                                view_entry(1, &gdepth_view),
+                                view_entry(2, &gmotion_view),
+                                view_entry(3, &history_view),
+                                view_entry(4, &accum_view),
+                            ],
+                        });
+                        (Some(tbg), Some(accum), Some(history), Some(accum_view))
+                    } else {
+                        (None, None, None, None)
+                    };
+                    // Composite samples the accumulated irradiance (temporal on) or the raw (off).
+                    let composite_irr = accum_view.as_ref().unwrap_or(&irradiance_view);
+                    let composite_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("gi-composite-bg"),
+                        layout: composite_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&galbedo_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&gpos_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&gnormal_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(composite_irr),
+                            },
+                        ],
+                    });
+                    (
+                        Some(gi_compute_bg),
+                        Some(composite_bg),
+                        gi_temporal_bg,
+                        gi_accum_tex,
+                        gi_history_tex,
+                    )
+                }
+                _ => (None, None, None, None, None),
+            };
 
         let tonemap_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tonemap-bg"),
@@ -1266,6 +1389,9 @@ impl ChunkRenderer {
             height,
             gi_compute_bg,
             composite_bg,
+            gi_temporal_bg,
+            gi_accum_tex,
+            gi_history_tex,
             tonemap_bg,
         }
     }
@@ -1424,6 +1550,38 @@ impl ChunkRenderer {
                         targets.width.div_ceil(8),
                         targets.height.div_ceil(8),
                         1,
+                    );
+                }
+                // M33-G9 opt-in: temporally accumulate the noisy irradiance into `gi_accum` (which the
+                // composite then samples), reprojecting the previous frame via motion vectors; then
+                // copy accum → history for next frame. wgpu inserts the storage-write/read barriers.
+                if let (Some(tp), Some(tbg), Some(accum), Some(history)) = (
+                    self.gi_temporal_pipeline.as_ref(),
+                    targets.gi_temporal_bg.as_ref(),
+                    targets.gi_accum_tex.as_ref(),
+                    targets.gi_history_tex.as_ref(),
+                ) {
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("gi-temporal-pass"),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline(tp);
+                        cpass.set_bind_group(0, tbg, &[]);
+                        cpass.dispatch_workgroups(
+                            targets.width.div_ceil(8),
+                            targets.height.div_ceil(8),
+                            1,
+                        );
+                    }
+                    encoder.copy_texture_to_texture(
+                        accum.as_image_copy(),
+                        history.as_image_copy(),
+                        wgpu::Extent3d {
+                            width: targets.width,
+                            height: targets.height,
+                            depth_or_array_layers: 1,
+                        },
                     );
                 }
                 {

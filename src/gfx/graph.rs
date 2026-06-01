@@ -55,6 +55,13 @@ pub struct RenderTargets {
     pub gi_compute_bg: Option<wgpu::BindGroup>,
     /// GI composite bind group (group 1: albedo/pos/normal/irradiance). `None` unless GI is deferred. (M33-G6)
     pub composite_bg: Option<wgpu::BindGroup>,
+    /// M33-G9 GI temporal accumulation (opt-in). The temporal pass bind group, and the accumulated +
+    /// history irradiance textures (the per-frame `accum → history` copy needs the `Texture`s).
+    /// `None` unless `VOXELCRAFT_GI_ACCUM` is on; the composite then reads `gi_accum` instead of the
+    /// raw irradiance.
+    pub gi_temporal_bg: Option<wgpu::BindGroup>,
+    pub gi_accum_tex: Option<wgpu::Texture>,
+    pub gi_history_tex: Option<wgpu::Texture>,
     /// Bind group feeding the HDR + G-buffer textures (+ debug-mode uniform) to the tonemap pass.
     pub tonemap_bg: wgpu::BindGroup,
 }
