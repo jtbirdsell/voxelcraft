@@ -158,6 +158,8 @@ position, albedo + skylight) and an ACES tonemap.
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
   screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities. Block items
   render as **textured icons** (sampled from the block atlas) in every slot, not flat color swatches.
+  In creative the inventory shows a **paged palette** of every block, tool, material, and armor piece
+  (click a slot to grab it; scroll to page) so the full ~110-block library is reachable directly.
 - **Chests**: right-click a chest for a 27-slot storage screen (drag/drop against your inventory);
   breaking a chest spills its contents. A generic `Container` so future storage blocks reuse it.
 - **Persistence**: edited chunks (LZ4 blocks **+ block-state**), the level header, the full inventory +
@@ -268,7 +270,7 @@ Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
 `VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft|furnace`,
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
-armor bars). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
+armor bars), `VOXELCRAFT_DARK=1` (the Warden's pulsing **Darkness** screen dim). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
 (software DDA vs hardware ray query), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
 `VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_GI_RAYS=N` (GI samples/pixel,
 default 8), `VOXELCRAFT_GI_ACCUM=1` (opt-in GI temporal accumulation), `VOXELCRAFT_DLSS=off|rr` +
