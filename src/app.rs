@@ -635,8 +635,12 @@ impl App {
                         let lower = hit.block + hit.normal;
                         let upper = lower + IVec3::Y;
                         let support = block::is_solid(state.game.block_at(lower - IVec3::Y));
+                        // Both cells must be empty AND not overlap the player — a closed door is solid,
+                        // so without this you could seal a door panel inside yourself (aim at your feet).
                         let space = state.game.block_at(lower) == block::AIR
-                            && state.game.block_at(upper) == block::AIR;
+                            && state.game.block_at(upper) == block::AIR
+                            && !state.player.intersects_block(lower)
+                            && !state.player.intersects_block(upper);
                         if support && space {
                             let f = state.camera.forward();
                             let facing = if f.x.abs() > f.z.abs() {
@@ -670,7 +674,10 @@ impl App {
                         } else {
                             2
                         };
-                        if state.game.set_block_state(&state.gpu, &state.renderer, place, block::WOODEN_TRAPDOOR, block::trapdoor_state(facing, half, false)) {
+                        // A closed trapdoor is solid — don't seal it inside the player (matches the
+                        // generic placement guard).
+                        if !state.player.intersects_block(place)
+                            && state.game.set_block_state(&state.gpu, &state.renderer, place, block::WOODEN_TRAPDOOR, block::trapdoor_state(facing, half, false)) {
                             state.inventory.consume_selected();
                         }
                     } else {
@@ -758,8 +765,12 @@ impl App {
                         let blocks_player = block::is_solid(id)
                             && !block::is_attach(id)
                             && state.player.intersects_block(place);
+                        // Torches/levers/buttons can't mount on a ceiling (no ATTACH_CEILING variant) —
+                        // reject an underside (bottom-face) click instead of spawning a floating fixture.
+                        let attach_invalid = block::is_attach(id) && hit.normal.y == -1;
                         if id != block::AIR
                             && !blocks_player
+                            && !attach_invalid
                             && state.game.set_block_state(
                                 &state.gpu,
                                 &state.renderer,

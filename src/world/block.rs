@@ -674,7 +674,7 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         ICE => [0.66, 0.80, 0.92],
         GLASS => [0.82, 0.91, 0.98],
         STONE_SLAB | STONE_STAIRS => [0.49, 0.49, 0.52], // stone
-        WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => [0.60, 0.46, 0.28], // wood
+        WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => [0.62, 0.48, 0.30], // planks (matches tile avg)
         COBBLESTONE_WALL => [0.42, 0.42, 0.44],                            // cobble
         GLASS_PANE => [0.82, 0.91, 0.98],                                  // glass
         WOOD_SLAB => [0.62, 0.48, 0.30], // planks

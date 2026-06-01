@@ -295,7 +295,21 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
             // survives the move off RenderKind::Cube. Per-cell, never greedy.
             block::RenderKind::Attach => {
                 let st = neigh.state_at(x, y, z);
+                let face = block::attach_face(st);
                 for b in block::attach_boxes(id, st) {
+                    // Skip the box face coplanar with the support it mounts on — that face is fully
+                    // hidden by the support cube, so emitting it only z-fights with the support's
+                    // exposed face. Only boxes that actually reach the cell boundary get the skip
+                    // (e.g. a lever's base plate, not its raised handle). emit_box skip bit =
+                    // axis*2+positive (0:-X 1:+X 2:-Y 3:+Y 4:-Z 5:+Z).
+                    let skip = match face {
+                        block::ATTACH_PZ if b[5] >= 1.0 => 1 << 5,
+                        block::ATTACH_NZ if b[2] <= 0.0 => 1 << 4,
+                        block::ATTACH_PX if b[3] >= 1.0 => 1 << 1,
+                        block::ATTACH_NX if b[0] <= 0.0 => 1 << 0,
+                        block::ATTACH_FLOOR if b[1] <= 0.0 => 1 << 2, // base sits on the floor's +Y face
+                        _ => 0,
+                    };
                     emit_box(
                         &mut mesh.opaque,
                         origin,
@@ -306,7 +320,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                         [b[3], b[4], b[5]],
                         id,
                         l,
-                        0,
+                        skip,
                     );
                 }
             }

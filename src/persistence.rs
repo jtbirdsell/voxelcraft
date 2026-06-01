@@ -308,7 +308,10 @@ pub fn load_state(
 /// Migrate legacy block ids to the current id + block-state scheme.
 /// P2: the old fixed-orientation stair ids (42 = STONE_STAIRS_E, 43 = _S, 44 = _W) become
 /// STONE_STAIRS (40) with the facing carried in the state byte (1/2/3); the base STONE_STAIRS(40)
-/// was already facing 0 (state 0). Idempotent and cheap (a single scan over the chunk).
+/// was already facing 0 (state 0).
+/// **LEGACY (VCR1) ONLY — the caller MUST gate this on `!has_states`.** Ids 42/43/44 were later
+/// reused by P9/P10 (WOODEN_DOOR/WOODEN_TRAPDOOR/WOODEN_FENCE), so running this on a VCR2 file (which
+/// post-dates the reuse) would silently clobber every placed door/trapdoor/fence into a stone stair.
 fn migrate_legacy_blocks(blocks: &mut [BlockId], states: &mut [u8]) {
     for (b, s) in blocks.iter_mut().zip(states.iter_mut()) {
         match *b {
@@ -380,7 +383,11 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
                     .chunks_exact(2)
                     .map(|b| u16::from_le_bytes([b[0], b[1]]))
                     .collect();
-                migrate_legacy_blocks(&mut blocks, &mut states);
+                // Migrate ONLY legacy VCR1 files: a VCR2 magic proves the save post-dates P9/P10's
+                // reuse of ids 42/43/44, so those are genuine door/trapdoor/fence and must be left as-is.
+                if !has_states {
+                    migrate_legacy_blocks(&mut blocks, &mut states);
+                }
                 let solid_count = blocks.iter().filter(|&&b| b != 0).count() as u32;
                 let emitter_count =
                     blocks.iter().filter(|&&b| crate::block::light_emission(b) > 0).count() as u32;
@@ -499,6 +506,35 @@ mod tests {
         assert_eq!(lc.state(5, 6, 7), 2);
         assert_eq!(lc.get(1, 2, 3), crate::block::STONE_STAIRS);
         assert_eq!(lc.states.iter().filter(|&&s| s != 0).count(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vcr2_reused_ids_not_migrated() {
+        // Ids 42/43/44 are WOODEN_DOOR/TRAPDOOR/FENCE since P9/P10 (they were *also* the retired stair
+        // ids pre-P2). The legacy-stair migration must run ONLY on VCR1 files — a VCR2 save (every save
+        // current code writes) must round-trip these blocks + their state bytes UNCHANGED, never
+        // clobbered into STONE_STAIRS.
+        let dir = std::env::temp_dir().join(format!("voxelcraft_vcr2reuse_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut chunk = Chunk::filled(crate::block::AIR);
+        let door = crate::block::door_state(1, true, 0, crate::block::DOOR_LOWER);
+        chunk.set_state(0, 0, 0, crate::block::WOODEN_DOOR, door);
+        chunk.set_state(1, 0, 0, crate::block::WOODEN_TRAPDOOR, crate::block::trapdoor_state(2, 1, true));
+        chunk.set_state(2, 0, 0, crate::block::WOODEN_FENCE, 0);
+        let pos = IVec3::new(7, -2, 3);
+        save_chunks(&dir, &[(pos, &chunk)]).unwrap();
+
+        let loaded = load_chunks(&dir);
+        let lc = loaded.get(&pos).unwrap();
+        assert_eq!(lc.get(0, 0, 0), crate::block::WOODEN_DOOR, "door id survives VCR2 reload");
+        assert_eq!(lc.state(0, 0, 0), door, "door state byte not clobbered by migration");
+        assert_eq!(lc.get(1, 0, 0), crate::block::WOODEN_TRAPDOOR);
+        assert_eq!(lc.get(2, 0, 0), crate::block::WOODEN_FENCE);
+        // None became a stone stair.
+        assert!(!lc.blocks.iter().any(|&b| b == crate::block::STONE_STAIRS));
 
         let _ = fs::remove_dir_all(&dir);
     }
