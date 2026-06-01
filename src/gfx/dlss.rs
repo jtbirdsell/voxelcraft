@@ -130,15 +130,11 @@ pub struct DlssRender {
     rr: DlssRayReconstructionContext,
     render_res: UVec2,
     frame: u32,
-    /// Camera jitter is OFF by default: with jitter on, DLSS-RR fails to resolve the subpixel offset
-    /// (steady ~17% frame-to-frame oscillation regardless of sign) — a tremor on static geometry.
-    /// Without it, RR is rock-stable (denoise + upscale, slightly softer). Opt back in for tuning the
-    /// jitter convention with VOXELCRAFT_DLSS_JITTER=1.
+    /// Camera jitter is ON by default (M33-G9): DLSS-RR needs sub-pixel jitter to temporally
+    /// supersample detail. The earlier "tremor on static geometry" was the motion-vector SIGN bug
+    /// (NGX wants prev-cur; we fed cur-prev) — fixed by the motion_vector_scale negate, which also
+    /// killed the tremor. Opt OUT with VOXELCRAFT_DLSS_JITTER=0 (e.g. to A/B sharpness/stability).
     jitter_enabled: bool,
-    /// Sign applied to the PROJECTION jitter (camera) relative to NGX's InJitterOffset — the two must
-    /// agree in NGX's convention or DLSS un-jitters the wrong way. Swept via VOXELCRAFT_DLSS_JSX/JSY.
-    jsx: f32,
-    jsy: f32,
     depth_view: wgpu::TextureView,
     specular_tex: wgpu::Texture,
     roughness_tex: wgpu::Texture,
@@ -299,9 +295,11 @@ impl DlssRender {
             rr,
             render_res,
             frame: 0,
-            jitter_enabled: std::env::var("VOXELCRAFT_DLSS_JITTER").is_ok(),
-            jsx: if std::env::var("VOXELCRAFT_DLSS_JSX").as_deref() == Ok("-1") { -1.0 } else { 1.0 },
-            jsy: if std::env::var("VOXELCRAFT_DLSS_JSY").as_deref() == Ok("-1") { -1.0 } else { 1.0 },
+            // ON unless explicitly disabled (VOXELCRAFT_DLSS_JITTER=0|off|false).
+            jitter_enabled: !matches!(
+                std::env::var("VOXELCRAFT_DLSS_JITTER").ok().as_deref(),
+                Some("0") | Some("off") | Some("false")
+            ),
             depth_view,
             specular_tex,
             roughness_tex,
@@ -362,15 +360,15 @@ impl DlssRender {
         &self.ss_downscale_bg
     }
 
-    /// The subpixel camera jitter (in render-resolution pixels) to apply this frame — must match
-    /// what `evaluate` passes to NGX. Returned as a plain tuple to keep glam 0.29 out of the engine.
+    /// The subpixel camera jitter (in render-resolution pixels) to apply this frame — the SAME Halton
+    /// offset `evaluate` hands NGX as `jitter_offset`, so the projection jitter and NGX's un-jitter
+    /// agree. Returned as a plain tuple to keep glam 0.29 out of the engine.
     pub fn jitter(&self) -> (f32, f32) {
         if !self.jitter_enabled {
             return (0.0, 0.0);
         }
-        // The camera (projection) jitter may need a sign flip relative to NGX's InJitterOffset.
         let j = self.rr.suggested_jitter(self.frame, self.render_res);
-        (j.x * self.jsx, j.y * self.jsy)
+        (j.x, j.y)
     }
 
     /// Render resolution (DLSS upscales from here to the output resolution).
