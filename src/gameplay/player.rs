@@ -106,6 +106,10 @@ pub struct Player {
     air_max_y: f32,
     /// Where `respawn` returns the player on death.
     respawn_point: Vec3,
+    /// U11 Darkness effect timer (seconds): set by a sculk shrieker's shriek, decays each tick toward
+    /// 0. Drives a screen-dimming pulse (render effect deferred — see notes); the value is exposed so
+    /// the renderer can read it when wired up.
+    pub darkness: f32,
 }
 
 #[inline]
@@ -172,6 +176,7 @@ impl Player {
             drown_timer: 0.0,
             air_max_y: position.y,
             respawn_point: position,
+            darkness: 0.0,
         }
     }
 
@@ -234,6 +239,12 @@ impl Player {
         self.health <= 0.0
     }
 
+    /// U11: apply a Darkness pulse (seconds) from a sculk shriek — takes the longer of the two so a
+    /// repeated shriek refreshes rather than truncates the effect.
+    pub fn apply_darkness(&mut self, seconds: f32) {
+        self.darkness = self.darkness.max(seconds);
+    }
+
     /// Can the player eat this food now? (Always-edible foods can be eaten at full hunger.)
     pub fn can_eat(&self, always_edible: bool) -> bool {
         always_edible || self.hunger < MAX_HUNGER
@@ -258,6 +269,7 @@ impl Player {
         self.drown_timer = 0.0;
         self.air_max_y = self.respawn_point.y;
         self.on_ground = false;
+        self.darkness = 0.0;
     }
 
     /// Hunger drain, regen when well-fed (faster while saturation lasts), starvation at empty hunger.
@@ -419,6 +431,7 @@ impl Player {
     ) {
         self.armor_points = armor_points;
         self.hurt_cooldown = (self.hurt_cooldown - dt).max(0.0);
+        self.darkness = (self.darkness - dt).max(0.0); // U11 Darkness decays toward 0 each tick
         let (sy, cy) = yaw.sin_cos();
         let fwd = Vec3::new(cy, 0.0, sy);
         let right = Vec3::new(-sy, 0.0, cy);

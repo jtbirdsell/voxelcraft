@@ -56,6 +56,14 @@ const ARROW_LIFETIME: f32 = 4.0;
 const SKELETON_SHOOT_CD: f32 = 1.6;
 const CREEPER_FUSE: f32 = 1.5;
 const CREEPER_RADIUS: f32 = 3.0;
+// U11 Warden tuning (a blind, vibration-hunting boss).
+const WARDEN_HEAR_RANGE: f32 = 24.0; // hears the most-recent vibration within this radius
+const WARDEN_DIG_TIMEOUT: f32 = 12.0; // seconds of silence (and no nearby player) → it digs away
+const WARDEN_SPEED: f32 = 3.2; // blind-pursuit walk speed
+const WARDEN_EMERGE_TIME: f32 = 2.5; // rise-from-ground: immobile + invulnerable while >0
+const WARDEN_SONIC_RANGE: f32 = 16.0; // ranged sonic-boom reach
+const WARDEN_SONIC_DAMAGE: f32 = 10.0; // sonic-boom damage (ignores armor at the source like a blast)
+const WARDEN_SONIC_CD: f32 = 3.0; // cooldown between sonic booms
 
 #[inline]
 fn comp(v: Vec3, axis: usize) -> f32 {
@@ -108,11 +116,13 @@ pub enum Species {
     Enderman,
     Slime,
     Villager,
+    // U11: the deep-dark boss. Blind; hunts vibrations, not sight.
+    Warden,
 }
 
 impl Species {
     /// All species, for spawning a representative set.
-    pub const ALL: [Species; 12] = [
+    pub const ALL: [Species; 13] = [
         Species::Cow,
         Species::Pig,
         Species::Sheep,
@@ -125,6 +135,7 @@ impl Species {
         Species::Enderman,
         Species::Slime,
         Species::Villager,
+        Species::Warden,
     ];
 
     fn max_health(self) -> f32 {
@@ -138,6 +149,7 @@ impl Species {
             Species::Enderman => 20.0, // teleport deferred → a fair non-boss threat
             Species::Villager => 10.0,
             Species::Slime => 8.0, // LARGE default; a tier-spawned slime rewrites health (spawn_slime)
+            Species::Warden => 500.0, // U11 boss: a huge HP pool (MC parity)
         }
     }
 
@@ -156,6 +168,9 @@ impl Species {
             Species::Enderman => (0.6, 1.95),
             Species::Villager => (0.6, 1.9),
             Species::Slime => (1.0, 1.0),
+            // Warden: a short-enough AABB to clear the 2-air spawn check (like the Enderman); the
+            // model() draws it ~2.9 tall. Wide + heavy footprint.
+            Species::Warden => (0.9, 2.0),
         }
     }
 
@@ -170,12 +185,14 @@ impl Species {
                 | Species::Spider
                 | Species::Slime
                 | Species::Enderman
+                | Species::Warden
         )
     }
 
     /// Contact damage a hostile mob deals to the player per hit (passives deal none).
     fn contact_damage(self) -> f32 {
         match self {
+            Species::Warden => 16.0, // U11: a crushing melee hit
             Species::Creeper => 4.0,
             Species::Zombie | Species::Enderman => 3.0,
             Species::Skeleton | Species::Spider | Species::Wolf | Species::Slime => 2.0,
@@ -199,6 +216,7 @@ impl Species {
         match self {
             Species::Slime => 1, // each split body drops a little (a large→cascade isn't 50 XP)
             Species::Chicken => 1,
+            Species::Warden => 0, // U11: the Warden gives no XP (MC parity)
             _ if self.hostile() => 5,
             _ => 2,
         }
@@ -217,7 +235,8 @@ impl Species {
             Species::Creeper => &[(GUNPOWDER, 1)],
             Species::Spider => &[(STRING, 1), (SPIDER_EYE, 1)],
             // P18: no slimeball/ender-pearl/emerald items yet — these drop nothing (MC: wolves do too).
-            Species::Wolf | Species::Enderman | Species::Slime | Species::Villager => &[],
+            // U11: the Warden drops nothing either (MC: only a sculk catalyst, deferred).
+            Species::Wolf | Species::Enderman | Species::Slime | Species::Villager | Species::Warden => &[],
         }
     }
 }
@@ -249,7 +268,24 @@ fn model(s: Species) -> Vec<Part> {
         Species::Enderman => enderman(),
         Species::Slime => slime(),
         Species::Villager => villager(),
+        Species::Warden => warden(),
     }
+}
+
+/// Warden (U11): a hulking dark-teal humanoid ~2.9 tall — bigger and bulkier than the bipeds, with a
+/// SCULK body and a glowing SCULK_SENSOR chest/face accent (the bioluminescent core). The collision
+/// AABB (size()) is shorter so it fits the 2-air spawn check; the model towers over it.
+fn warden() -> Vec<Part> {
+    vec![
+        part([-0.22, 0.0, -0.16], [-0.02, 1.1, 0.16], T::SCULK), // left leg (thick)
+        part([0.02, 0.0, -0.16], [0.22, 1.1, 0.16], T::SCULK),   // right leg
+        part([-0.42, 1.1, -0.26], [0.42, 2.3, 0.26], T::SCULK),  // huge torso
+        part([-0.18, 1.35, -0.30], [0.18, 1.9, -0.27], T::SCULK_SENSOR), // glowing chest core
+        part([-0.34, 2.3, -0.30], [0.34, 2.9, 0.30], T::SCULK),  // broad head
+        part([-0.20, 2.5, -0.32], [0.20, 2.74, -0.30], T::SCULK_SENSOR), // glowing face
+        part([0.10, 1.2, -0.62], [0.34, 2.25, -0.30], T::SCULK), // left arm (long, heavy)
+        part([0.10, 1.2, 0.30], [0.34, 2.25, 0.62], T::SCULK),   // right arm
+    ]
 }
 
 /// Wolf: a small grey quadruped with pointed ears, a snout, and a tail (distinct from the cow).
@@ -379,6 +415,16 @@ struct MobData {
     /// P18 slime size tier: 2 = large, 1 = medium, 0 = small (0 for every non-slime). Scales the
     /// model + collision/hit AABB via `mob_scale`/`dims`; the smallest tier does not split on death.
     slime_tier: u8,
+    /// U11 Warden state (0 / None for every other species, harmless):
+    /// `emerge` = rise-from-ground timer; while >0 it is immobile + invulnerable.
+    emerge: f32,
+    /// `no_vib` = seconds since it last heard a vibration; past a timeout (and with no nearby player)
+    /// the Warden digs back underground (despawns, no loot).
+    no_vib: f32,
+    /// `sonic_cd` = sonic-boom cooldown (seconds).
+    sonic_cd: f32,
+    /// `warden_target` = world position of the last vibration it heard (its blind pursuit goal).
+    warden_target: Option<Vec3>,
 }
 
 /// Slime size-tier factor (small/medium/large): scales both the render model and the collision/hit
@@ -483,6 +529,11 @@ impl Entities {
     }
     pub fn passive_count(&self) -> usize {
         self.list.iter().filter(|e| matches!(e.kind, Kind::Mob(m) if !m.species.hostile())).count()
+    }
+
+    /// Live Warden count (U11): the shrieker won't summon a second Warden while one already prowls.
+    pub fn warden_count(&self) -> usize {
+        self.list.iter().filter(|e| matches!(e.kind, Kind::Mob(m) if m.species == Species::Warden)).count()
     }
 
     /// Feet position of the i-th live mob (P15 navigation tests).
@@ -639,6 +690,10 @@ impl Entities {
         {
             let e = &mut self.list[i];
             if let Kind::Mob(m) = &mut e.kind {
+                // U11: an emerging Warden is invulnerable (and absorbs the knockback) — bail early.
+                if m.emerge > 0.0 {
+                    return true;
+                }
                 m.health -= damage;
                 m.hurt = if crit { 0.6 } else { 0.35 };
                 if matches!(m.species, Species::Wolf | Species::Enderman) {
@@ -749,6 +804,12 @@ impl Entities {
                 angry: false,
                 // A slime spawned via spawn_mob defaults to the LARGE tier (health already = max).
                 slime_tier: if species == Species::Slime { 2 } else { 0 },
+                // U11 Warden: a fresh Warden emerges (immobile + invulnerable) for a moment; all other
+                // species (and these fields generally) are inert.
+                emerge: if species == Species::Warden { WARDEN_EMERGE_TIME } else { 0.0 },
+                no_vib: 0.0,
+                sonic_cd: 0.0,
+                warden_target: None,
             }),
             pos,
             vel: Vec3::ZERO,
@@ -844,6 +905,9 @@ impl Entities {
         // the sky. Folds the day factor + the P16 sky-light query into one closure (supplied by game.rs)
         // so the entity tick stays self-contained and `update` keeps a single new parameter.
         sun_burn: impl Fn(IVec3) -> bool,
+        // U11: the most-recent live vibration within `range` of a point (or None) — the Warden's only
+        // sense. Supplied by game.rs over its vibration bus (footsteps / block edits / deaths).
+        vibration: impl Fn(Vec3, f32) -> Option<Vec3>,
     ) -> Collected {
         let mut collected = Collected::default();
         let mut deaths: Vec<(Vec3, Species)> = Vec::new();
@@ -887,6 +951,95 @@ impl Entities {
             e.age += dt;
             match e.kind {
                 Kind::Mob(mut m) => {
+                    // U11 Warden: a dedicated branch — it is BLIND (ignores line-of-sight), hunts the
+                    // most-recent vibration it can hear, melees on contact, and fires a ranged sonic
+                    // boom. While emerging it is immobile + invulnerable. The generic mob AI below is
+                    // skipped (`continue`).
+                    if m.species == Species::Warden {
+                        m.emerge = (m.emerge - dt).max(0.0);
+                        m.sonic_cd = (m.sonic_cd - dt).max(0.0);
+                        m.atk_cd = (m.atk_cd - dt).max(0.0);
+                        m.hurt = (m.hurt - dt).max(0.0);
+                        let (mw, mh) = dims(&m);
+                        let to_player = player_pos - e.pos;
+                        let dist = to_player.length();
+                        // Hear the nearest recent vibration; else age the idle timer toward digging away.
+                        if let Some(v) = vibration(e.pos, WARDEN_HEAR_RANGE) {
+                            m.warden_target = Some(v);
+                            m.no_vib = 0.0;
+                        } else {
+                            m.no_vib += dt;
+                        }
+                        if m.emerge > 0.0 {
+                            // Rising from the ground: hold position (gravity only), invulnerable.
+                            e.vel.x = 0.0;
+                            e.vel.z = 0.0;
+                            e.vel.y -= GRAVITY * dt;
+                            e.on_ground = collide_move(&mut e.pos, &mut e.vel, mw, mh, dt, &is_solid);
+                        } else if m.no_vib > WARDEN_DIG_TIMEOUT && dist > WARDEN_HEAR_RANGE {
+                            e.dead = true; // lost the trail → digs back underground (no loot)
+                        } else {
+                            // Blind pursuit: head toward the last vibration heard (or the player until
+                            // it has heard one). No line-of-sight test — it walks through the dark.
+                            let tgt = m.warden_target.unwrap_or(player_pos);
+                            let to = tgt - e.pos;
+                            let horiz = (to.x * to.x + to.z * to.z).sqrt();
+                            if horiz > 1.8 {
+                                e.heading = to.z.atan2(to.x);
+                                let st = steer(
+                                    e.pos,
+                                    &mut e.heading,
+                                    &mut m.deflect,
+                                    &mut m.deflect_heading,
+                                    dt,
+                                    mw * 0.5,
+                                    false, // edge_avoid off — relentless like a chase
+                                    true,
+                                    e.on_ground,
+                                    &is_solid,
+                                    &is_hazard,
+                                );
+                                let fwd = if st.stop { 0.0 } else { WARDEN_SPEED };
+                                e.vel.x = e.heading.cos() * fwd;
+                                e.vel.z = e.heading.sin() * fwd;
+                                if let Some(vy) = st.vy {
+                                    e.vel.y = vy;
+                                }
+                            } else {
+                                e.heading = to.z.atan2(to.x);
+                                e.vel.x = 0.0;
+                                e.vel.z = 0.0;
+                            }
+                            e.vel.y -= GRAVITY * dt;
+                            e.on_ground = collide_move(&mut e.pos, &mut e.vel, mw, mh, dt, &is_solid);
+                            // Melee on genuine AABB contact with the player.
+                            let dh = player_pos - e.pos;
+                            let hd = (dh.x * dh.x + dh.z * dh.z).sqrt();
+                            if hd <= mw * 0.5 + 0.9 && dh.y.abs() <= mh + 0.7 && m.atk_cd <= 0.0 {
+                                collected.player_damage.push((m.species.contact_damage(), e.pos));
+                                m.atk_cd = MOB_ATTACK_COOLDOWN;
+                            }
+                            // Sonic boom: ranged, when the player is within range and roughly ahead.
+                            if dist < WARDEN_SONIC_RANGE && dist > 2.5 && m.sonic_cd <= 0.0 {
+                                let aim = Vec3::new(e.heading.cos(), 0.0, e.heading.sin());
+                                if aim.dot(to_player.normalize_or_zero()) > 0.35 {
+                                    collected.player_damage.push((WARDEN_SONIC_DAMAGE, e.pos));
+                                    m.sonic_cd = WARDEN_SONIC_CD;
+                                }
+                            }
+                        }
+                        // Despawn if it fell out / wandered absurdly far (mirror the generic guard, NO loot).
+                        if e.pos.y < FALL_OUT_Y || dist > DESPAWN_RADIUS {
+                            e.dead = true;
+                        }
+                        if m.health <= 0.0 {
+                            e.dead = true;
+                            deaths.push((e.pos, m.species)); // killed (tables give no loot/xp)
+                        }
+                        e.kind = Kind::Mob(m);
+                        continue; // skip the generic mob AI for this entity
+                    }
+
                     m.hurt = (m.hurt - dt).max(0.0); // hurt-flash decays after a hit
                     // P17 life-cycle timers (persist via the e.kind write-back at the block's end).
                     m.love = (m.love - dt).max(0.0);
@@ -1208,6 +1361,9 @@ impl Entities {
         for (mi, hit_pos, dmg) in arrow_hits {
             if let Some(e) = self.list.get_mut(mi) {
                 if let Kind::Mob(m) = &mut e.kind {
+                    if m.emerge > 0.0 {
+                        continue; // U11: an emerging Warden shrugs off arrows too
+                    }
                     m.health -= dmg;
                     m.hurt = m.hurt.max(0.35);
                 }
@@ -1701,7 +1857,7 @@ mod tests {
         assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 4 -> 2
         assert!(es.attack(o, d, 6.0, 2.0, false, None, 1.0)); // 2 -> 0
         // The dead mob is culled on the next tick (and drops an XP orb in its place).
-        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false, |_, _| None);
         assert_eq!(es.ai_summary(), "mobs idle:0 wander:0 flee:0 chase:0 attack:0");
     }
 
@@ -1715,7 +1871,7 @@ mod tests {
         es.spawn_mob(Vec3::new(3.0, 0.0, 0.0), Species::Chicken); // 3.0 > 1.5 -> safe
         let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
         assert!(es.attack(o, d, 6.0, 10.0, false, Some(10.0), 1.0));
-        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false, |_, _| None);
         assert_eq!(es.mob_count(), 1, "primary + the in-radius neighbor die; the far mob survives");
     }
 
@@ -1727,7 +1883,7 @@ mod tests {
         es.spawn_mob(Vec3::new(1.0, 0.0, 0.0), Species::Chicken);
         let (o, d) = (Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
         assert!(es.attack(o, d, 6.0, 10.0, false, None, 1.0));
-        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false, |_, _| None);
         assert_eq!(es.mob_count(), 1, "only the primary dies without a sweep");
     }
 
@@ -1738,7 +1894,7 @@ mod tests {
         let player = Vec3::new(0.0, 0.0, 3.0); // feet; chest (+1) sits at z=3
         let mut dmg = 0.0;
         for _ in 0..120 {
-            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false, |_, _| None).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }
@@ -1757,7 +1913,7 @@ mod tests {
         let player = Vec3::ZERO; // the shooter
         let mut dmg = 0.0;
         for _ in 0..240 {
-            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false, |_, _| None).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.mob_count() == 0 {
                 break;
             }
@@ -1774,7 +1930,7 @@ mod tests {
         let player = Vec3::ZERO;
         let mut dmg = 0.0;
         for _ in 0..300 {
-            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
+            dmg += es.update(1.0 / 60.0, player, |_| false, |_| false, |_| false, |_, _| None).player_damage.iter().map(|(a, _)| *a).sum::<f32>();
             if es.count() == 0 {
                 break;
             }
@@ -1789,7 +1945,7 @@ mod tests {
         es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Cow); // near
         es.spawn_mob(Vec3::new(100.0, 1.0, 0.0), Species::Pig); // beyond DESPAWN_RADIUS
         assert_eq!(es.mob_count(), 2);
-        let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1, |_| false, |_| false); // floor at y<1
+        let _ = es.update(0.05, Vec3::new(0.0, 0.5, 0.0), |p: IVec3| p.y < 1, |_| false, |_| false, |_, _| None); // floor at y<1
         assert_eq!(es.mob_count(), 1, "the far mob despawns, the near one stays");
     }
 
@@ -1801,7 +1957,7 @@ mod tests {
         for _ in 0..3 {
             es.attack(o, d, 6.0, 5.0, false, None, 1.0); // 10 hp -> dead
         }
-        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false, |_, _| None);
         assert_eq!(es.species_summary(), "passive:0 hostile:0", "the cow died");
         // Two item drops (beef, leather) + one XP orb remain as entities.
         assert!(es.count() >= 3, "cow should drop loot + xp (count = {})", es.count());
@@ -1814,7 +1970,7 @@ mod tests {
         // jump from z=0 to z=2.2 (final cell z=2), never testing z=1 — the sub-step march must catch it.
         es.spawn_arrow(Vec3::new(0.5, 1.0, 0.0), Vec3::new(0.0, 0.0, 22.0));
         let wall = |p: IVec3| p.z == 1;
-        es.update(0.1, Vec3::new(0.0, 500.0, 500.0), wall, |_| false, |_| false); // player far away
+        es.update(0.1, Vec3::new(0.0, 500.0, 500.0), wall, |_| false, |_| false, |_, _| None); // player far away
         assert_eq!(es.count(), 0, "the arrow stops at the wall instead of tunneling through it");
     }
 
@@ -1824,7 +1980,7 @@ mod tests {
         es.spawn_arrow(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 12.0));
         let wall = |p: IVec3| p.z >= 2;
         for _ in 0..120 {
-            es.update(1.0 / 60.0, Vec3::new(0.0, 200.0, 200.0), wall, |_| false, |_| false); // player far away
+            es.update(1.0 / 60.0, Vec3::new(0.0, 200.0, 200.0), wall, |_| false, |_| false, |_, _| None); // player far away
             if es.count() == 0 {
                 break;
             }
@@ -1842,7 +1998,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 || (p.x >= 2 && p.y == 1);
         let player = Vec3::new(-1.0, 1.0, 0.5);
         for _ in 0..240 {
-            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false, |_, _| None);
         }
         assert!(es.mob_pos(0).x > 2.0, "cow crossed onto the ledge (x={})", es.mob_pos(0).x);
         assert!(es.mob_pos(0).y >= 1.9, "cow climbed the 1-block step (y={})", es.mob_pos(0).y);
@@ -1855,7 +2011,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 && p.x < 3; // floor ends at x=3 → a deep void beyond
         let player = Vec3::new(-0.5, 1.0, 0.5);
         for _ in 0..300 {
-            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false, |_, _| None);
         }
         assert!(es.mob_pos(0).x < 3.0, "cow stayed back from the cliff (x={})", es.mob_pos(0).x);
         assert!(es.mob_pos(0).y > 0.5, "cow did not fall into the void (y={})", es.mob_pos(0).y);
@@ -1869,7 +2025,7 @@ mod tests {
         let lava = |p: IVec3| p.x >= 3 && p.y == 1; // a lava body at body level for x>=3
         let player = Vec3::new(-0.5, 1.0, 0.5);
         for _ in 0..300 {
-            es.update(1.0 / 60.0, player, solid, lava, |_| false);
+            es.update(1.0 / 60.0, player, solid, lava, |_| false, |_, _| None);
         }
         assert!(es.mob_pos(0).x < 3.0, "cow avoided the lava (x={})", es.mob_pos(0).x);
     }
@@ -1881,7 +2037,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 || (p.x == 3 && p.y >= 1); // a 2-tall wall plane at x=3
         let player = Vec3::new(-0.5, 1.0, 0.5);
         for _ in 0..240 {
-            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false, |_, _| None);
         }
         assert!((es.mob_pos(0).z - 0.5).abs() > 0.5, "cow deflected sideways (z={})", es.mob_pos(0).z);
         assert!(es.mob_pos(0).x < 3.0, "cow did not tunnel the wall (x={})", es.mob_pos(0).x);
@@ -1897,7 +2053,7 @@ mod tests {
         let solid = |p: IVec3| p.y < 1 || (p.x >= 2 && p.y == 1);
         let player = Vec3::new(6.0, 2.0, 0.5);
         for _ in 0..400 {
-            es.update(1.0 / 60.0, player, solid, |_| false, |_| false);
+            es.update(1.0 / 60.0, player, solid, |_| false, |_| false, |_, _| None);
         }
         assert!(es.mob_pos(0).x > 3.0, "zombie advanced toward the player (x={})", es.mob_pos(0).x);
         assert!(es.mob_pos(0).y >= 1.9, "zombie climbed onto the plateau (y={})", es.mob_pos(0).y);
@@ -1942,11 +2098,11 @@ mod tests {
         assert!(es.mob_in_love(0) && es.mob_in_love(1));
         let near = Vec3::new(10.0, 1.0, 3.0); // inside DESPAWN_RADIUS, outside FLEE_RADIUS
         let floor = |p: IVec3| p.y < 1;
-        es.update(0.05, near, floor, |_| false, |_| false);
+        es.update(0.05, near, floor, |_| false, |_| false, |_, _| None);
         assert_eq!(es.mob_count(), 3, "exactly one baby is born");
         assert!(!es.mob_in_love(0) && !es.mob_in_love(1), "both parents leave love-mode");
         assert!(es.mob_breed_cd(0) > 0.0 && es.mob_breed_cd(1) > 0.0, "both go on cooldown");
-        es.update(0.05, near, floor, |_| false, |_| false);
+        es.update(0.05, near, floor, |_| false, |_| false, |_, _| None);
         assert_eq!(es.mob_count(), 3, "no second baby while on cooldown");
     }
 
@@ -1960,7 +2116,7 @@ mod tests {
         // Track the baby with the player (dist≈0 → never despawns); floor at y<1 so it doesn't fall.
         for _ in 0..((GROW_TIME / dt) as i32 + 20) {
             let p = es.mob_pos(0);
-            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| false);
+            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| false, |_, _| None);
         }
         assert!(!es.mob_is_baby(0), "the baby matured after GROW_TIME");
     }
@@ -1973,7 +2129,7 @@ mod tests {
         let h0 = es.mob_health(0);
         for _ in 0..100 {
             let p = es.mob_pos(0); // player tracks the (milling) zombie: no despawn, floor → no fall
-            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| true); // sun_burn = exposed everywhere
+            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| true, |_, _| None); // sun_burn = exposed everywhere
         }
         assert!(es.mob_health(0) < h0, "the zombie took daylight burn damage");
     }
@@ -1986,7 +2142,7 @@ mod tests {
         let h0 = es.mob_health(0);
         for _ in 0..100 {
             let p = es.mob_pos(0);
-            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| false); // never sky-exposed
+            es.update(dt, p, |pp| pp.y < 1, |_| false, |_| false, |_, _| None); // never sky-exposed
         }
         assert!((es.mob_health(0) - h0).abs() < 1e-3, "sheltered/night undead don't burn");
     }
@@ -1997,12 +2153,12 @@ mod tests {
         es.spawn_mob(Vec3::ZERO, Species::Wolf);
         // Player beyond FLEE_RADIUS*1.8 (=9) → a CALM wolf wanders, never chases.
         let far = Vec3::new(0.0, 0.0, 12.0);
-        let _ = es.update(0.016, far, |_| false, |_| false, |_| false);
+        let _ = es.update(0.016, far, |_| false, |_| false, |_| false, |_, _| None);
         let s = es.ai_summary();
         assert!(!s.contains("chase:1") && !s.contains("attack:1"), "calm wolf doesn't chase ({s})");
         // Hit it (from the far side so it survives), then a close visible player → it chases.
         es.attack(Vec3::new(0.0, 0.4, -3.0), Vec3::new(0.0, 0.0, 1.0), 6.0, 1.0, false, None, 1.0);
-        let _ = es.update(0.016, Vec3::new(0.0, 0.0, 4.0), |_| false, |_| false, |_| false);
+        let _ = es.update(0.016, Vec3::new(0.0, 0.0, 4.0), |_| false, |_| false, |_| false, |_, _| None);
         let s = es.ai_summary();
         assert!(s.contains("chase:1") || s.contains("attack:1"), "an angry wolf chases ({s})");
     }
@@ -2013,12 +2169,12 @@ mod tests {
         let mut es = Entities::new();
         es.spawn_slime(Vec3::ZERO, 2); // large (8 hp)
         es.attack(o, d, 6.0, 10.0, false, None, 1.0); // lethal
-        let _ = es.update(0.016, o, |_| false, |_| false, |_| false);
+        let _ = es.update(0.016, o, |_| false, |_| false, |_| false, |_, _| None);
         assert_eq!(es.mob_count(), 3, "a large slime splits into 3 mediums");
         let mut es2 = Entities::new();
         es2.spawn_slime(Vec3::ZERO, 0); // smallest (1 hp)
         es2.attack(o, d, 6.0, 10.0, false, None, 1.0);
-        let _ = es2.update(0.016, o, |_| false, |_| false, |_| false);
+        let _ = es2.update(0.016, o, |_| false, |_| false, |_| false, |_, _| None);
         assert_eq!(es2.mob_count(), 0, "the smallest slime leaves no children");
     }
 
@@ -2032,7 +2188,7 @@ mod tests {
 
     #[test]
     fn new_species_in_all_with_valid_tables() {
-        assert_eq!(Species::ALL.len(), 12);
+        assert_eq!(Species::ALL.len(), 13);
         for s in Species::ALL {
             assert!(s.max_health() > 0.0, "{s:?} has health");
             let (w, h) = s.size();
@@ -2041,5 +2197,72 @@ mod tests {
         }
         assert!(Species::Slime.hostile() && Species::Enderman.hostile());
         assert!(!Species::Wolf.hostile() && !Species::Villager.hostile());
+    }
+
+    #[test]
+    fn warden_tables_are_sane() {
+        // U11: the Warden is in ALL with the expected boss stats, a non-empty model, hostile, no XP/loot.
+        assert!(Species::ALL.contains(&Species::Warden));
+        assert_eq!(Species::Warden.max_health(), 500.0);
+        assert!(Species::Warden.hostile());
+        assert_eq!(Species::Warden.xp_drop(), 0);
+        assert!(Species::Warden.loot().is_empty());
+        assert_eq!(Species::Warden.contact_damage(), 16.0);
+        assert!(!model(Species::Warden).is_empty());
+        // The collision box stays short enough to clear the 2-air spawn check.
+        let (_w, h) = Species::Warden.size();
+        assert!(h <= 2.05, "warden AABB height {h} fits the spawn-air check");
+        // Sane constants.
+        assert!(WARDEN_SPEED > 0.0 && WARDEN_EMERGE_TIME > 0.0 && WARDEN_HEAR_RANGE > 0.0);
+        assert!(WARDEN_SONIC_RANGE > 2.5 && WARDEN_SONIC_DAMAGE > 0.0);
+    }
+
+    #[test]
+    fn warden_emerges_invulnerable_then_chases_a_vibration() {
+        // A fresh Warden spends WARDEN_EMERGE_TIME immobile + invulnerable, then walks toward the most-
+        // recent vibration it hears (no line-of-sight needed). The vibration closure feeds it a target.
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Warden);
+        let floor = |p: IVec3| p.y < 1;
+        // During emerge: a melee swing does NOT reduce its health.
+        let (o, d) = (Vec3::new(0.0, 1.4, -3.0), Vec3::new(0.0, 0.0, 1.0));
+        es.attack(o, d, 6.0, 50.0, false, None, 1.0);
+        assert_eq!(es.mob_health(0), 500.0, "an emerging Warden is invulnerable");
+        // Run past the emerge timer with NO vibration nearby; it must still be alive (player is close,
+        // so the dig-away guard doesn't fire).
+        let player = Vec3::new(2.0, 1.0, 0.0);
+        for _ in 0..((WARDEN_EMERGE_TIME / (1.0 / 60.0)) as i32 + 5) {
+            es.update(1.0 / 60.0, player, floor, |_| false, |_| false, |_, _| None);
+        }
+        assert_eq!(es.mob_count(), 1, "the Warden is still present after emerging");
+        // Now feed a vibration to the NORTH (+x) and step — it should move toward it.
+        let start_x = es.mob_pos(0).x;
+        let vib = Vec3::new(15.0, 1.0, 0.0);
+        for _ in 0..60 {
+            es.update(1.0 / 60.0, player, floor, |_| false, |_| false, move |_, _| Some(vib));
+        }
+        assert!(es.mob_pos(0).x > start_x, "the Warden walks toward the vibration it heard");
+    }
+
+    #[test]
+    fn warden_digs_away_when_it_loses_the_trail() {
+        // No vibration AND the player stays out of hear range: past WARDEN_DIG_TIMEOUT the Warden
+        // despawns with no loot (it burrows back underground). A tall wall pens the Warden in so it
+        // can't beeline the far player and re-enter hear range before the timeout.
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Warden);
+        // Floor below y=1, plus a 2-tall wall at x>=2 the penned Warden (x≈0) can't cross.
+        let world = |p: IVec3| p.y < 1 || (p.x >= 2 && p.y >= 1 && p.y <= 2);
+        let far = Vec3::new(40.0, 1.0, 0.0); // > WARDEN_HEAR_RANGE, but < DESPAWN_RADIUS
+        let steps = ((WARDEN_EMERGE_TIME + WARDEN_DIG_TIMEOUT + 2.0) / (1.0 / 60.0)) as i32;
+        for _ in 0..steps {
+            es.update(1.0 / 60.0, far, world, |_| false, |_| false, |_, _| None);
+            if es.mob_count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(es.mob_count(), 0, "a Warden that loses the trail digs away");
+        // It left NO loot/XP behind (digging away is not a kill).
+        assert_eq!(es.count(), 0, "no loot or XP from a dig-away Warden");
     }
 }

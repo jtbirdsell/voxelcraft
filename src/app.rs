@@ -469,6 +469,11 @@ impl App {
             dt,
             state.environment.day_factor(),
         );
+        // U11: a sculk shriek this frame pulses Darkness onto the player (render effect deferred).
+        let dark = state.game.take_pending_darkness();
+        if dark > 0.0 {
+            state.player.apply_darkness(dark);
+        }
         for stack in collected.items {
             if let Some(leftover) = state.inventory.insert(stack) {
                 // Inventory full — drop the remainder back so items aren't vacuum-deleted.
@@ -1505,6 +1510,21 @@ impl ApplicationHandler for App {
             // moment to settle (M27 mob verification). Note: with the player within ~14 blocks and
             // line-of-sight, hostile species will already be in Chase/Attack in the logged tally —
             // that exercises the M28 AI rather than showing a neutral idle state.
+            // Debug: VOXELCRAFT_WARDEN=1 builds a small daylit platform high above the (deepened)
+            // surface and spawns a single Warden for a clean portrait (U11 verification).
+            if std::env::var("VOXELCRAFT_WARDEN").is_ok() {
+                for z in 20..=30 {
+                    for x in 2..=14 {
+                        game.set_block(&gpu, &renderer, IVec3::new(x, 159, z), block::STONE);
+                    }
+                }
+                game.spawn_mob(Vec3::new(8.0, 160.0, 24.0), crate::entity::Species::Warden);
+                // A couple of ticks to settle onto the platform (emerge keeps the Warden immobile).
+                for _ in 0..2 {
+                    let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0, 1.0);
+                }
+            }
+
             if std::env::var("VOXELCRAFT_MOBS").is_ok() {
                 for z in 20..=28 {
                     for x in 2..=20 {
@@ -1727,7 +1747,12 @@ impl ApplicationHandler for App {
             if std::env::var("VOXELCRAFT_AS_STATS").is_ok() {
                 crate::gfx::rt::log_as_stats(&gpu, &visible);
             }
-            let all = game.all_meshes();
+            let mut all = game.all_meshes();
+            // Include mobs/items/xp in the headless shot (the entity mesh was built above but the
+            // screenshot previously only drew chunk meshes — so mobs never appeared in shots).
+            if let Some(em) = &entity_mesh {
+                all.push(em);
+            }
             capture::screenshot(
                 &gpu,
                 &renderer,

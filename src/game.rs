@@ -95,6 +95,14 @@ const SCULK_CATALYST_RANGE: i32 = 8;
 /// How long a vibration lives so consumers (sensors / the Warden) can react over a short window.
 const VIBRATION_TTL: f32 = 0.6;
 
+/// U11 shrieker → Warden tuning. A shrieker only summons in the deep dark; it raises a warning level on
+/// a cooldown (so it doesn't tick every frame) and at the summon level spawns one Warden + pulses
+/// Darkness onto the player.
+const WARDEN_DEEP_Y: f32 = 36.0; // the player must be below this to wake a shrieker
+const SHRIEK_COOLDOWN: f32 = 1.5; // min seconds between warning increments
+const WARDEN_SUMMON_LEVEL: u8 = 4; // warnings needed to spawn a Warden (MC parity)
+const DARKNESS_PULSE: f32 = 8.0; // seconds of Darkness a single shriek applies to the player
+
 /// One in-flight sculk-spread charge (U10): a budget of conversions creeping out from a catalyst bloom.
 struct SculkCharge {
     pos: IVec3,
@@ -108,6 +116,17 @@ pub struct Vibration {
     pub pos: Vec3,
     pub freq: u8,
     ttl: f32,
+}
+
+/// The position of the most-recent live vibration in `vibrations` within `range` of `from` (or None).
+/// A free function so both `Game::nearest_vibration` and the entity-tick closure (which can't borrow
+/// `self` while `self.entities` is borrowed mut) share one search.
+fn nearest_vibration_in(vibrations: &[Vibration], from: Vec3, range: f32) -> Option<Vec3> {
+    vibrations
+        .iter()
+        .rev()
+        .find(|v| (v.pos - from).length() <= range)
+        .map(|v| v.pos)
 }
 
 /// Whether sculk spread may convert this block into sculk (exposed solid rock/ground, never bedrock,
@@ -373,6 +392,19 @@ pub struct Game {
     sculk_charges: VecDeque<SculkCharge>,
     /// U10 vibrations (game events) emitted recently, aged by TTL; heard by the Warden (U11).
     vibrations: Vec<Vibration>,
+
+    /// U11 footstep emitter: the previous camera position + a stride timer so a moving player emits a
+    /// periodic vibration the Warden can track (reduced: no sneak gate — see notes).
+    last_cam: Vec3,
+    step_timer: f32,
+    /// U11 shrieker→Warden warning. A shrieker hearing a vibration while the player is deep raises the
+    /// warning level (on a cooldown); at 4 it spawns a Warden near the shrieker, then resets.
+    warden_warning: u8,
+    warden_warn_pos: Option<Vec3>,
+    shriek_cd: f32,
+    /// U11 darkness the app drains into the Player after each update (a shrieker pulse). Read + cleared
+    /// via `take_pending_darkness` (Game can't reach the Player directly).
+    pending_darkness: f32,
 }
 
 impl Game {
@@ -440,6 +472,12 @@ impl Game {
             tick_rng: seed ^ 0x7A1C_9E37_55C0_1DEF,
             sculk_charges: VecDeque::new(),
             vibrations: Vec::new(),
+            last_cam: Vec3::ZERO,
+            step_timer: 0.0,
+            warden_warning: 0,
+            warden_warn_pos: None,
+            shriek_cd: 0.0,
+            pending_darkness: 0.0,
         }
     }
 
@@ -487,6 +525,20 @@ impl Game {
             v.ttl -= dt;
             v.ttl > 0.0
         });
+
+        // U11 footsteps: a moving player periodically emits a vibration the Warden can track. Emitted
+        // BEFORE the entity tick so the Warden hears it this frame. (Reduced: no sneak gate — Minecraft
+        // mutes sneaking; here every step is heard.) Skip the very first frame (last_cam unset).
+        self.shriek_cd = (self.shriek_cd - dt).max(0.0);
+        if self.last_cam != Vec3::ZERO {
+            let moved = (camera_pos - self.last_cam).length();
+            self.step_timer = (self.step_timer - dt).max(0.0);
+            if moved > 0.08 && self.step_timer <= 0.0 {
+                self.emit_vibration(camera_pos, 1); // freq 1 ≈ a step (MC)
+                self.step_timer = 0.3;
+            }
+        }
+        self.last_cam = camera_pos;
 
         // 1. Drain worker results.
         for result in self.pool.drain() {
@@ -662,12 +714,17 @@ impl Game {
         // P17: undead burn where it's daytime AND the cell is open to the sky (reuses the P16 sky-light
         // free fn against the same block_at; no self-borrow, so it coexists with the &mut entities tick).
         let top = WORLD_HEIGHT_CHUNKS * CHUNK_SIZE_I;
+        // U11: the Warden's vibration sense. We can't call `self.nearest_vibration` while `self.entities`
+        // is borrowed mut, so borrow the bus read-only up front and inline its body in the closure (it
+        // mirrors `nearest_vibration`: the most-recent live vibration within `range` of `from`).
+        let vibrations = &self.vibrations;
         let collected = self.entities.update(
             dt,
             camera_pos,
             |wp| block::is_solid(block_at(wp)),
             |wp| block_at(wp) == block::LAVA,
             |wp| day > 0.6 && sky_light(wp, top, &block_at) == 15,
+            |from, range| nearest_vibration_in(vibrations, from, range),
         );
 
         // Apply any creeper explosions: carve the crater, then add radial blast damage to the player.
@@ -692,10 +749,67 @@ impl Game {
         }
         self.step_sculk(gpu, renderer);
 
+        // U11: shriekers near a fresh vibration (while the player is deep) build a warning that
+        // eventually summons a Warden + inflicts Darkness. Runs AFTER all vibrations are emitted.
+        self.step_warden_shriek(camera_pos);
+
         // Feed the GPU voxel volume (ray-traced lighting) around the player.
         self.volume.update(gpu, &self.world, self.center);
 
         collected
+    }
+
+    /// U11 shrieker → Warden. When the player is deep underground, a sculk shrieker that has a live
+    /// vibration nearby "shrieks": on a cooldown it raises a warning level and pulses Darkness onto the
+    /// player. At WARDEN_SUMMON_LEVEL it spawns a Warden by the shrieker (unless one is already near) and
+    /// resets. Cheap: only runs when deep AND off cooldown, scanning a tiny radius per live vibration.
+    fn step_warden_shriek(&mut self, camera_pos: Vec3) {
+        // Only the deep dark summons the Warden; and only one shriek per cooldown window. Cheap gate:
+        // there must be a live vibration within shrieker-hearing range of the player at all.
+        if camera_pos.y >= WARDEN_DEEP_Y
+            || self.shriek_cd > 0.0
+            || self.nearest_vibration(camera_pos, WARDEN_DEEP_Y).is_none()
+        {
+            return;
+        }
+        // Don't pile on a second Warden if one is already prowling near the player.
+        if self.entities.warden_count() > 0 {
+            return;
+        }
+        const R: i32 = 6;
+        // Snapshot vibration positions (so the &self block_at scan doesn't conflict with the borrow).
+        let vib_cells: Vec<IVec3> = self.vibrations.iter().map(|v| v.pos.floor().as_ivec3()).collect();
+        let mut shrieker: Option<IVec3> = None;
+        'scan: for c in vib_cells {
+            for dy in -R..=R {
+                for dz in -R..=R {
+                    for dx in -R..=R {
+                        let p = c + IVec3::new(dx, dy, dz);
+                        if self.block_at(p) == block::SCULK_SHRIEKER {
+                            shrieker = Some(p);
+                            break 'scan;
+                        }
+                    }
+                }
+            }
+        }
+        let Some(sp) = shrieker else { return };
+        // A shriek fired: cooldown, raise the warning, pulse Darkness, remember where.
+        self.shriek_cd = SHRIEK_COOLDOWN;
+        self.warden_warning = self.warden_warning.saturating_add(1);
+        self.warden_warn_pos = Some(sp.as_vec3() + Vec3::splat(0.5));
+        self.pending_darkness = self.pending_darkness.max(DARKNESS_PULSE);
+        if self.warden_warning >= WARDEN_SUMMON_LEVEL {
+            // Reduced spawn placement: just above the shrieker (no full 3-air scan).
+            let pos = sp.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
+            self.entities.spawn_mob(pos, crate::entity::Species::Warden);
+            self.warden_warning = 0;
+        }
+    }
+
+    /// U11: the app drains this (a one-shot Darkness pulse from a shriek) into the Player after update.
+    pub fn take_pending_darkness(&mut self) -> f32 {
+        std::mem::take(&mut self.pending_darkness)
     }
 
     /// Carve a spherical crater of AIR (skipping bedrock) and return the radial blast damage the
@@ -1306,11 +1420,7 @@ impl Game {
 
     /// The position of the most recent live vibration within `range` of `from` (U11 Warden targeting).
     pub fn nearest_vibration(&self, from: Vec3, range: f32) -> Option<Vec3> {
-        self.vibrations
-            .iter()
-            .rev()
-            .find(|v| (v.pos - from).length() <= range)
-            .map(|v| v.pos)
+        nearest_vibration_in(&self.vibrations, from, range)
     }
 
     /// Whether a sculk catalyst sits within `r` blocks of `pos` (scanned on mob death; deaths are rare).
