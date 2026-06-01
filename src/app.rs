@@ -1057,6 +1057,16 @@ impl App {
             attack_charge,
             draw_charge,
             shield_charge,
+            {
+                // F3: a pulsing Darkness dim while the Warden's effect is on the player (eases out
+                // over the final second; throbs like Minecraft's Darkness).
+                let d = state.player.darkness;
+                if d > 0.0 {
+                    d.min(1.0) * (0.45 + 0.4 * (0.5 - 0.5 * (state.elapsed * 3.5).cos()))
+                } else {
+                    0.0
+                }
+            },
             debug_lines.as_deref(),
         );
         if let Screen::Chest(pos) = state.screen {
@@ -1708,6 +1718,7 @@ impl ApplicationHandler for App {
                 if survival_demo { 0.5 } else { 1.0 }, // attack_charge: show the cooldown bar in the demo
                 if survival_demo { 0.7 } else { 0.0 }, // draw_charge: show the bow-draw bar in the demo
                 if survival_demo { 1.0 } else { 0.0 }, // shield_charge: show the READY shield cue in the demo
+                if std::env::var("VOXELCRAFT_DARK").is_ok() { 0.7 } else { 0.0 }, // F3 Darkness demo
                 Some(&dbg),
             );
             let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();

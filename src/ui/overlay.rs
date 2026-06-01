@@ -719,11 +719,18 @@ pub fn build_ui(
     attack_charge: f32,
     draw_charge: f32,
     shield_charge: f32,
+    // F3: Warden Darkness intensity (0 = none, ~0.85 = near-black) — a pulsing full-screen dim.
+    darkness: f32,
     debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
     let sh = height as f32;
     let mut v = Vec::new();
+
+    // F3 Warden Darkness: a pulsing screen dim, drawn first so the HUD stays legible on top of it.
+    if darkness > 0.0 {
+        push_px_rect(&mut v, sw, sh, 0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, darkness.clamp(0.0, 0.9)]);
+    }
 
     // Crosshair.
     let white = [0.95, 0.95, 0.95, 0.85];
