@@ -906,6 +906,7 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         BIG_DRIPLEAF | SMALL_DRIPLEAF => [0.34, 0.55, 0.24],
         HANGING_ROOTS => [0.58, 0.44, 0.30],
         SPORE_BLOSSOM => [0.85, 0.40, 0.55],
+        SCULK_VEIN => [0.10, 0.16, 0.14],
         _ => [1.0, 0.0, 1.0],
     }
 }

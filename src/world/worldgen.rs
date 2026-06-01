@@ -84,6 +84,19 @@ enum Carve {
 /// Carved cells at or below this y flood with lava (deep lava lakes near bedrock).
 const LAVA_LEVEL: i32 = 8;
 
+// Large-feature reach budgets. A region-cell feature is seam-correct only when its `for_cells` reach
+// is at least the furthest any of its voxels extends from the cell origin — otherwise a chunk that the
+// feature overlaps but whose cell sweep doesn't reach the origin carves nothing, truncating the feature
+// at the chunk plane. `feature_reach_covers_full_span` machine-checks these against the walk geometry.
+const RAVINE_LEN_MIN: i32 = 50;
+const RAVINE_LEN_SPAN: u32 = 60; // segments = MIN + h%SPAN → up to 109
+const RAVINE_CELL: i32 = 128;
+const RAVINE_REACH: i32 = 176; // covers ~108 steps × 1.5/axis + half-width + rounding
+const VEIN_LEN_MIN: i32 = 10;
+const VEIN_LEN_SPAN: u32 = 10; // segments = MIN + h%SPAN → up to 19
+const VEIN_CELL: i32 = 80;
+const VEIN_REACH: i32 = 56; // covers ~18 steps × 2.5/axis + filler-ellipsoid radius
+
 /// U8 cave biome: drives underground decoration (dripstone clusters, lush moss/vines, deep-dark sculk).
 /// A pure function of (seed-independent) world position noise, so it's deterministic and chunk-local.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -427,7 +440,6 @@ impl Worldgen {
         stone_ore: BlockId,
         ds_ore: BlockId,
     ) {
-        let ds0 = self.deepslate_top(ex, ez); // ~constant over the blob's small xz footprint
         let r = radius.max(1);
         for dz in -r..=r {
             for dy in -r..=r {
@@ -452,7 +464,14 @@ impl Worldgen {
                     }
                     let (lxu, lyu, lzu) = (lx as usize, ly as usize, lz as usize);
                     if Self::is_ore_host(chunk.get(lxu, lyu, lzu)) {
-                        let ore = if (ey + dy) < ds0 { ds_ore } else { stone_ore };
+                        // Pick the variant per-voxel by the *column's* deepslate boundary (same rule
+                        // host_stone used), so a deepslate-variant ore never lands in stone-zone rock
+                        // (or vice-versa) where the boundary crosses the blob's footprint.
+                        let ore = if (ey + dy) < self.deepslate_top(ex + dx, ez + dz) {
+                            ds_ore
+                        } else {
+                            stone_ore
+                        };
                         chunk.set(lxu, lyu, lzu, ore);
                     }
                 }
@@ -499,7 +518,7 @@ impl Worldgen {
         raw_block: BlockId,
     ) {
         let (ox, oy, oz) = (origin.x, origin.y, origin.z);
-        let len = 10 + (h % 10) as i32; // 10..=19 segments
+        let len = VEIN_LEN_MIN + (h % VEIN_LEN_SPAN) as i32; // up to 19 segments
         let ang = (h >> 4) as f32 / (1u32 << 28) as f32 * std::f32::consts::TAU;
         let (sx, sz) = (ang.cos() * 2.0, ang.sin() * 2.0);
         let (mut fx, mut fy, mut fz) = (ex as f32, ey as f32, ez as f32);
@@ -567,12 +586,12 @@ impl Worldgen {
         // 1.18 large ore veins (rare, big).
         let (ox, oy, oz) = (origin.x, origin.y, origin.z);
         let _ = (ox, oy, oz);
-        self.for_cells(origin, 0xC0FF_5E1, 80, 40, |ex, ey, ez, h| {
+        self.for_cells(origin, 0xC0FF_5E1, VEIN_CELL, VEIN_REACH, |ex, ey, ez, h| {
             if (18..52).contains(&ey) && h % 100 < 35 {
                 self.stamp_vein(chunk, origin, ex, ey, ez, h, COPPER_ORE, DEEPSLATE_COPPER_ORE, GRANITE, RAW_COPPER_BLOCK);
             }
         });
-        self.for_cells(origin, 0x1207_5E1, 80, 40, |ex, ey, ez, h| {
+        self.for_cells(origin, 0x1207_5E1, VEIN_CELL, VEIN_REACH, |ex, ey, ez, h| {
             if (3..18).contains(&ey) && h % 100 < 28 {
                 self.stamp_vein(chunk, origin, ex, ey, ez, h, IRON_ORE, DEEPSLATE_IRON_ORE, TUFF, RAW_IRON_BLOCK);
             }
@@ -845,7 +864,10 @@ impl Worldgen {
 
     /// Place ravines (rare, long) via the region-cell engine.
     fn place_ravines(&self, chunk: &mut Chunk, origin: IVec3) {
-        self.for_cells(origin, 0x2A1_DE5, 128, 64, |ex, ey, ez, h| {
+        // reach must cover the ravine's full reach from its origin: up to (len-1)≈108 steps × 1.5/step
+        // + half-width + rounding ≈ 165 blocks. Under-reaching truncates long ravines at chunk seams.
+        // `carve_ravine` early-outs keep the wider cell sweep cheap for non-overlapping ravines.
+        self.for_cells(origin, 0x2A1_DE5, RAVINE_CELL, RAVINE_REACH, |ex, ey, ez, h| {
             if h % 100 < 22 {
                 self.carve_ravine(chunk, origin, ex, ey, ez, h);
             }
@@ -857,24 +879,38 @@ impl Worldgen {
     /// surface. Only solid rock is carved; fills follow `carve_fill` (lava/water/air). Clipped.
     fn carve_ravine(&self, chunk: &mut Chunk, origin: IVec3, ex: i32, ey: i32, ez: i32, h: u32) {
         let (ox, oy, oz) = (origin.x, origin.y, origin.z);
-        let len = 50 + (h % 60) as i32;
+        let len = RAVINE_LEN_MIN + (h % RAVINE_LEN_SPAN) as i32;
         let ang = (h >> 4) as f32 / (1u32 << 28) as f32 * std::f32::consts::TAU;
         let (sx, sz) = (ang.cos(), ang.sin());
         let bottom = (ey - (20 + (h % 16) as i32)).max(3); // chasm floor, never into bedrock
+        // Whole-ravine vertical early-out: every carved cell lies in [bottom, ey+4], so a ravine whose
+        // span can't reach this chunk's Y range does no work (cheap with the now-wider cell sweep).
+        if ey + 4 < oy || bottom >= oy + CHUNK_SIZE_I {
+            return;
+        }
         let (mut fx, mut fz) = (ex as f32, ez as f32);
         for i in 0..len {
             let (px, pz) = (fx.round() as i32, fz.round() as i32);
+            // Advance the centerline up-front so every early-`continue` below stays on the same path.
+            fx += sx + ((hash3(h as u64 ^ 0x5A1, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
+            fz += sz + ((hash3(h as u64 ^ 0x5A2, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
             // Half-width pinches toward both ends via a sine envelope (1.5..3.0).
             let frac = i as f32 / len as f32;
             let env = (frac * std::f32::consts::PI).sin(); // 0 at the ends, 1 in the middle
             let hw = (1.5 + 1.5 * env) as i32; // 1..3 cells of horizontal half-width
+            // Cheap skip: this step's cross-section is entirely outside this chunk in x/z.
+            if px + hw < ox
+                || px - hw >= ox + CHUNK_SIZE_I
+                || pz + hw < oz
+                || pz - hw >= oz + CHUNK_SIZE_I
+            {
+                continue;
+            }
             // Top: allow it to open at the surface (but the column's top skin stays; carve_caves-style
             // bound is height-1 elsewhere — here we deliberately breach to `surface-1` for drama).
             let surf = self.height(px, pz);
             let top = (surf - 1).min(ey + 4);
             if top < bottom {
-                fx += sx + ((hash3(h as u64 ^ 0x5A1, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
-                fz += sz + ((hash3(h as u64 ^ 0x5A2, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
                 continue;
             }
             for ddz in -hw..=hw {
@@ -912,8 +948,6 @@ impl Worldgen {
                     }
                 }
             }
-            fx += sx + ((hash3(h as u64 ^ 0x5A1, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
-            fz += sz + ((hash3(h as u64 ^ 0x5A2, i, 0, 0) & 0xf) as f32 / 15.0 - 0.5);
         }
     }
 
@@ -1509,6 +1543,30 @@ mod tests {
         // Stronger: regenerating the same neighbor yields identical data.
         let right2 = wg.generate_chunk(IVec3::new(1, 2, 0));
         assert_eq!(right.blocks, right2.blocks);
+    }
+
+    /// F4 regression: a region-cell feature's `for_cells` reach must cover the furthest its voxels can
+    /// extend from the cell origin, or chunks it overlaps but doesn't enumerate carve nothing → the
+    /// feature is sheared off flat at the chunk plane. Guards the ravine + large-vein reach budgets
+    /// against anyone bumping a length without bumping the matching reach.
+    #[test]
+    fn feature_reach_covers_full_span() {
+        // Ravine: walks (len-1) centerline steps of <= 1.0 (cos/sin) + 0.5 (jitter) per axis, then a
+        // half-width-3 cross-section; the centerline is rounded (≤ +0.5).
+        let ravine_steps = RAVINE_LEN_MIN + RAVINE_LEN_SPAN as i32 - 1 - 1; // max len, minus the last step
+        let ravine_span = (ravine_steps as f32 * 1.5).ceil() as i32 + 3 + 1;
+        assert!(
+            RAVINE_REACH >= ravine_span,
+            "ravine reach {RAVINE_REACH} < span {ravine_span}: long ravines truncate at chunk seams"
+        );
+        // Large vein: (len-1) steps of <= 2.0 (cos/sin × 2) + 0.5 (jitter) per axis, then a filler
+        // ellipsoid of radius up to 4 (3 + sh%2).
+        let vein_steps = VEIN_LEN_MIN + VEIN_LEN_SPAN as i32 - 1 - 1;
+        let vein_span = (vein_steps as f32 * 2.5).ceil() as i32 + 4 + 1;
+        assert!(
+            VEIN_REACH >= vein_span,
+            "vein reach {VEIN_REACH} < span {vein_span}: large veins clip at chunk seams"
+        );
     }
 
     /// U1 (deepening): sea level rose to 96 (more underground), terrain+canopy never pierces the

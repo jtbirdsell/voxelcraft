@@ -58,6 +58,7 @@ const CREEPER_FUSE: f32 = 1.5;
 const CREEPER_RADIUS: f32 = 3.0;
 // U11 Warden tuning (a blind, vibration-hunting boss).
 const WARDEN_HEAR_RANGE: f32 = 24.0; // hears the most-recent vibration within this radius
+const WARDEN_TARGET_STALE: f32 = 2.5; // seconds of silence after which a cold vibration trail is dropped (re-hunt the player)
 const WARDEN_DIG_TIMEOUT: f32 = 12.0; // seconds of silence (and no nearby player) → it digs away
 const WARDEN_SPEED: f32 = 3.2; // blind-pursuit walk speed
 const WARDEN_EMERGE_TIME: f32 = 2.5; // rise-from-ground: immobile + invulnerable while >0
@@ -969,6 +970,11 @@ impl Entities {
                             m.no_vib = 0.0;
                         } else {
                             m.no_vib += dt;
+                            // Trail went cold: drop the stale vibration so pursuit falls back to the
+                            // player (otherwise it parks on the last-heard spot forever).
+                            if m.no_vib > WARDEN_TARGET_STALE {
+                                m.warden_target = None;
+                            }
                         }
                         if m.emerge > 0.0 {
                             // Rising from the ground: hold position (gravity only), invulnerable.
@@ -2264,5 +2270,38 @@ mod tests {
         assert_eq!(es.mob_count(), 0, "a Warden that loses the trail digs away");
         // It left NO loot/XP behind (digging away is not a kill).
         assert_eq!(es.count(), 0, "no loot or XP from a dig-away Warden");
+    }
+
+    #[test]
+    fn warden_rehunts_player_when_the_trail_goes_cold() {
+        // C1 regression: a Warden that has heard a vibration must not cling to that spot forever. Once
+        // the trail goes cold (no fresh vibration for WARDEN_TARGET_STALE) it falls back to advancing on
+        // a still-in-range player rather than parking on the stale position.
+        let mut es = Entities::new();
+        es.spawn_mob(Vec3::new(0.0, 1.0, 0.0), Species::Warden);
+        let floor = |p: IVec3| p.y < 1; // flat ground everywhere, no walls
+        let player = Vec3::new(-12.0, 1.0, 0.0); // within hear range, on the -x side
+        // Emerge (no vibration; player close so no dig-away).
+        for _ in 0..((WARDEN_EMERGE_TIME / (1.0 / 60.0)) as i32 + 2) {
+            es.update(1.0 / 60.0, player, floor, |_| false, |_| false, |_, _| None);
+        }
+        // Phase 1: a +x vibration lures it east, away from the player.
+        let vib = Vec3::new(15.0, 1.0, 0.0);
+        for _ in 0..60 {
+            es.update(1.0 / 60.0, player, floor, |_| false, |_| false, move |_, _| Some(vib));
+        }
+        let lured_x = es.mob_pos(0).x;
+        assert!(lured_x > 0.5, "the Warden should have chased the +x vibration (x={lured_x})");
+        // Phase 2: silence. After the stale window it reverses and closes on the -x player.
+        for _ in 0..((WARDEN_TARGET_STALE / (1.0 / 60.0)) as i32 + 420) {
+            es.update(1.0 / 60.0, player, floor, |_| false, |_| false, |_, _| None);
+        }
+        assert_eq!(es.mob_count(), 1, "the in-range player keeps the Warden from digging away");
+        let end = es.mob_pos(0);
+        assert!(
+            (end - player).length() < 5.0,
+            "a cold-trail Warden should re-hunt the in-range player, not park on the stale +x spot \
+             (lured to x={lured_x}, ended at {end:?})"
+        );
     }
 }

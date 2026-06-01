@@ -102,8 +102,10 @@ const VIBRATION_TTL: f32 = 0.6;
 /// a cooldown (so it doesn't tick every frame) and at the summon level spawns one Warden + pulses
 /// Darkness onto the player.
 const WARDEN_DEEP_Y: f32 = 36.0; // the player must be below this to wake a shrieker
+const SHRIEKER_HEAR_RANGE: f32 = 16.0; // a shrieker only reacts to vibrations within this radius of the player
 const SHRIEK_COOLDOWN: f32 = 1.5; // min seconds between warning increments
 const WARDEN_SUMMON_LEVEL: u8 = 4; // warnings needed to spawn a Warden (MC parity)
+const WARDEN_WARN_DECAY: f32 = 30.0; // seconds without a shriek before the warning level drops by one (MC parity)
 const DARKNESS_PULSE: f32 = 8.0; // seconds of Darkness a single shriek applies to the player
 
 /// One in-flight sculk-spread charge (U10): a budget of conversions creeping out from a catalyst bloom.
@@ -117,6 +119,9 @@ struct SculkCharge {
 #[derive(Clone, Copy)]
 pub struct Vibration {
     pub pos: Vec3,
+    /// MC vibration frequency class (footstep, break, …). Reserved for sculk-sensor frequency
+    /// filtering; carried on the bus but not yet consumed.
+    #[allow(dead_code)]
     pub freq: u8,
     ttl: f32,
 }
@@ -130,6 +135,14 @@ fn nearest_vibration_in(vibrations: &[Vibration], from: Vec3, range: f32) -> Opt
         .rev()
         .find(|v| (v.pos - from).length() <= range)
         .map(|v| v.pos)
+}
+
+/// The cell directly under a player's *feet* — the block they're standing on. `feet` is the player
+/// position (collision-box bottom), NOT the eye. The 0.1 margin reaches just below the feet so a
+/// player resting on a block's top surface resolves to that block. Used by `step_dripleaf`.
+#[inline]
+fn cell_underfoot(feet: Vec3) -> IVec3 {
+    IVec3::new(feet.x.floor() as i32, (feet.y - 0.1).floor() as i32, feet.z.floor() as i32)
 }
 
 /// Whether sculk spread may convert this block into sculk (exposed solid rock/ground, never bedrock,
@@ -403,7 +416,7 @@ pub struct Game {
     /// U11 shrieker→Warden warning. A shrieker hearing a vibration while the player is deep raises the
     /// warning level (on a cooldown); at 4 it spawns a Warden near the shrieker, then resets.
     warden_warning: u8,
-    warden_warn_pos: Option<Vec3>,
+    warden_warn_decay: f32,
     shriek_cd: f32,
     /// U11 darkness the app drains into the Player after each update (a shrieker pulse). Read + cleared
     /// via `take_pending_darkness` (Game can't reach the Player directly).
@@ -483,7 +496,7 @@ impl Game {
             last_cam: Vec3::ZERO,
             step_timer: 0.0,
             warden_warning: 0,
-            warden_warn_pos: None,
+            warden_warn_decay: 0.0,
             shriek_cd: 0.0,
             pending_darkness: 0.0,
             dripleaf_on: None,
@@ -540,6 +553,15 @@ impl Game {
         // BEFORE the entity tick so the Warden hears it this frame. (Reduced: no sneak gate — Minecraft
         // mutes sneaking; here every step is heard.) Skip the very first frame (last_cam unset).
         self.shriek_cd = (self.shriek_cd - dt).max(0.0);
+        // U11: the warning level cools off if no shrieks happen for a while, so leaving the deep dark
+        // and returning later doesn't let a single shriek instantly hit the summon level.
+        if self.warden_warning > 0 {
+            self.warden_warn_decay -= dt;
+            if self.warden_warn_decay <= 0.0 {
+                self.warden_warning -= 1;
+                self.warden_warn_decay = WARDEN_WARN_DECAY;
+            }
+        }
         if self.last_cam != Vec3::ZERO {
             let moved = (camera_pos - self.last_cam).length();
             self.step_timer = (self.step_timer - dt).max(0.0);
@@ -781,7 +803,7 @@ impl Game {
         // there must be a live vibration within shrieker-hearing range of the player at all.
         if camera_pos.y >= WARDEN_DEEP_Y
             || self.shriek_cd > 0.0
-            || self.nearest_vibration(camera_pos, WARDEN_DEEP_Y).is_none()
+            || self.nearest_vibration(camera_pos, SHRIEKER_HEAR_RANGE).is_none()
         {
             return;
         }
@@ -810,7 +832,7 @@ impl Game {
         // A shriek fired: cooldown, raise the warning, pulse Darkness, remember where.
         self.shriek_cd = SHRIEK_COOLDOWN;
         self.warden_warning = self.warden_warning.saturating_add(1);
-        self.warden_warn_pos = Some(sp.as_vec3() + Vec3::splat(0.5));
+        self.warden_warn_decay = WARDEN_WARN_DECAY; // restart the cooldown each shriek
         self.pending_darkness = self.pending_darkness.max(DARKNESS_PULSE);
         if self.warden_warning >= WARDEN_SUMMON_LEVEL {
             // Reduced spawn placement: just above the shrieker (no full 3-air scan).
@@ -1524,12 +1546,8 @@ impl Game {
     /// F2: tilt the big dripleaf the player stands on — a stage each DRIPLEAF_TILT_DELAY until it folds
     /// flat (no collision → they fall through); spring it back upright the moment they step off.
     fn step_dripleaf(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, camera_pos: Vec3, dt: f32) {
-        let feet_y = camera_pos.y - crate::player::EYE_HEIGHT;
-        let stand = IVec3::new(
-            camera_pos.x.floor() as i32,
-            (feet_y - 0.1).floor() as i32,
-            camera_pos.z.floor() as i32,
-        );
+        // `camera_pos` here is the player *feet* position (see `Game::update`'s caller), not the eye.
+        let stand = cell_underfoot(camera_pos);
         let on_leaf = self.block_at(stand) == block::BIG_DRIPLEAF;
         // Left the leaf we were on → spring it back upright.
         if let Some(prev) = self.dripleaf_on {
@@ -1985,6 +2003,22 @@ mod furnace_tests {
     use super::*;
     use crate::item::ItemStack;
     use std::collections::HashMap;
+
+    /// F4 regression: a player standing on a big dripleaf (feet resting on its stable-leaf top) must
+    /// resolve to the dripleaf's own cell. The original bug subtracted EYE_HEIGHT from a position that
+    /// is already the feet, targeting a cell ~1.6 blocks below and leaving the leaf forever untilted.
+    #[test]
+    fn dripleaf_cell_underfoot_is_the_leaf() {
+        let dy = 40; // arbitrary dripleaf cell Y
+                     // Stable big-dripleaf leaf-top surface is at +0.8125 within the cell.
+        let feet = Vec3::new(8.3, dy as f32 + 0.8125, 5.7);
+        assert_eq!(cell_underfoot(feet), IVec3::new(8, dy, 5));
+        // And on a tilted (lower) leaf-top the player is still over the same cell.
+        let feet_tilt = Vec3::new(8.3, dy as f32 + 0.625, 5.7);
+        assert_eq!(cell_underfoot(feet_tilt), IVec3::new(8, dy, 5));
+        // Negative coords floor toward -inf (regression guard for the index math).
+        assert_eq!(cell_underfoot(Vec3::new(-5.7, dy as f32 + 0.8125, -0.2)), IVec3::new(-6, dy, -1));
+    }
 
     #[test]
     fn u9_growth_decisions() {
