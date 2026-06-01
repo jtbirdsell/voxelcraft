@@ -33,6 +33,12 @@ pub struct Level {
     pub level: u32,
 }
 
+/// One chest's persisted contents (P3), saved in the chest section of `save_state.bin` (v4+).
+pub struct ChestSave {
+    pub pos: IVec3,
+    pub slots: Vec<Option<ItemStack>>,
+}
+
 /// One furnace's persisted contents (M24), saved in the container section of `save_state.bin`.
 /// Plain primitives + `ItemStack` so persistence stays decoupled from `game::FurnaceState`.
 pub struct FurnaceSave {
@@ -144,13 +150,19 @@ fn rd_slot(d: &[u8], o: &mut usize) -> Option<ItemStack> {
     })
 }
 
-/// Write the player inventory + furnace containers to `save_state.bin` (VCIV v3). Sparse inventory;
-/// the furnace section is length-prefixed and appended, so a v2 loader simply ignores it.
-pub fn save_state(dir: &Path, inv: &Inventory, furnaces: &[FurnaceSave]) -> std::io::Result<()> {
+/// Write the player inventory + furnace + chest containers to `save_state.bin` (VCIV v4). Sparse
+/// inventory; each container section is length-prefixed and appended, so an older loader simply
+/// stops after the sections it knows.
+pub fn save_state(
+    dir: &Path,
+    inv: &Inventory,
+    furnaces: &[FurnaceSave],
+    chests: &[ChestSave],
+) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     let mut b = Vec::new();
     b.extend_from_slice(&INV_MAGIC.to_le_bytes());
-    b.push(3); // version 3: v2 inventory + a furnace container section
+    b.push(4); // version 4: v3 (inventory + furnaces) + a chest container section
     b.push(inv.selected as u8);
     b.push(inv.creative as u8);
     let filled: Vec<(usize, ItemStack)> = inv
@@ -180,22 +192,37 @@ pub fn save_state(dir: &Path, inv: &Inventory, furnaces: &[FurnaceSave]) -> std:
         wr_slot(&mut b, f.fuel);
         wr_slot(&mut b, f.output);
     }
+    // Chest container section (v4+): pos + slot count + each slot.
+    b.extend_from_slice(&(chests.len() as u32).to_le_bytes());
+    for c in chests {
+        b.extend_from_slice(&c.pos.x.to_le_bytes());
+        b.extend_from_slice(&c.pos.y.to_le_bytes());
+        b.extend_from_slice(&c.pos.z.to_le_bytes());
+        b.push(c.slots.len() as u8);
+        for &s in &c.slots {
+            wr_slot(&mut b, s);
+        }
+    }
     fs::write(dir.join("save_state.bin"), b)
 }
 
-/// Load the inventory + furnace containers, or a fresh inventory if absent/corrupt.
-pub fn load_state(dir: &Path, creative_default: bool) -> (Inventory, Vec<FurnaceSave>) {
+/// Load the inventory + furnace + chest containers, or a fresh inventory if absent/corrupt.
+pub fn load_state(
+    dir: &Path,
+    creative_default: bool,
+) -> (Inventory, Vec<FurnaceSave>, Vec<ChestSave>) {
     let mut inv = Inventory::new(creative_default);
     let mut furnaces = Vec::new();
+    let mut chests = Vec::new();
     let Ok(d) = fs::read(dir.join("save_state.bin")) else {
-        return (inv, furnaces);
+        return (inv, furnaces, chests);
     };
     if d.len() < 8 || rd_u32(&d, 0) != INV_MAGIC {
-        return (inv, furnaces);
+        return (inv, furnaces, chests);
     }
     let version = d[4];
-    if !(1..=3).contains(&version) {
-        return (inv, furnaces); // unknown version -> fresh inventory
+    if !(1..=4).contains(&version) {
+        return (inv, furnaces, chests); // unknown version -> fresh inventory
     }
     inv.selected = (d[5] as usize).min(HOTBAR - 1);
     inv.creative = d[6] != 0;
@@ -250,8 +277,26 @@ pub fn load_state(dir: &Path, creative_default: bool) -> (Inventory, Vec<Furnace
                 cook_item,
             });
         }
+        // Chest container section (v4+), immediately after the furnaces.
+        if version >= 4 && o + 4 <= d.len() {
+            let ccount = rd_u32(&d, o) as usize;
+            o += 4;
+            for _ in 0..ccount {
+                if o + 13 > d.len() {
+                    break; // pos(12) + nslots(1)
+                }
+                let pos = IVec3::new(rd_i32(&d, o), rd_i32(&d, o + 4), rd_i32(&d, o + 8));
+                let nslots = d[o + 12] as usize;
+                o += 13;
+                let mut slots = Vec::with_capacity(nslots);
+                for _ in 0..nslots {
+                    slots.push(rd_slot(&d, &mut o));
+                }
+                chests.push(ChestSave { pos, slots });
+            }
+        }
     }
-    (inv, furnaces)
+    (inv, furnaces, chests)
 }
 
 /// Migrate legacy block ids to the current id + block-state scheme.
@@ -552,9 +597,16 @@ mod tests {
             cook_progress: 2.25,
             cook_item: crate::block::IRON_ORE,
         }];
-        save_state(&dir, &inv, &furnaces).unwrap();
+        let mut chest_slots = vec![None; crate::container::CHEST_SLOTS];
+        chest_slots[0] = Some(ItemStack::new(crate::block::DIAMOND_ORE, 7));
+        chest_slots[26] = Some(ItemStack::new(crate::item::GOLD_INGOT, 12));
+        let chests = vec![ChestSave {
+            pos: IVec3::new(-8, 64, 3),
+            slots: chest_slots,
+        }];
+        save_state(&dir, &inv, &furnaces, &chests).unwrap();
 
-        let (loaded, lf) = load_state(&dir, true);
+        let (loaded, lf, lc) = load_state(&dir, true);
         assert_eq!(loaded.selected, 3);
         assert!(!loaded.creative);
         assert_eq!(loaded.slots[0].unwrap().count, 64);
@@ -568,6 +620,14 @@ mod tests {
         assert_eq!(f.output.unwrap().item, crate::item::IRON_INGOT);
         assert!((f.cook_progress - 2.25).abs() < 1e-6);
         assert_eq!(f.cook_item, crate::block::IRON_ORE);
+        // Chest container round-trips.
+        assert_eq!(lc.len(), 1);
+        let c = &lc[0];
+        assert_eq!(c.pos, IVec3::new(-8, 64, 3));
+        assert_eq!(c.slots.len(), crate::container::CHEST_SLOTS);
+        assert_eq!(c.slots[0].unwrap().item, crate::block::DIAMOND_ORE);
+        assert_eq!(c.slots[0].unwrap().count, 7);
+        assert_eq!(c.slots[26].unwrap().item, crate::item::GOLD_INGOT);
 
         let _ = fs::remove_dir_all(&dir);
     }

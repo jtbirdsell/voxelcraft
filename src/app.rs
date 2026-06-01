@@ -43,6 +43,8 @@ enum Screen {
     Crafting,
     /// A furnace's GUI, tagged with the furnace block position (its contents live in `Game`).
     Furnace(IVec3),
+    /// A chest's GUI, tagged with the chest block position (its contents live in `Game`).
+    Chest(IVec3),
 }
 
 impl Screen {
@@ -148,7 +150,12 @@ impl App {
             if let Some(h) = inv.held.take() {
                 let _ = inv.insert(h);
             }
-            if let Err(e) = persistence::save_state(&dir, &inv, &state.game.furnaces_to_save()) {
+            if let Err(e) = persistence::save_state(
+                &dir,
+                &inv,
+                &state.game.furnaces_to_save(),
+                &state.game.chests_to_save(),
+            ) {
                 log::error!("failed to save state: {e}");
             }
         }
@@ -191,6 +198,19 @@ impl App {
         if let Some(state) = &mut self.state {
             state.game.furnace_mut(pos); // ensure a state exists to render/tick
             state.screen = Screen::Furnace(pos);
+            state.input = Input::default();
+            state.cursor = (
+                state.gpu.config.width as f32 * 0.5,
+                state.gpu.config.height as f32 * 0.5,
+            );
+        }
+        self.set_grab(false);
+    }
+
+    fn open_chest(&mut self, pos: IVec3) {
+        if let Some(state) = &mut self.state {
+            state.game.chest_mut(pos); // ensure a container exists to render
+            state.screen = Screen::Chest(pos);
             state.input = Input::default();
             state.cursor = (
                 state.gpu.config.width as f32 * 0.5,
@@ -248,6 +268,19 @@ impl App {
                         }
                         overlay::FurnaceSlot::Output => take_furnace_output(&mut held, &mut f.output),
                     }
+                    state.inventory.held = held;
+                    return;
+                }
+            }
+            return;
+        }
+        // Chest screen: move items between the held cursor stack and the 27 container slots.
+        if let Screen::Chest(pos) = state.screen {
+            let mut held = state.inventory.held;
+            let c = state.game.chest_mut(pos);
+            for (i, x, y) in overlay::chest_slot_rects(w, h) {
+                if hit(x, y) {
+                    c.click(i, &mut held, right);
                     state.inventory.held = held;
                     return;
                 }
@@ -525,6 +558,9 @@ impl App {
                 } else if targeted == block::FURNACE {
                     // Right-clicking a furnace opens its smelting screen.
                     state.pending_open = Some(Screen::Furnace(hit.block));
+                } else if targeted == block::CHEST {
+                    // Right-clicking a chest opens its 27-slot storage screen.
+                    state.pending_open = Some(Screen::Chest(hit.block));
                 } else {
                     let place = hit.block + hit.normal;
                     let id = state.inventory.selected_block();
@@ -645,7 +681,20 @@ impl App {
             state.player.xp_fraction(),
             debug_lines.as_deref(),
         );
-        if let Screen::Furnace(pos) = state.screen {
+        if let Screen::Chest(pos) = state.screen {
+            let slots = state
+                .game
+                .chest(pos)
+                .map(|c| c.slots.clone())
+                .unwrap_or_else(|| vec![None; crate::container::CHEST_SLOTS]);
+            ui.extend(overlay::build_chest_screen(
+                state.gpu.config.width,
+                state.gpu.config.height,
+                &state.inventory,
+                &slots,
+                state.cursor,
+            ));
+        } else if let Screen::Furnace(pos) = state.screen {
             let f = state.game.furnace(pos);
             let burn_frac = f.map_or(0.0, |f| if f.burn_max > 0.0 { f.burn_remaining / f.burn_max } else { 0.0 });
             let cook_frac = f.map_or(0.0, |f| f.cook_progress / smelting::SMELT_TIME);
@@ -845,10 +894,16 @@ pub fn persist_selftest() {
         xp: 7.0,
         level: 3,
     };
-    persistence::save_state(&dir, &inv, &furnaces).unwrap();
+    let mut chest_slots = vec![None; crate::container::CHEST_SLOTS];
+    chest_slots[2] = Some(item::ItemStack::new(block::DIAMOND_ORE, 9));
+    let chests = vec![persistence::ChestSave {
+        pos: IVec3::new(-5, 70, 8),
+        slots: chest_slots,
+    }];
+    persistence::save_state(&dir, &inv, &furnaces, &chests).unwrap();
     persistence::save_level(&dir, &level).unwrap();
 
-    let (linv, lf) = persistence::load_state(&dir, true);
+    let (linv, lf, lc) = persistence::load_state(&dir, true);
     let ll = persistence::load_level(&dir).unwrap();
     let ok = linv.slots[5].map(|s| s.durability) == Some(777)
         && linv.slots[36].map(|s| s.item) == Some(item::armor_id(3, 0))
@@ -856,6 +911,9 @@ pub fn persist_selftest() {
         && lf[0].output.map(|s| s.item) == Some(item::IRON_INGOT)
         && (lf[0].cook_progress - 2.0).abs() < 1e-6
         && lf[0].cook_item == block::IRON_ORE
+        && lc.len() == 1
+        && lc[0].pos == IVec3::new(-5, 70, 8)
+        && lc[0].slots[2].map(|s| s.item) == Some(block::DIAMOND_ORE)
         && (ll.health - 11.0).abs() < 1e-6
         && (ll.air - 5.0).abs() < 1e-6
         && ll.level == 3;
@@ -1220,6 +1278,21 @@ impl ApplicationHandler for App {
                     0.45,
                     (700.0, 360.0),
                 ));
+            } else if screen_env == "chest" {
+                // A chest holding a few sample stacks.
+                let mut cslots = vec![None; crate::container::CHEST_SLOTS];
+                cslots[0] = Some(item::ItemStack::new(item::item_of_block(block::DIAMOND_ORE), 12));
+                cslots[1] = Some(item::ItemStack::new(item::IRON_INGOT, 30));
+                cslots[4] = Some(item::ItemStack::new(item::item_of_block(block::OBSIDIAN), 64));
+                cslots[10] = Some(item::ItemStack::new(item::DIAMOND_PICKAXE, 1));
+                cslots[18] = Some(item::ItemStack::new(item::item_of_block(block::GLOWSTONE), 5));
+                ui.extend(overlay::build_chest_screen(
+                    gpu.config.width,
+                    gpu.config.height,
+                    &shot_inv,
+                    &cslots,
+                    (640.0, 250.0),
+                ));
             }
             log::info!(
                 "Headless: {} chunks, {} meshes, {} visible",
@@ -1263,9 +1336,10 @@ impl ApplicationHandler for App {
             ),
         };
         let saved = persistence::load_chunks(&dir);
-        let (inventory, saved_furnaces) = persistence::load_state(&dir, flying);
+        let (inventory, saved_furnaces, saved_chests) = persistence::load_state(&dir, flying);
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
         game.restore_furnaces(saved_furnaces);
+        game.restore_chests(saved_chests);
         // VOXELCRAFT_GI_RAYS overrides the hemisphere GI sample count (default 8) — more samples =
         // less grain for DLSS-RR to denoise; the GPU has headroom. (M33-G9)
         if let Ok(n) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
@@ -1430,6 +1504,7 @@ impl ApplicationHandler for App {
                     match sc {
                         Screen::Crafting => self.open_crafting(),
                         Screen::Furnace(pos) => self.open_furnace(pos),
+                        Screen::Chest(pos) => self.open_chest(pos),
                         _ => {}
                     }
                 }

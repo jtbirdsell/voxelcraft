@@ -52,7 +52,7 @@ GL has no hardware RT (software DDA tracer only).
 | **Left-Ctrl** | Sprint (widens FOV) / fly boost |
 | **F** | Toggle fly / walk |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
-| **Right-click** | Place block, or open a crafting table / furnace |
+| **Right-click** | Place block, or open a crafting table / furnace / chest |
 | **Q** | Drop one of the selected item |
 | **1–9 / scroll** | Select hotbar slot |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
@@ -125,9 +125,12 @@ position, albedo + skylight) and an ACES tonemap.
   ores into **iron / gold ingots** (and cobblestone back to stone). Breaking a lit furnace spills it.
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
   screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities.
-- **Persistence**: edited chunks (LZ4), the level header, the full inventory + armor + tool durability,
-  **furnace contents** (mid-smelt state), and **player survival** (health/hunger/air/saturation/XP/level)
-  all round-trip across save/reload; older saves load forward-compatibly.
+- **Chests**: right-click a chest for a 27-slot storage screen (drag/drop against your inventory);
+  breaking a chest spills its contents. A generic `Container` so future storage blocks reuse it.
+- **Persistence**: edited chunks (LZ4 blocks **+ block-state**), the level header, the full inventory +
+  armor + tool durability, **furnace + chest contents**, and **player survival**
+  (health/hunger/air/saturation/XP/level) all round-trip across save/reload; older saves load
+  forward-compatibly.
 - **Survival depth**: health + hunger with saturation-fueled regen and starvation; fall damage;
   **swimming** (buoyancy + paddle up) with an **air/drowning** bubble meter; **lava contact damage**;
   **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.

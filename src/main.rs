@@ -18,7 +18,7 @@ mod world;
 // M33-G1 grouping shim: re-export each grouped submodule at the crate root so the existing
 // `crate::<module>` call sites keep resolving unchanged. New code can use the grouped paths
 // directly (e.g. `crate::gfx::camera`, `crate::world::worldgen`, `crate::gameplay::player`).
-pub(crate) use gameplay::{crafting, entity, item, player, raycast, smelting};
+pub(crate) use gameplay::{container, crafting, entity, item, player, raycast, smelting};
 pub(crate) use gfx::{
     camera, capture, device as gpu, dlss, environment, frame_gen, frustum, renderer, rt_probe,
     rt_spike, texture, voxel_volume,

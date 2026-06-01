@@ -185,6 +185,9 @@ pub struct Game {
     /// Furnaces the player has opened, keyed by block position; ticked by `step_furnaces`.
     furnaces: FxHashMap<IVec3, FurnaceState>,
 
+    /// Chests the player has opened/placed, keyed by block position (27-slot containers).
+    chests: FxHashMap<IVec3, crate::container::Container>,
+
     /// Natural-spawn cadence + a small RNG for spawn placement (M31).
     spawn_timer: f32,
     spawn_rng: u64,
@@ -247,6 +250,7 @@ impl Game {
             fluid_timer: 0.0,
             entities: Entities::new(),
             furnaces: FxHashMap::default(),
+            chests: FxHashMap::default(),
             spawn_timer: 0.0,
             spawn_rng: seed ^ 0x5FA1_2E37_9B1D_C0DE,
         }
@@ -649,6 +653,15 @@ impl Game {
                 }
             }
         }
+        // Breaking/replacing a chest spills its contents.
+        if old == block::CHEST && id != block::CHEST {
+            if let Some(c) = self.chests.remove(&wp) {
+                let center = wp.as_vec3() + Vec3::splat(0.5);
+                for stack in c.contents() {
+                    self.entities.spawn_item(center, stack);
+                }
+            }
+        }
 
         // Persist the edited chunk (kept resident in `saved`) and refresh its volume voxels.
         if let Some(arc) = self.world.chunks.get(&cpos) {
@@ -969,6 +982,43 @@ impl Game {
                     cook_item: f.cook_item,
                 },
             );
+        }
+    }
+
+    /// Chest container at `pos`, creating an empty 27-slot one (the player just opened/placed it).
+    pub fn chest_mut(&mut self, pos: IVec3) -> &mut crate::container::Container {
+        self.chests
+            .entry(pos)
+            .or_insert_with(|| crate::container::Container::new(crate::container::CHEST_SLOTS))
+    }
+
+    /// Read-only chest container at `pos` (None if never opened / already empty).
+    pub fn chest(&self, pos: IVec3) -> Option<&crate::container::Container> {
+        self.chests.get(&pos)
+    }
+
+    /// Snapshot non-empty chests for saving.
+    pub fn chests_to_save(&self) -> Vec<persistence::ChestSave> {
+        self.chests
+            .iter()
+            .filter(|(_, c)| !c.is_empty())
+            .map(|(&pos, c)| persistence::ChestSave {
+                pos,
+                slots: c.slots.clone(),
+            })
+            .collect()
+    }
+
+    /// Restore chests loaded from disk into the live map.
+    pub fn restore_chests(&mut self, saved: Vec<persistence::ChestSave>) {
+        for c in saved {
+            let mut container = crate::container::Container::new(crate::container::CHEST_SLOTS);
+            for (i, s) in c.slots.into_iter().enumerate() {
+                if i < container.slots.len() {
+                    container.slots[i] = s;
+                }
+            }
+            self.chests.insert(c.pos, container);
         }
     }
 

@@ -490,6 +490,101 @@ pub fn build_furnace_screen(
     v
 }
 
+/// The 27 chest slots (P3): a 3x9 grid above the player inventory, matching its 9 columns.
+/// Returns (slot_index, x_px, y_px); shared by rendering + click hit-testing so they can't drift.
+pub fn chest_slot_rects(width: u32, height: u32) -> Vec<(usize, f32, f32)> {
+    let step = INV_SLOT + 4.0;
+    let inv = inventory_slot_rects(width, height);
+    let ox = inv[0].1; // left column, aligned with the inventory grid
+    let top = inv[0].2 - 3.0 * step - 40.0; // above the main grid, leaving room for a title
+    let mut out = Vec::with_capacity(crate::container::CHEST_SLOTS);
+    for r in 0..3 {
+        for c in 0..9 {
+            out.push((r * 9 + c, ox + c as f32 * step, top + r as f32 * step));
+        }
+    }
+    out
+}
+
+/// Build the chest screen: a 3x9 container grid over the usual inventory grid, with the held stack
+/// and a hover tooltip. `slots` is the chest's contents (27 entries).
+pub fn build_chest_screen(
+    width: u32,
+    height: u32,
+    inv: &item::Inventory,
+    slots: &[Option<item::ItemStack>],
+    cursor: (f32, f32),
+) -> Vec<UiVertex> {
+    let sw = width as f32;
+    let sh = height as f32;
+    let mut v = Vec::new();
+    push_px_rect(&mut v, sw, sh, 0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.55]);
+
+    // Inventory grid (hover-highlighted), on its panel.
+    let rects = inventory_slot_rects(width, height);
+    let step = INV_SLOT + 4.0;
+    let (minx, miny) = (rects[0].1, rects[0].2);
+    let panel_w = 9.0 * step - 4.0;
+    let pad = 14.0;
+    let panel_h = rects[35].2 + INV_SLOT - miny;
+    push_px_rect(&mut v, sw, sh, minx - pad, miny - pad - 24.0, panel_w + 2.0 * pad, panel_h + 2.0 * pad + 24.0, [0.12, 0.12, 0.14, 0.97]);
+    push_text(&mut v, sw, sh, minx, miny - pad - 18.0, 2.0, "Inventory", [0.95, 0.95, 0.95, 1.0]);
+
+    let mut hovered: Option<usize> = None;
+    for &(slot_i, x, y) in &rects {
+        let hover = cursor.0 >= x && cursor.0 < x + INV_SLOT && cursor.1 >= y && cursor.1 < y + INV_SLOT;
+        if hover {
+            hovered = Some(slot_i);
+        }
+        let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.28, 0.28, 0.32, 1.0] };
+        push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
+        if let Some(stack) = inv.slots[slot_i] {
+            draw_stack(&mut v, sw, sh, x, y, stack);
+        }
+    }
+
+    // Chest grid on its own backing panel above the inventory.
+    let cslots = chest_slot_rects(width, height);
+    let (cminx, cminy) = (cslots[0].1, cslots[0].2);
+    let cpanel_h = cslots[cslots.len() - 1].2 + INV_SLOT - cminy;
+    push_px_rect(&mut v, sw, sh, cminx - pad, cminy - pad - 24.0, panel_w + 2.0 * pad, cpanel_h + 2.0 * pad + 24.0, [0.12, 0.12, 0.14, 0.97]);
+    push_text(&mut v, sw, sh, cminx, cminy - pad - 18.0, 2.0, "Chest", [0.95, 0.95, 0.95, 1.0]);
+    let mut chest_hover: Option<&str> = None;
+    for &(i, x, y) in &cslots {
+        let hover = cursor.0 >= x && cursor.0 < x + INV_SLOT && cursor.1 >= y && cursor.1 < y + INV_SLOT;
+        let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.28, 0.28, 0.32, 1.0] };
+        push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
+        if let Some(stack) = slots.get(i).copied().flatten() {
+            draw_stack(&mut v, sw, sh, x, y, stack);
+            if hover {
+                chest_hover = Some(item::item_name(stack.item));
+            }
+        }
+    }
+
+    // Held stack follows the cursor; else a hover tooltip (chest slot beats inventory slot).
+    if let Some(held) = inv.held {
+        let c = item::item_color(held.item);
+        let sz = INV_SLOT - 6.0;
+        let (hx, hy) = (cursor.0 - sz * 0.5, cursor.1 - sz * 0.5);
+        push_px_rect(&mut v, sw, sh, hx, hy, sz, sz, [c[0], c[1], c[2], 1.0]);
+        if held.count > 1 {
+            let label = format!("{}", held.count);
+            let tw = text_width(&label, 2.0);
+            push_text(&mut v, sw, sh, hx + sz - tw - 2.0, hy + sz - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
+        }
+        durability_bar(&mut v, sw, sh, hx - 4.0, hy, sz + 8.0, held);
+    } else {
+        let name = chest_hover.or_else(|| hovered.and_then(|i| inv.slots[i]).map(|s| item::item_name(s.item)));
+        if let Some(name) = name {
+            let tw = text_width(name, 2.0);
+            push_px_rect(&mut v, sw, sh, cursor.0 + 12.0, cursor.1 - 4.0, tw + 8.0, 22.0, [0.05, 0.05, 0.07, 0.92]);
+            push_text(&mut v, sw, sh, cursor.0 + 16.0, cursor.1, 2.0, name, [0.95, 0.95, 0.8, 1.0]);
+        }
+    }
+    v
+}
+
 /// A small wear bar at the bottom of a slot for a damaged tool (green → red); hidden when full.
 fn durability_bar(out: &mut Vec<UiVertex>, sw: f32, sh: f32, sx: f32, y: f32, slot: f32, stack: item::ItemStack) {
     if !item::is_tool(stack.item) {
