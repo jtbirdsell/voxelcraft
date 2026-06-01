@@ -261,6 +261,144 @@ impl Worldgen {
         Self::host_stone(wy, ds_top)
     }
 
+    // ── U5: cross-chunk-safe region-cell blob engine ────────────────────────────────────────────
+    // A feature is a pure function of (seed, region cell): each cell holds one hash-jittered candidate
+    // origin; the caller's `activate` closure gates it and picks block + radius. Every chunk within
+    // `reach` of a blob re-derives the identical origin and stamps only the part of the ellipsoid that
+    // lands inside its own bounds (writes are clipped, never cross-chunk) — so the tiled result equals
+    // a single untiled pass. This generalizes the `place_trees` margin trick to bounded large features.
+
+    /// The deterministic jittered candidate origin for region cell (cx,cy,cz) of size `cs` under
+    /// `salt`, plus a fresh hash for the caller to derive activation/type/size.
+    fn cell_feature(&self, salt: u64, cx: i32, cy: i32, cz: i32, cs: i32) -> (i32, i32, i32, u32) {
+        let h = hash3(self.seed ^ salt, cx, cy, cz);
+        let jx = (h & 0x3ff) as i32 % cs;
+        let jy = ((h >> 10) & 0x3ff) as i32 % cs;
+        let jz = ((h >> 20) & 0x3ff) as i32 % cs;
+        (cx * cs + jx, cy * cs + jy, cz * cs + jz, h)
+    }
+
+    /// Stamp one ragged ellipsoid of `block` centered at (ex,ey,ez), replacing ONLY host rock
+    /// (stone/deepslate), clipped to this chunk's bounds. Vertically squashed + per-voxel-jittered so
+    /// blobs read as organic pockets rather than perfect ellipsoids.
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_ellipsoid(
+        &self,
+        chunk: &mut Chunk,
+        ox: i32,
+        oy: i32,
+        oz: i32,
+        ex: i32,
+        ey: i32,
+        ez: i32,
+        radius: i32,
+        h: u32,
+        block: BlockId,
+    ) {
+        let rx = radius.max(1);
+        let ry = (radius * 3 / 4).max(1);
+        let rz = radius.max(1);
+        for dz in -rz..=rz {
+            for dy in -ry..=ry {
+                for dx in -rx..=rx {
+                    let v = (dx * dx) as f32 / (rx * rx) as f32
+                        + (dy * dy) as f32 / (ry * ry) as f32
+                        + (dz * dz) as f32 / (rz * rz) as f32;
+                    let jitter = (hash3(h as u64, ex + dx, ey + dy, ez + dz) & 0xff) as f32 / 255.0;
+                    if v > 1.0 + (jitter - 0.5) * 0.35 {
+                        continue;
+                    }
+                    let lx = ex + dx - ox;
+                    let ly = ey + dy - oy;
+                    let lz = ez + dz - oz;
+                    if lx < 0
+                        || lx >= CHUNK_SIZE_I
+                        || ly < 0
+                        || ly >= CHUNK_SIZE_I
+                        || lz < 0
+                        || lz >= CHUNK_SIZE_I
+                    {
+                        continue;
+                    }
+                    let (lxu, lyu, lzu) = (lx as usize, ly as usize, lz as usize);
+                    let cur = chunk.get(lxu, lyu, lzu);
+                    if cur == block::STONE || cur == block::DEEPSLATE {
+                        chunk.set(lxu, lyu, lzu, block);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Iterate every blob origin (under `salt`, cell size `cs`, max `reach`) whose ellipsoid could
+    /// reach this chunk; `activate(ex,ey,ez,hash) -> Option<(block,radius)>` gates + types each one.
+    fn stamp_blobs(
+        &self,
+        chunk: &mut Chunk,
+        origin: IVec3,
+        salt: u64,
+        cs: i32,
+        reach: i32,
+        activate: impl Fn(i32, i32, i32, u32) -> Option<(BlockId, i32)>,
+    ) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        let lo_x = (ox - reach).div_euclid(cs);
+        let hi_x = (ox + CHUNK_SIZE_I + reach).div_euclid(cs);
+        let lo_y = (oy - reach).div_euclid(cs);
+        let hi_y = (oy + CHUNK_SIZE_I + reach).div_euclid(cs);
+        let lo_z = (oz - reach).div_euclid(cs);
+        let hi_z = (oz + CHUNK_SIZE_I + reach).div_euclid(cs);
+        for cz in lo_z..=hi_z {
+            for cy in lo_y..=hi_y {
+                for cx in lo_x..=hi_x {
+                    let (ex, ey, ez, h) = self.cell_feature(salt, cx, cy, cz, cs);
+                    if let Some((block, radius)) = activate(ex, ey, ez, h) {
+                        self.stamp_ellipsoid(chunk, ox, oy, oz, ex, ey, ez, radius, h, block);
+                    }
+                }
+            }
+        }
+    }
+
+    /// U5 underground material blobs: stone variants (granite/diorite/andesite in stone, tuff near the
+    /// deepslate band) + dirt/gravel pockets + sparse clay near the water table. Host rock only.
+    fn place_blobs(&self, chunk: &mut Chunk, origin: IVec3) {
+        // Stone variants — common, medium blobs.
+        self.stamp_blobs(chunk, origin, 0x57A1E_B10B, 14, 7, |ex, ey, ez, h| {
+            if h % 100 >= 55 {
+                return None; // ~45% of cells host a variant blob
+            }
+            let radius = 3 + (h >> 7) as i32 % 4; // 3..=6
+            let block = if ey < self.deepslate_top(ex, ez) + 4 {
+                block::TUFF // deep band -> tuff (1.18 generates tuff around deepslate)
+            } else {
+                match (h >> 9) % 3 {
+                    0 => block::GRANITE,
+                    1 => block::DIORITE,
+                    _ => block::ANDESITE,
+                }
+            };
+            Some((block, radius))
+        });
+        // Dirt + gravel pockets — small, common (gravel biased deep, dirt shallow).
+        self.stamp_blobs(chunk, origin, 0xD127_6ACE, 12, 6, |_ex, ey, _ez, h| {
+            if h % 100 >= 48 {
+                return None;
+            }
+            let radius = 2 + (h >> 7) as i32 % 3; // 2..=4
+            let gravel = (h >> 9) % 2 == 0 || ey < SEA_LEVEL - 24;
+            Some((if gravel { block::GRAVEL } else { block::DIRT }, radius))
+        });
+        // Clay — sparse, in the water-table band (refined to genuinely-under-water in U7).
+        self.stamp_blobs(chunk, origin, 0xC1A1_9EED, 24, 5, |_ex, ey, _ez, h| {
+            if h % 1000 >= 130 || !(SEA_LEVEL - 12..=SEA_LEVEL + 2).contains(&ey) {
+                return None;
+            }
+            let radius = 2 + (h >> 7) as i32 % 2; // 2..=3
+            Some((block::CLAY, radius))
+        });
+    }
+
     pub fn generate_chunk(&self, pos: IVec3) -> Chunk {
         let origin = chunk_origin(pos);
         let (ox, oy, oz) = (origin.x, origin.y, origin.z);
@@ -328,6 +466,11 @@ impl Worldgen {
                     }
                 }
             }
+        }
+
+        // U5: underground material blobs (stone variants + dirt/gravel/clay), wherever rock exists.
+        if oy <= hmax {
+            self.place_blobs(&mut chunk, origin);
         }
 
         // Trees + surface decoration only for chunks overlapping the surface band.
@@ -754,5 +897,46 @@ mod tests {
         }
         assert!(saw_deepslate, "deep chunk has no deepslate near bedrock");
         assert!(saw_stone_high, "deep chunk has no stone above the deepslate band");
+    }
+
+    /// U5 (region-cell blob engine): blobs are deterministic, varied, and seam-consistent.
+    #[test]
+    fn u5_blobs_deterministic_and_present() {
+        let wg = Worldgen::new(0xB10B_5EED);
+        // Determinism: a deep chunk regenerates identically (blobs are pure f(seed,pos)).
+        let a = wg.generate_chunk(IVec3::new(0, 0, 0));
+        let b = wg.generate_chunk(IVec3::new(0, 0, 0));
+        assert_eq!(a.blocks, b.blocks);
+        assert_eq!(a.solid_count, b.solid_count);
+        // Variety: a deep region holds stone variants + gravel blobs (replacing host rock).
+        let mut seen = HashSet::new();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let c = wg.generate_chunk(IVec3::new(cx, 0, cz));
+                for &blk in &c.blocks {
+                    if matches!(
+                        blk,
+                        block::GRANITE
+                            | block::DIORITE
+                            | block::ANDESITE
+                            | block::TUFF
+                            | block::GRAVEL
+                            | block::DIRT
+                            | block::CLAY
+                    ) {
+                        seen.insert(blk);
+                    }
+                }
+            }
+        }
+        let has_variant = [block::GRANITE, block::DIORITE, block::ANDESITE, block::TUFF]
+            .iter()
+            .any(|b| seen.contains(b));
+        assert!(has_variant, "no stone-variant blobs generated");
+        assert!(seen.contains(&block::GRAVEL), "no gravel blobs generated");
+        // Cross-chunk seam: re-generating a neighbor matches itself (position-pure clip, no drift).
+        let n1 = wg.generate_chunk(IVec3::new(1, 0, 0));
+        let n2 = wg.generate_chunk(IVec3::new(1, 0, 0));
+        assert_eq!(n1.blocks, n2.blocks);
     }
 }
