@@ -12,7 +12,8 @@ use crate::block::BlockId;
 use crate::item::{Inventory, ItemStack, HOTBAR, SLOTS};
 use crate::world::{Chunk, CHUNK_VOLUME};
 
-const MAGIC: u32 = 0x5643_5231; // "VCR1"
+const MAGIC: u32 = 0x5643_5231; // "VCR1" — block ids only (legacy; still loads)
+const MAGIC_V2: u32 = 0x5643_5232; // "VCR2" — adds a per-chunk block-state LZ4 section
 const INV_MAGIC: u32 = 0x5643_4956; // "VCIV" — inventory save_state.bin
 
 pub struct Level {
@@ -258,7 +259,12 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
     let Ok(d) = fs::read(dir.join("chunks.bin")) else {
         return map;
     };
-    if d.len() < 8 || rd_u32(&d, 0) != MAGIC {
+    if d.len() < 8 {
+        return map;
+    }
+    let magic = rd_u32(&d, 0);
+    let has_states = magic == MAGIC_V2;
+    if magic != MAGIC && !has_states {
         return map;
     }
     let count = rd_u32(&d, 4);
@@ -273,7 +279,27 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
         if o + clen > d.len() {
             break;
         }
-        if let Ok(raw) = lz4_flex::decompress_size_prepended(&d[o..o + clen]) {
+        let blocks_raw = lz4_flex::decompress_size_prepended(&d[o..o + clen]);
+        o += clen;
+        // Block-state section (VCR2 only): slen(4) + lz4(states). Missing/legacy => all-default 0.
+        let mut states = vec![0u8; CHUNK_VOLUME];
+        if has_states {
+            if o + 4 > d.len() {
+                break;
+            }
+            let slen = rd_u32(&d, o) as usize;
+            o += 4;
+            if o + slen > d.len() {
+                break;
+            }
+            if let Ok(s) = lz4_flex::decompress_size_prepended(&d[o..o + slen]) {
+                if s.len() == CHUNK_VOLUME {
+                    states = s;
+                }
+            }
+            o += slen;
+        }
+        if let Ok(raw) = blocks_raw {
             if raw.len() == CHUNK_VOLUME * 2 {
                 let blocks: Vec<BlockId> = raw
                     .chunks_exact(2)
@@ -283,10 +309,9 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
                 let emitter_count =
                     blocks.iter().filter(|&&b| crate::block::light_emission(b) > 0).count() as u32;
                 let light = vec![0u8; CHUNK_VOLUME];
-                map.insert(pos, Chunk { blocks, light, solid_count, emitter_count });
+                map.insert(pos, Chunk { blocks, states, light, solid_count, emitter_count });
             }
         }
-        o += clen;
     }
     log::info!("Loaded {} edited chunks from save", map.len());
     map
@@ -295,13 +320,14 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
 pub fn save_chunks(dir: &Path, chunks: &[(IVec3, &Chunk)]) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     let mut b = Vec::new();
-    b.extend_from_slice(&MAGIC.to_le_bytes());
+    b.extend_from_slice(&MAGIC_V2.to_le_bytes());
     b.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
     let mut raw = Vec::with_capacity(CHUNK_VOLUME * 2);
     for (pos, chunk) in chunks {
         b.extend_from_slice(&pos.x.to_le_bytes());
         b.extend_from_slice(&pos.y.to_le_bytes());
         b.extend_from_slice(&pos.z.to_le_bytes());
+        // Block ids (LZ4).
         raw.clear();
         for &blk in &chunk.blocks {
             raw.extend_from_slice(&blk.to_le_bytes());
@@ -309,6 +335,10 @@ pub fn save_chunks(dir: &Path, chunks: &[(IVec3, &Chunk)]) -> std::io::Result<()
         let comp = lz4_flex::compress_prepend_size(&raw);
         b.extend_from_slice(&(comp.len() as u32).to_le_bytes());
         b.extend_from_slice(&comp);
+        // Block states (LZ4) — VCR2. One byte per cell, mostly 0, so this is tiny on disk.
+        let scomp = lz4_flex::compress_prepend_size(&chunk.states);
+        b.extend_from_slice(&(scomp.len() as u32).to_le_bytes());
+        b.extend_from_slice(&scomp);
     }
     fs::write(dir.join("chunks.bin"), b)?;
     log::info!("Saved {} edited chunks", chunks.len());
@@ -330,6 +360,7 @@ mod tests {
         blocks[CHUNK_VOLUME - 1] = 7;
         let chunk = Chunk {
             blocks: blocks.clone(),
+            states: vec![0u8; CHUNK_VOLUME],
             light: vec![0u8; CHUNK_VOLUME],
             solid_count: 3,
             emitter_count: 0,
@@ -342,6 +373,7 @@ mod tests {
         let lc = loaded.get(&pos).unwrap();
         assert_eq!(lc.blocks, blocks);
         assert_eq!(lc.solid_count, 3);
+        assert_eq!(lc.states, vec![0u8; CHUNK_VOLUME]); // default states round-trip
 
         let level = Level {
             seed: 0xDEAD_BEEF,
@@ -367,6 +399,63 @@ mod tests {
         assert!((ll.health - 12.5).abs() < 1e-6);
         assert!((ll.air - 4.0).abs() < 1e-6);
         assert_eq!(ll.level, 4);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn block_states_roundtrip() {
+        // Non-zero block-state bytes (e.g. stair facing/half) must survive save → load (VCR2).
+        let dir = std::env::temp_dir().join(format!("voxelcraft_states_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut chunk = Chunk::filled(crate::block::AIR);
+        chunk.set_state(1, 2, 3, crate::block::STONE_STAIRS, 0b101);
+        chunk.set_state(5, 6, 7, crate::block::WOOD, 2);
+        let pos = IVec3::new(2, 1, -4);
+        save_chunks(&dir, &[(pos, &chunk)]).unwrap();
+
+        let loaded = load_chunks(&dir);
+        let lc = loaded.get(&pos).unwrap();
+        assert_eq!(lc.state(1, 2, 3), 0b101);
+        assert_eq!(lc.state(5, 6, 7), 2);
+        assert_eq!(lc.get(1, 2, 3), crate::block::STONE_STAIRS);
+        assert_eq!(lc.states.iter().filter(|&&s| s != 0).count(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_vcr1_loads_with_default_states() {
+        // A pre-VCR2 chunks.bin (block ids only, "VCR1" magic) must still load, with all-default
+        // states — so existing worlds keep their edits.
+        let dir = std::env::temp_dir().join(format!("voxelcraft_vcr1_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut blocks = vec![0u16; CHUNK_VOLUME];
+        blocks[100] = crate::block::COBBLESTONE;
+        let pos = IVec3::new(0, 1, 0);
+        // Hand-write a legacy VCR1 file: MAGIC + count + [pos + clen + lz4(blocks)] (no state section).
+        let mut b = Vec::new();
+        b.extend_from_slice(&MAGIC.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&pos.x.to_le_bytes());
+        b.extend_from_slice(&pos.y.to_le_bytes());
+        b.extend_from_slice(&pos.z.to_le_bytes());
+        let mut raw = Vec::new();
+        for &blk in &blocks {
+            raw.extend_from_slice(&blk.to_le_bytes());
+        }
+        let comp = lz4_flex::compress_prepend_size(&raw);
+        b.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        b.extend_from_slice(&comp);
+        fs::write(dir.join("chunks.bin"), b).unwrap();
+
+        let loaded = load_chunks(&dir);
+        let lc = loaded.get(&pos).unwrap();
+        assert_eq!(lc.get(4, 0, 3), crate::block::COBBLESTONE); // index 100 = 4 + 32*(3 + 32*0)
+        assert_eq!(lc.states, vec![0u8; CHUNK_VOLUME]);
 
         let _ = fs::remove_dir_all(&dir);
     }

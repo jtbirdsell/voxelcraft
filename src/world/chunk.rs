@@ -26,6 +26,10 @@ fn local_index(x: usize, y: usize, z: usize) -> usize {
 #[derive(Clone)]
 pub struct Chunk {
     pub blocks: Vec<BlockId>,
+    /// Per-cell block-state byte (0 = default). Carries orientation/half/axis/etc. for blocks whose
+    /// family interprets it (stairs facing+half, slabs half, logs axis, doors …). Most cells are 0,
+    /// so it LZ4-compresses to ~nothing. Baked into geometry at mesh time — never reaches the GPU.
+    pub states: Vec<u8>,
     /// Packed sky/block light. Reserved for gameplay light queries (mob spawning, M31); rendering
     /// light is recomputed fresh in the mesher (`light::compute`), so this stays zero for now.
     #[allow(dead_code)]
@@ -45,6 +49,7 @@ impl Chunk {
         };
         Self {
             blocks: vec![id; CHUNK_VOLUME],
+            states: vec![0; CHUNK_VOLUME],
             light: vec![0; CHUNK_VOLUME],
             solid_count,
             emitter_count,
@@ -54,6 +59,12 @@ impl Chunk {
     #[inline]
     pub fn get(&self, x: usize, y: usize, z: usize) -> BlockId {
         self.blocks[local_index(x, y, z)]
+    }
+
+    /// The block-state byte at a cell (0 = default). Interpreted per block family by `block.rs`.
+    #[inline]
+    pub fn state(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.states[local_index(x, y, z)]
     }
 
     // Light accessors — reserved for gameplay light queries (M31). Allowed dead for now.
@@ -75,8 +86,15 @@ impl Chunk {
         self.light[local_index(x, y, z)] = (sky << 4) | (block_l & 0x0F);
     }
 
+    /// Set a block with its default state (0). Most blocks (dirt, stone, …) only ever use this.
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, id: BlockId) {
+        self.set_state(x, y, z, id, 0);
+    }
+
+    /// Set a block id together with its block-state byte, keeping solid/emitter counts current.
+    #[inline]
+    pub fn set_state(&mut self, x: usize, y: usize, z: usize, id: BlockId, state: u8) {
         let i = local_index(x, y, z);
         let was_solid = self.blocks[i] != block::AIR;
         let now_solid = id != block::AIR;
@@ -93,6 +111,7 @@ impl Chunk {
             _ => {}
         }
         self.blocks[i] = id;
+        self.states[i] = state;
     }
 
     #[inline]
