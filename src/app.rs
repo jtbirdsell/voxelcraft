@@ -751,6 +751,19 @@ impl App {
                     let (_, st) = state.game.block_state_at(hit.block);
                     let ns = block::attach_state(block::attach_face(st), !block::attach_on(st));
                     state.game.set_block_state(&state.gpu, &state.renderer, hit.block, targeted, ns);
+                } else if state.inventory.selected_item() == item::BONE
+                    && state.game.bonemeal(&state.gpu, &state.renderer, hit.block)
+                {
+                    // U9: bonemeal a growable block (budding amethyst / cave vine / moss); consume one.
+                    state.inventory.consume_selected();
+                } else if state.inventory.selected_item() == item::GLOW_BERRIES
+                    && state.game.block_at(hit.block + hit.normal) == block::AIR
+                    && block::is_opaque(state.game.block_at(hit.block + hit.normal + IVec3::Y))
+                {
+                    // U9: place glow berries hanging under a block (a berried cave-vine tip).
+                    let place = hit.block + hit.normal;
+                    state.game.set_block(&state.gpu, &state.renderer, place, block::CAVE_VINE_BERRIES);
+                    state.inventory.consume_selected();
                 } else {
                     let id = state.inventory.selected_block();
                     if id == block::WOODEN_DOOR {
@@ -1444,6 +1457,38 @@ impl ApplicationHandler for App {
                 // ROOM=2 leaves it unlit (sealed + sky=0 => pitch black); else light it.
                 if room != "2" {
                     game.set_block(&gpu, &renderer, IVec3::new(cx + 5, cy, cz), block::GLOWSTONE);
+                }
+            }
+
+            // Debug: VOXELCRAFT_TICKS=N advances the game N update steps before the shot — verifies
+            // time-based features (U9 amethyst/dripstone/cave-vine growth, fluids). Pair with PLACE.
+            if let Ok(Ok(n)) = std::env::var("VOXELCRAFT_TICKS").map(|s| s.trim().parse::<u32>()) {
+                for _ in 0..n {
+                    let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0, 1.0);
+                }
+            }
+
+            // Debug: VOXELCRAFT_BONEMEAL="x,y,z;..." bonemeals each position (and its neighbors) a few
+            // rounds — U9 growth verification: budding amethyst sprouts buds that mature into clusters.
+            if let Ok(s) = std::env::var("VOXELCRAFT_BONEMEAL") {
+                for spec in s.split(';') {
+                    let v: Vec<i32> = spec.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                    if v.len() == 3 {
+                        let p = IVec3::new(v[0], v[1], v[2]);
+                        for _ in 0..5 {
+                            for d in [
+                                IVec3::ZERO,
+                                IVec3::X,
+                                IVec3::NEG_X,
+                                IVec3::Y,
+                                IVec3::NEG_Y,
+                                IVec3::Z,
+                                IVec3::NEG_Z,
+                            ] {
+                                game.bonemeal(&gpu, &renderer, p + d);
+                            }
+                        }
+                    }
                 }
             }
 

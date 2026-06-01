@@ -31,6 +31,64 @@ const FLUID_BUDGET: usize = 96;
 const WATER_SPREAD: u8 = 7;
 const LAVA_SPREAD: u8 = 3;
 
+/// Random-block-tick tuning (U9): how often a batch runs, how many cells each near chunk samples, and
+/// the chunk radius around the player that ticks. Drives amethyst/dripstone/cave-vine growth.
+const RANDOM_TICK_INTERVAL: f32 = 0.25;
+const RANDOM_TICKS_PER_CHUNK: u32 = 16;
+const RANDOM_TICK_RADIUS: i32 = 4;
+
+/// Whether a block participates in U9 random-tick growth.
+fn random_tickable(id: BlockId) -> bool {
+    matches!(
+        id,
+        block::BUDDING_AMETHYST
+            | block::SMALL_AMETHYST_BUD
+            | block::MEDIUM_AMETHYST_BUD
+            | block::LARGE_AMETHYST_BUD
+            | block::CAVE_VINE
+            | block::CAVE_VINE_BERRIES
+            | block::POINTED_DRIPSTONE
+    )
+}
+
+/// Pure growth decision for a non-budding random-tickable block (U9), testable without a world.
+/// Returns (relative offset of the edit, new block id) or None. `below`/`above` are neighbor ids;
+/// `vine_len` is the cave-vine chain length above this cell (a length cap). Budding amethyst sprouts
+/// on a random face and is handled separately (it needs a chosen direction).
+fn grow_decision(
+    id: BlockId,
+    rnd: u32,
+    below: BlockId,
+    above: BlockId,
+    vine_len: i32,
+) -> Option<(IVec3, BlockId)> {
+    match id {
+        block::SMALL_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::MEDIUM_AMETHYST_BUD)),
+        block::MEDIUM_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::LARGE_AMETHYST_BUD)),
+        block::LARGE_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::AMETHYST_CLUSTER)),
+        block::CAVE_VINE | block::CAVE_VINE_BERRIES
+            if rnd % 100 < 12 && below == block::AIR && vine_len < 14 =>
+        {
+            // Grow a new tip below; occasionally it bears (glowing) berries.
+            let tip = if (rnd >> 9) % 4 == 0 {
+                block::CAVE_VINE_BERRIES
+            } else {
+                block::CAVE_VINE
+            };
+            Some((IVec3::NEG_Y, tip))
+        }
+        block::POINTED_DRIPSTONE
+            if rnd % 100 < 5
+                && matches!(above, block::POINTED_DRIPSTONE | block::DRIPSTONE_BLOCK)
+                && below == block::AIR =>
+        {
+            // Hanging stalactite slowly extends downward.
+            Some((IVec3::NEG_Y, block::POINTED_DRIPSTONE))
+        }
+        _ => None,
+    }
+}
+
 /// Natural-spawn tuning (P16: light + biome-gated, per-category caps, packs).
 const SPAWN_INTERVAL: f32 = 2.0; // seconds between spawn attempts
 const HOSTILE_CAP: usize = 12; // max live hostile mobs (continuous night spawning is MC-faithful)
@@ -268,6 +326,10 @@ pub struct Game {
     /// Natural-spawn cadence + a small RNG for spawn placement (M31).
     spawn_timer: f32,
     spawn_rng: u64,
+
+    /// Random-block-tick cadence + RNG (U9): drives amethyst/dripstone/cave-vine growth in near chunks.
+    tick_timer: f32,
+    tick_rng: u64,
 }
 
 impl Game {
@@ -331,6 +393,8 @@ impl Game {
             difficulty: crate::rules::Difficulty::Normal,
             spawn_timer: 0.0,
             spawn_rng: seed ^ 0x5FA1_2E37_9B1D_C0DE,
+            tick_timer: 0.0,
+            tick_rng: seed ^ 0x7A1C_9E37_55C0_1DEF,
         }
     }
 
@@ -514,6 +578,13 @@ impl Game {
         // Advance any active furnaces (pure item-state tick; no world/GPU touch).
         for f in self.furnaces.values_mut() {
             step_furnace(f, dt);
+        }
+
+        // U9: random block ticks (amethyst/dripstone/cave-vine growth) in near chunks.
+        self.tick_timer += dt;
+        if self.tick_timer >= RANDOM_TICK_INTERVAL {
+            self.tick_timer -= RANDOM_TICK_INTERVAL;
+            self.step_random_ticks(gpu, renderer);
         }
 
         // Natural spawning: one gated attempt per interval around the player (M31).
@@ -951,6 +1022,211 @@ impl Game {
         }
     }
 
+    /// Batched block edits WITH state bytes (U9 growth / U10 sculk spread): mutate, persist, invalidate
+    /// the volume, and re-mesh each affected chunk exactly once (never per-cell). Skips no-op writes.
+    fn apply_block_changes(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        changes: &[(IVec3, BlockId, u8)],
+    ) {
+        let mut mutated: FxHashSet<IVec3> = FxHashSet::default();
+        let mut affected: FxHashSet<IVec3> = FxHashSet::default();
+        for &(wp, id, state) in changes {
+            let cpos = world::chunk_of(wp);
+            let origin = world::chunk_origin(cpos);
+            let (lx, ly, lz) = (
+                (wp.x - origin.x) as usize,
+                (wp.y - origin.y) as usize,
+                (wp.z - origin.z) as usize,
+            );
+            let Some(arc) = self.world.chunks.get_mut(&cpos) else {
+                continue;
+            };
+            let chunk = Arc::make_mut(arc);
+            if chunk.get(lx, ly, lz) == id && chunk.state(lx, ly, lz) == state {
+                continue;
+            }
+            chunk.set_state(lx, ly, lz, id, state);
+            mutated.insert(cpos);
+            affected.insert(cpos);
+            if lx == 0 {
+                affected.insert(cpos - IVec3::X);
+            } else if lx == 31 {
+                affected.insert(cpos + IVec3::X);
+            }
+            if ly == 0 {
+                affected.insert(cpos - IVec3::Y);
+            } else if ly == 31 {
+                affected.insert(cpos + IVec3::Y);
+            }
+            if lz == 0 {
+                affected.insert(cpos - IVec3::Z);
+            } else if lz == 31 {
+                affected.insert(cpos + IVec3::Z);
+            }
+        }
+        for &cpos in &mutated {
+            if let Some(arc) = self.world.chunks.get(&cpos) {
+                self.saved.insert(cpos, arc.clone());
+            }
+            self.volume.invalidate(cpos);
+        }
+        if !mutated.is_empty() {
+            self.dirty = true;
+        }
+        for cpos in affected {
+            *self.versions.entry(cpos).or_insert(0) += 1;
+            self.pending_mesh.remove(&cpos);
+            if self.world.is_generated(cpos) {
+                self.remesh_sync(gpu, renderer, cpos);
+            }
+        }
+    }
+
+    /// U9 random-tick scheduler: each cadence, sample a few random cells in near-loaded chunks and
+    /// dispatch growth (amethyst/dripstone/cave vines). Edits are batched -> one re-mesh per chunk.
+    fn step_random_ticks(&mut self, gpu: &Gpu, renderer: &ChunkRenderer) {
+        let center = self.center;
+        let near: Vec<IVec3> = self
+            .world
+            .chunks
+            .keys()
+            .filter(|p| {
+                (p.x - center.x).abs() <= RANDOM_TICK_RADIUS
+                    && (p.z - center.z).abs() <= RANDOM_TICK_RADIUS
+            })
+            .copied()
+            .collect();
+        let mut rng = self.tick_rng;
+        // Phase 1: sample candidate (wp, id) of random-tickable blocks (no &mut self while reading).
+        let mut candidates: Vec<(IVec3, BlockId)> = Vec::new();
+        for cpos in &near {
+            let Some(arc) = self.world.chunks.get(cpos) else {
+                continue;
+            };
+            let origin = world::chunk_origin(*cpos);
+            for _ in 0..RANDOM_TICKS_PER_CHUNK {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                let (lx, ly, lz) =
+                    ((rng & 31) as usize, ((rng >> 5) & 31) as usize, ((rng >> 10) & 31) as usize);
+                let id = arc.get(lx, ly, lz);
+                if random_tickable(id) {
+                    candidates.push((origin + IVec3::new(lx as i32, ly as i32, lz as i32), id));
+                }
+            }
+        }
+        // Phase 2: dispatch growth into a batch.
+        let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
+        for (wp, id) in candidates {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            self.random_tick_block(wp, id, rng as u32, &mut changes);
+        }
+        self.tick_rng = rng;
+        if !changes.is_empty() {
+            self.apply_block_changes(gpu, renderer, &changes);
+        }
+    }
+
+    /// Dispatch one random block tick to the right growth handler (U9). Read-only on the world; the
+    /// resulting edits go into `changes` (applied as a batch by the caller).
+    fn random_tick_block(
+        &self,
+        wp: IVec3,
+        id: BlockId,
+        rnd: u32,
+        changes: &mut Vec<(IVec3, BlockId, u8)>,
+    ) {
+        if id == block::BUDDING_AMETHYST {
+            // Sprout a small bud on a random air-adjacent face (~18% per tick).
+            if rnd % 100 < 18 {
+                const DIRS: [IVec3; 5] =
+                    [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z, IVec3::Y];
+                let np = wp + DIRS[((rnd >> 7) % 5) as usize];
+                if self.block_at(np) == block::AIR {
+                    changes.push((np, block::SMALL_AMETHYST_BUD, 0));
+                }
+            }
+            return;
+        }
+        let below = self.block_at(wp - IVec3::Y);
+        let above = self.block_at(wp + IVec3::Y);
+        let vine_len = if matches!(id, block::CAVE_VINE | block::CAVE_VINE_BERRIES) {
+            self.vine_length(wp)
+        } else {
+            0
+        };
+        if let Some((off, new)) = grow_decision(id, rnd, below, above, vine_len) {
+            changes.push((wp + off, new, 0));
+        }
+    }
+
+    /// Cave-vine chain length directly above `wp` (a growth length cap so vines don't reach forever).
+    fn vine_length(&self, wp: IVec3) -> i32 {
+        let mut n = 0;
+        let mut p = wp + IVec3::Y;
+        while n < 16 {
+            let id = self.block_at(p);
+            if id != block::CAVE_VINE && id != block::CAVE_VINE_BERRIES {
+                break;
+            }
+            n += 1;
+            p += IVec3::Y;
+        }
+        n
+    }
+
+    /// U9 bonemeal: instantly advance a growable block at `wp` (budding amethyst sprouts/advances,
+    /// cave vines extend with berries, moss spreads to adjacent stone/dirt). Returns true if it grew.
+    pub fn bonemeal(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, wp: IVec3) -> bool {
+        let id = self.block_at(wp);
+        let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
+        match id {
+            block::BUDDING_AMETHYST => {
+                for d in [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z, IVec3::Y] {
+                    if self.block_at(wp + d) == block::AIR {
+                        changes.push((wp + d, block::SMALL_AMETHYST_BUD, 0));
+                    }
+                }
+            }
+            block::SMALL_AMETHYST_BUD => changes.push((wp, block::LARGE_AMETHYST_BUD, 0)),
+            block::MEDIUM_AMETHYST_BUD | block::LARGE_AMETHYST_BUD => {
+                changes.push((wp, block::AMETHYST_CLUSTER, 0))
+            }
+            block::CAVE_VINE | block::CAVE_VINE_BERRIES => {
+                let mut p = wp - IVec3::Y;
+                for _ in 0..3 {
+                    if self.block_at(p) != block::AIR {
+                        break;
+                    }
+                    changes.push((p, block::CAVE_VINE_BERRIES, 0));
+                    p -= IVec3::Y;
+                }
+            }
+            block::MOSS_BLOCK => {
+                for d in [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z] {
+                    let np = wp + d;
+                    if matches!(
+                        self.block_at(np),
+                        block::STONE | block::DIRT | block::DEEPSLATE | block::COBBLED_DEEPSLATE
+                    ) {
+                        changes.push((np, block::MOSS_BLOCK, 0));
+                    }
+                }
+            }
+            _ => return false,
+        }
+        if changes.is_empty() {
+            return false;
+        }
+        self.apply_block_changes(gpu, renderer, &changes);
+        true
+    }
+
     pub fn spawn_mob(&mut self, pos: Vec3, species: crate::entity::Species) {
         self.entities.spawn_mob(pos, species);
     }
@@ -1376,6 +1652,36 @@ mod furnace_tests {
     use super::*;
     use crate::item::ItemStack;
     use std::collections::HashMap;
+
+    #[test]
+    fn u9_growth_decisions() {
+        // rnd=0 passes every probability gate (0 < threshold), so growth fires deterministically.
+        // Amethyst bud stages advance in place.
+        assert_eq!(
+            grow_decision(block::SMALL_AMETHYST_BUD, 0, block::STONE, block::STONE, 0),
+            Some((IVec3::ZERO, block::MEDIUM_AMETHYST_BUD))
+        );
+        assert_eq!(
+            grow_decision(block::LARGE_AMETHYST_BUD, 0, block::STONE, block::STONE, 0),
+            Some((IVec3::ZERO, block::AMETHYST_CLUSTER))
+        );
+        // Cave vine grows a new tip below only into air and under the length cap.
+        assert_eq!(
+            grow_decision(block::CAVE_VINE, 0, block::AIR, block::DEEPSLATE, 3),
+            Some((IVec3::NEG_Y, block::CAVE_VINE_BERRIES)) // rnd=0 -> berried tip
+        );
+        assert_eq!(grow_decision(block::CAVE_VINE, 0, block::STONE, block::STONE, 3), None); // blocked below
+        assert_eq!(grow_decision(block::CAVE_VINE, 0, block::AIR, block::STONE, 14), None); // length cap
+        // A high rnd fails the probability gate (no growth this tick).
+        assert_eq!(grow_decision(block::SMALL_AMETHYST_BUD, 99, block::STONE, block::STONE, 0), None);
+        // Pointed dripstone only extends a hanging stalactite (dripstone above, air below).
+        assert_eq!(
+            grow_decision(block::POINTED_DRIPSTONE, 0, block::AIR, block::DRIPSTONE_BLOCK, 0),
+            Some((IVec3::NEG_Y, block::POINTED_DRIPSTONE))
+        );
+        assert_eq!(grow_decision(block::POINTED_DRIPSTONE, 0, block::AIR, block::STONE, 0), None);
+        assert!(random_tickable(block::BUDDING_AMETHYST) && !random_tickable(block::STONE));
+    }
 
     #[test]
     fn sky_light_open_vs_roofed() {
