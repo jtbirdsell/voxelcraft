@@ -171,6 +171,18 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 83u: { return vec3<f32>(0.23, 0.23, 0.26); } // deepslate bricks
         case 84u: { return vec3<f32>(0.22, 0.22, 0.25); } // deepslate tiles
         case 85u: { return vec3<f32>(0.78, 0.46, 0.34); } // cut copper
+        // U4 cave-biome OPAQUE cubes only (cross-billboard crystals/plants store 0 in the volume and
+        // are correctly absent here). In lockstep with block::face_color + texture.rs base_color.
+        case 86u:  { return vec3<f32>(0.55, 0.40, 0.78); } // amethyst block
+        case 87u:  { return vec3<f32>(0.58, 0.42, 0.80); } // budding amethyst
+        case 93u:  { return vec3<f32>(0.30, 0.42, 0.20); } // moss block
+        case 101u: { return vec3<f32>(0.42, 0.32, 0.22); } // rooted dirt
+        case 104u: { return vec3<f32>(0.30, 0.46, 0.22); } // azalea leaves
+        case 105u: { return vec3<f32>(0.06, 0.09, 0.11); } // sculk
+        case 107u: { return vec3<f32>(0.10, 0.20, 0.24); } // sculk sensor
+        case 108u: { return vec3<f32>(0.12, 0.16, 0.18); } // sculk shrieker
+        case 109u: { return vec3<f32>(0.10, 0.14, 0.16); } // sculk catalyst
+        case 110u: { return vec3<f32>(0.20, 0.21, 0.24); } // reinforced deepslate
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }
@@ -181,6 +193,7 @@ fn voxel_emission(id: u32) -> vec3<f32> {
     if (id == 11u) { return vec3<f32>(1.5, 0.5, 0.1); }  // lava
     if (id == 12u) { return vec3<f32>(1.6, 0.9, 0.35); } // torch
     if (id == 13u) { return vec3<f32>(1.8, 1.4, 0.7); }  // glowstone
+    if (id == 109u) { return vec3<f32>(0.2, 0.5, 0.5); } // sculk catalyst (dim cyan soul-fire bloom)
     return vec3<f32>(0.0);
 }
 

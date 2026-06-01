@@ -149,6 +149,9 @@ fn build_recipes() -> Vec<Recipe> {
     square4(&mut r, block::COBBLED_DEEPSLATE, block::POLISHED_DEEPSLATE);
     square4(&mut r, block::POLISHED_DEEPSLATE, block::DEEPSLATE_BRICKS);
     square4(&mut r, block::DEEPSLATE_BRICKS, block::DEEPSLATE_TILES);
+    // U4: 4 amethyst shards (2x2) -> 1 amethyst block (the only U4 recipe; the rest of the cave-biome
+    // set is placement-only decoration with no crafting).
+    r.push(shaped(&["AA", "AA"], &[('A', item::AMETHYST_SHARD)], block::AMETHYST_BLOCK, 1));
     r
 }
 

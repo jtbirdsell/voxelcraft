@@ -132,6 +132,19 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::DEEPSLATE_BRICKS => [0.23, 0.23, 0.26],
         T::DEEPSLATE_TILES => [0.22, 0.22, 0.25],
         T::CUT_COPPER => [0.78, 0.46, 0.34],
+        // U4 cave-biome opaque cubes (must match block::face_color + voxel_color). The cross tiles
+        // (cluster/buds/dripstone/vines/lichen/azalea/dripleaves/roots/spore/sculk-vein) are RGBA
+        // cutouts painted by paint_plant and never read base_color, so they're intentionally absent.
+        T::AMETHYST_BLOCK => [0.55, 0.40, 0.78],
+        T::BUDDING_AMETHYST => [0.58, 0.42, 0.80],
+        T::MOSS_BLOCK => [0.30, 0.42, 0.20],
+        T::ROOTED_DIRT => [0.42, 0.32, 0.22],
+        T::AZALEA_LEAVES => [0.30, 0.46, 0.22],
+        T::SCULK => [0.06, 0.09, 0.11],
+        T::SCULK_SENSOR => [0.10, 0.20, 0.24],
+        T::SCULK_SHRIEKER => [0.12, 0.16, 0.18],
+        T::SCULK_CATALYST => [0.10, 0.14, 0.16],
+        T::REINFORCED_DEEPSLATE => [0.20, 0.21, 0.24],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -228,6 +241,138 @@ fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
                 let base = if joint { 0.44 } else { 0.58 };
                 let g = hashf(x, y, 4) * 0.10;
                 return [to_u8(base * 0.78), to_u8(base + 0.16 + g), to_u8(base * 0.52), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        // ── U4 cave-biome cross-billboard cutouts ──────────────────────────────────────────────────
+        // Amethyst cluster + the 3 buds: purple crystal spikes rising from the bottom. Taller/more
+        // spikes the larger the stage (cluster > large > medium > small). Lighter near the tips.
+        T::AMETHYST_CLUSTER | T::LARGE_AMETHYST_BUD | T::MEDIUM_AMETHYST_BUD
+        | T::SMALL_AMETHYST_BUD => {
+            // Per-stage spike height (rows from the bottom the crystals reach up to) + spike count.
+            let (height, spikes): (u32, u32) = match tile {
+                T::AMETHYST_CLUSTER => (13, 4),
+                T::LARGE_AMETHYST_BUD => (10, 3),
+                T::MEDIUM_AMETHYST_BUD => (7, 2),
+                _ => (4, 2), // small
+            };
+            let top = 15u32.saturating_sub(height); // spikes occupy y in top..=15
+            // A spike is a centered triangle around each spike center; half-width shrinks with height.
+            for s in 0..spikes {
+                let cx = 2 + (hashf(s, 0, 90) * 12.0) as i32;
+                let h = top + (hashf(s, 1, 90) * 3.0) as u32; // slight per-spike base variation
+                if y >= h {
+                    let from_base = (15 - y) as i32; // 0 at bottom, grows upward
+                    let half = (from_base / 3) + 1; // tapers to a point near the tip
+                    if (x as i32 - cx).abs() <= (3 - half).max(0) {
+                        // Brighter toward the tip (smaller from_base near top).
+                        let tip = (from_base as f32 / height as f32).min(1.0);
+                        let r = 0.55 + tip * 0.18;
+                        let g = 0.40 + tip * 0.16;
+                        let b = 0.80 + tip * 0.15;
+                        return [to_u8(r), to_u8(g), to_u8(b), 255];
+                    }
+                }
+            }
+            [0, 0, 0, 0]
+        }
+        T::POINTED_DRIPSTONE => {
+            // A centered brown/tan cone spike (drawn pointing down: widest at the top, tip at bottom).
+            let half = (y as i32 / 3) + 1; // narrow at the bottom tip, wide at the top
+            if (x as i32 - 8).abs() <= half && half <= 6 {
+                let d = hashf(x, y, 12) * 0.12;
+                return [to_u8(0.55 + d), to_u8(0.42 + d), to_u8(0.34), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::CAVE_VINE | T::CAVE_VINE_BERRIES => {
+            // Thin green strands hanging from the top, with optional orange glowing berry dots.
+            let strand = matches!(x, 4 | 8 | 11) && y <= 13;
+            if strand {
+                let g = hashf(x, y, 4);
+                return [to_u8(0.24), to_u8(0.46 + g * 0.16), to_u8(0.16), 255];
+            }
+            if tile == T::CAVE_VINE_BERRIES {
+                // Berry dots clustered along the strands.
+                let berry = matches!((x, y), (4, 6) | (8, 9) | (11, 4) | (8, 13));
+                if berry || (matches!(x, 3 | 5 | 7 | 9 | 10 | 12) && (y == 7 || y == 10)) {
+                    return [to_u8(0.98), to_u8(0.66), to_u8(0.18), 255]; // glowing berry
+                }
+            }
+            [0, 0, 0, 0]
+        }
+        T::GLOW_LICHEN => {
+            // Scattered pale cyan-green lichen blotches (low coverage).
+            if blob(x, y, 21) || hashf(x, y, 35) > 0.86 {
+                let g = hashf(x, y, 7) * 0.12;
+                return [to_u8(0.50), to_u8(0.78 + g), to_u8(0.66), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::AZALEA | T::FLOWERING_AZALEA => {
+            // A bushy green clump filling most of the tile, with pink flower dots when flowering.
+            let dx = x as i32 - 8;
+            let dy = y as i32 - 7;
+            let bush = dx * dx + dy * dy * 2 <= 60 && (x ^ y) % 3 != 0;
+            if bush {
+                if tile == T::FLOWERING_AZALEA && hashf(x, y, 27) > 0.84 {
+                    return [to_u8(0.92), to_u8(0.55), to_u8(0.72), 255]; // pink flower
+                }
+                let g = hashf(x, y, 17) * 0.16;
+                return [to_u8(0.22), to_u8(0.44 + g), to_u8(0.18), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::BIG_DRIPLEAF | T::SMALL_DRIPLEAF => {
+            // A green leaf pad on a central stem. Big = larger pad higher up.
+            let stem = (7..=8).contains(&x) && y >= 7;
+            let (cy, rad): (i32, i32) = if tile == T::BIG_DRIPLEAF { (4, 6) } else { (5, 4) };
+            let dx = x as i32 - 8;
+            let dy = y as i32 - cy;
+            let pad = dx * dx + dy * dy <= rad * rad && y as i32 <= cy + rad / 2;
+            if pad {
+                let g = hashf(x, y, 19) * 0.14;
+                return [to_u8(0.26), to_u8(0.50 + g), to_u8(0.22), 255];
+            }
+            if stem {
+                return [to_u8(0.34), to_u8(0.48), to_u8(0.24), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::HANGING_ROOTS => {
+            // Thin tan strands dangling from the top.
+            let strand = matches!(x, 5 | 8 | 10) && y <= 11;
+            if strand {
+                let d = hashf(x, y, 9) * 0.12;
+                return [to_u8(0.58 + d), to_u8(0.44 + d), to_u8(0.30), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::SPORE_BLOSSOM => {
+            // A pink rosette near the top + a couple of dangling spore strands.
+            let dx = x as i32 - 8;
+            let dy = y as i32 - 4;
+            let rosette = dx * dx + dy * dy <= 16;
+            if rosette {
+                if dx * dx + dy * dy <= 3 {
+                    return [to_u8(0.95), to_u8(0.78), to_u8(0.40), 255]; // pale center
+                }
+                let d = hashf(x, y, 22) * 0.10;
+                return [to_u8(0.86 + d), to_u8(0.38), to_u8(0.56), 255]; // pink petals
+            }
+            // Dangling spore strands below the bloom.
+            if matches!(x, 6 | 10) && (8..=14).contains(&y) {
+                return [to_u8(0.80), to_u8(0.50), to_u8(0.62), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::SCULK_VEIN => {
+            // Dark tendrils with faint cyan, low coverage.
+            if blob(x, y, 13) {
+                return [to_u8(0.10), to_u8(0.45), to_u8(0.46), 255]; // faint cyan node
+            }
+            if hashf(x, y, 29) > 0.80 {
+                return [to_u8(0.05), to_u8(0.08), to_u8(0.10), 255]; // dark tendril
             }
             [0, 0, 0, 0]
         }
@@ -328,6 +473,22 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             | T::RED_MUSHROOM
             | T::BROWN_MUSHROOM
             | T::SUGAR_CANE
+            // U4 cave-biome cross-billboard cutouts.
+            | T::AMETHYST_CLUSTER
+            | T::SMALL_AMETHYST_BUD
+            | T::MEDIUM_AMETHYST_BUD
+            | T::LARGE_AMETHYST_BUD
+            | T::POINTED_DRIPSTONE
+            | T::GLOW_LICHEN
+            | T::CAVE_VINE
+            | T::CAVE_VINE_BERRIES
+            | T::AZALEA
+            | T::FLOWERING_AZALEA
+            | T::BIG_DRIPLEAF
+            | T::SMALL_DRIPLEAF
+            | T::HANGING_ROOTS
+            | T::SPORE_BLOSSOM
+            | T::SCULK_VEIN
     ) {
         return paint_plant(tile, x, y);
     }
@@ -522,6 +683,92 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             } else {
                 shade(base, (n - 0.5) * 0.08)
             };
+        }
+        // U4 cave-biome opaque cubes.
+        T::AMETHYST_BLOCK => {
+            // Purple crystal with a few brighter facets.
+            c = shade(base, (n - 0.5) * 0.16);
+            if hashf(x, y, 71) > 0.82 {
+                c = shade(base, 0.30); // bright facet
+            }
+        }
+        T::BUDDING_AMETHYST => {
+            c = shade(base, (n - 0.5) * 0.16);
+            if hashf(x, y, 73) > 0.82 {
+                c = shade(base, 0.30); // bright facet
+            }
+            if blob(x, y, 9) {
+                c = shade([0.72, 0.55, 0.92], 0.10); // small budding nubs
+            }
+        }
+        T::MOSS_BLOCK => {
+            // Green mottle (clones the GRASS_TOP motif on a darker moss base).
+            c = shade(base, (n - 0.5) * 0.26);
+            if hashf(x, y, 67) > 0.80 {
+                c = shade(base, 0.18); // brighter tufts
+            }
+        }
+        T::ROOTED_DIRT => {
+            // Dirt body with pale root flecks threading through.
+            c = shade(base, (n - 0.5) * 0.22);
+            if hashf(x, y, 55) > 0.86 {
+                c = shade([0.78, 0.70, 0.52], 0.0); // pale root
+            }
+        }
+        T::AZALEA_LEAVES => {
+            // Leafy green (clone of LEAVES on the azalea base).
+            c = shade(base, (n - 0.5) * 0.34);
+            if hashf(x, y, 85) > 0.86 {
+                c = shade(base, -0.30); // gaps/shadow
+            }
+        }
+        T::SCULK => {
+            // Near-black base with a scatter of cyan emissive-looking flecks.
+            c = shade(base, (n - 0.5) * 0.20);
+            if blob(x, y, 6) {
+                c = [0.12, 0.55, 0.55]; // cyan node
+            } else if hashf(x, y, 39) > 0.90 {
+                c = [0.08, 0.30, 0.32]; // dim cyan speck
+            }
+        }
+        T::SCULK_SENSOR => {
+            c = shade(base, (n - 0.5) * 0.16);
+            // A pair of cyan tendril hints reaching up the middle.
+            if (7..=8).contains(&x) || blob(x, y, 11) {
+                c = [0.20, 0.70, 0.72];
+            }
+        }
+        T::SCULK_SHRIEKER => {
+            c = shade(base, (n - 0.5) * 0.14);
+            // A cyan ring around the center mouth.
+            let dx = x as i32 - 8;
+            let dy = y as i32 - 8;
+            let r2 = dx * dx + dy * dy;
+            if (16..=30).contains(&r2) {
+                c = [0.22, 0.78, 0.78]; // glowing ring
+            } else if r2 < 16 {
+                c = [0.05, 0.08, 0.09]; // dark maw
+            }
+        }
+        T::SCULK_CATALYST => {
+            // Darker base + bone-white bits + more cyan than plain sculk.
+            c = shade(base, (n - 0.5) * 0.16);
+            if blob(x, y, 6) {
+                c = [0.18, 0.65, 0.65]; // cyan bloom
+            } else if blob(x, y, 14) {
+                c = [0.88, 0.86, 0.80]; // bone-white bits
+            } else if hashf(x, y, 47) > 0.88 {
+                c = [0.10, 0.40, 0.42];
+            }
+        }
+        T::REINFORCED_DEEPSLATE => {
+            // Deepslate base with a subtle metallic frame border.
+            c = shade(base, (n - 0.5) * 0.16);
+            if x == 0 || y == 0 || x == 15 || y == 15 {
+                c = [0.40, 0.41, 0.45]; // metal frame
+            } else if x == 1 || y == 1 || x == 14 || y == 14 {
+                c = shade(base, 0.18); // inner bevel
+            }
         }
         T::CRAFTING => {
             c = shade(base, (m - 0.5) * 0.16);

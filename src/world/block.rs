@@ -99,9 +99,38 @@ pub const POLISHED_DEEPSLATE: BlockId = 82;
 pub const DEEPSLATE_BRICKS: BlockId = 83;
 pub const DEEPSLATE_TILES: BlockId = 84;
 pub const CUT_COPPER: BlockId = 85;
+// ── Underground overhaul (U4): the cave-biome decoration set. PURE registry — placement/growth/sculk
+// behavior land in later milestones (U8 cave biomes, U9 growth, U10 sculk spread, U11 Warden). The
+// crystal/plant/dripleaf/root blocks render as cross-billboard cutouts (RenderKind::Cross); the rest
+// are full cubes. ──
+pub const AMETHYST_BLOCK: BlockId = 86;
+pub const BUDDING_AMETHYST: BlockId = 87;
+pub const AMETHYST_CLUSTER: BlockId = 88;
+pub const SMALL_AMETHYST_BUD: BlockId = 89;
+pub const MEDIUM_AMETHYST_BUD: BlockId = 90;
+pub const LARGE_AMETHYST_BUD: BlockId = 91;
+pub const POINTED_DRIPSTONE: BlockId = 92;
+pub const MOSS_BLOCK: BlockId = 93;
+pub const GLOW_LICHEN: BlockId = 94;
+pub const CAVE_VINE: BlockId = 95;
+pub const CAVE_VINE_BERRIES: BlockId = 96;
+pub const AZALEA: BlockId = 97;
+pub const FLOWERING_AZALEA: BlockId = 98;
+pub const BIG_DRIPLEAF: BlockId = 99;
+pub const SMALL_DRIPLEAF: BlockId = 100;
+pub const ROOTED_DIRT: BlockId = 101;
+pub const HANGING_ROOTS: BlockId = 102;
+pub const SPORE_BLOSSOM: BlockId = 103;
+pub const AZALEA_LEAVES: BlockId = 104;
+pub const SCULK: BlockId = 105;
+pub const SCULK_VEIN: BlockId = 106;
+pub const SCULK_SENSOR: BlockId = 107;
+pub const SCULK_SHRIEKER: BlockId = 108;
+pub const SCULK_CATALYST: BlockId = 109;
+pub const REINFORCED_DEEPSLATE: BlockId = 110;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = CUT_COPPER;
+pub const MAX_BLOCK: BlockId = REINFORCED_DEEPSLATE;
 
 #[inline]
 pub fn is_fence(id: BlockId) -> bool {
@@ -287,7 +316,12 @@ pub enum RenderKind {
 #[inline]
 pub fn render_kind(id: BlockId) -> RenderKind {
     match id {
-        POPPY | DANDELION | TALL_GRASS | FERN | RED_MUSHROOM | BROWN_MUSHROOM | SUGAR_CANE => {
+        POPPY | DANDELION | TALL_GRASS | FERN | RED_MUSHROOM | BROWN_MUSHROOM | SUGAR_CANE
+        // U4 cave-biome cross-billboard cutouts (crystals, vines, dripleaves, roots, sculk vein).
+        | AMETHYST_CLUSTER | SMALL_AMETHYST_BUD | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD
+        | POINTED_DRIPSTONE | GLOW_LICHEN | CAVE_VINE | CAVE_VINE_BERRIES | AZALEA
+        | FLOWERING_AZALEA | BIG_DRIPLEAF | SMALL_DRIPLEAF | HANGING_ROOTS | SPORE_BLOSSOM
+        | SCULK_VEIN => {
             RenderKind::Cross
         }
         STONE_SLAB | WOOD_SLAB => RenderKind::Slab,
@@ -682,6 +716,31 @@ pub fn display_name(id: BlockId) -> &'static str {
         DEEPSLATE_BRICKS => "Deepslate Bricks",
         DEEPSLATE_TILES => "Deepslate Tiles",
         CUT_COPPER => "Cut Copper",
+        AMETHYST_BLOCK => "Block of Amethyst",
+        BUDDING_AMETHYST => "Budding Amethyst",
+        AMETHYST_CLUSTER => "Amethyst Cluster",
+        SMALL_AMETHYST_BUD => "Small Amethyst Bud",
+        MEDIUM_AMETHYST_BUD => "Medium Amethyst Bud",
+        LARGE_AMETHYST_BUD => "Large Amethyst Bud",
+        POINTED_DRIPSTONE => "Pointed Dripstone",
+        MOSS_BLOCK => "Moss Block",
+        GLOW_LICHEN => "Glow Lichen",
+        CAVE_VINE => "Cave Vine",
+        CAVE_VINE_BERRIES => "Cave Vine with Berries",
+        AZALEA => "Azalea",
+        FLOWERING_AZALEA => "Flowering Azalea",
+        BIG_DRIPLEAF => "Big Dripleaf",
+        SMALL_DRIPLEAF => "Small Dripleaf",
+        ROOTED_DIRT => "Rooted Dirt",
+        HANGING_ROOTS => "Hanging Roots",
+        SPORE_BLOSSOM => "Spore Blossom",
+        AZALEA_LEAVES => "Azalea Leaves",
+        SCULK => "Sculk",
+        SCULK_VEIN => "Sculk Vein",
+        SCULK_SENSOR => "Sculk Sensor",
+        SCULK_SHRIEKER => "Sculk Shrieker",
+        SCULK_CATALYST => "Sculk Catalyst",
+        REINFORCED_DEEPSLATE => "Reinforced Deepslate",
         _ => "Unknown",
     }
 }
@@ -798,6 +857,29 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         DEEPSLATE_BRICKS => [0.23, 0.23, 0.26],
         DEEPSLATE_TILES => [0.22, 0.22, 0.25],
         CUT_COPPER => [0.78, 0.46, 0.34],
+        // U4 cave-biome opaque cubes (must match texture.rs base_color + rtx_common.wgsl voxel_color).
+        AMETHYST_BLOCK => [0.55, 0.40, 0.78],
+        BUDDING_AMETHYST => [0.58, 0.42, 0.80],
+        MOSS_BLOCK => [0.30, 0.42, 0.20],
+        ROOTED_DIRT => [0.42, 0.32, 0.22],
+        AZALEA_LEAVES => [0.30, 0.46, 0.22],
+        SCULK => [0.06, 0.09, 0.11],
+        SCULK_SENSOR => [0.10, 0.20, 0.24],
+        SCULK_SHRIEKER => [0.12, 0.16, 0.18],
+        SCULK_CATALYST => [0.10, 0.14, 0.16],
+        REINFORCED_DEEPSLATE => [0.20, 0.21, 0.24],
+        // U4 cave-biome cross-billboard cutouts: representative UI/icon swatch (texel art is paint_plant).
+        AMETHYST_CLUSTER | SMALL_AMETHYST_BUD | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD => {
+            [0.62, 0.45, 0.85]
+        }
+        POINTED_DRIPSTONE => [0.55, 0.42, 0.34],
+        GLOW_LICHEN => [0.55, 0.78, 0.66],
+        CAVE_VINE => [0.36, 0.52, 0.22],
+        CAVE_VINE_BERRIES => [0.95, 0.65, 0.20],
+        AZALEA | FLOWERING_AZALEA => [0.30, 0.50, 0.22],
+        BIG_DRIPLEAF | SMALL_DRIPLEAF => [0.34, 0.55, 0.24],
+        HANGING_ROOTS => [0.58, 0.44, 0.30],
+        SPORE_BLOSSOM => [0.85, 0.40, 0.55],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -809,6 +891,10 @@ pub fn emission(id: BlockId) -> f32 {
         LAVA => 1.0,
         TORCH => 0.9,
         GLOWSTONE => 1.0,
+        // U4: the sculk catalyst's soul-fire bloom is the only opaque cave-biome self-emitter (the
+        // cross-billboard emitters — clusters/buds/glow lichen/berries — aren't in the voxel volume, so
+        // they rely on light_emission only). Cross-block emission would have no GI volume to bounce in.
+        SCULK_CATALYST => 0.4,
         _ => 0.0,
     }
 }
@@ -818,7 +904,15 @@ pub fn light_emission(id: BlockId) -> u8 {
     match id {
         GLOWSTONE => 15,
         TORCH => 14,
+        CAVE_VINE_BERRIES => 14,
         LAVA => 11,
+        GLOW_LICHEN => 7,
+        SCULK_CATALYST => 6,
+        AMETHYST_CLUSTER => 5,
+        LARGE_AMETHYST_BUD => 4,
+        MEDIUM_AMETHYST_BUD => 2,
+        SMALL_AMETHYST_BUD => 1,
+        SCULK_SENSOR => 1,
         _ => 0,
     }
 }
@@ -849,7 +943,7 @@ pub fn transmits_light(id: BlockId) -> bool {
 /// partials) so slab/stair roofs still darken what's under them (M26 made `is_opaque` exclude them).
 #[inline]
 pub fn blocks_skylight(id: BlockId) -> bool {
-    is_volume_solid(id) && id != LEAVES
+    is_volume_solid(id) && id != LEAVES && id != AZALEA_LEAVES
 }
 
 /// The tool that mines a block fastest (for mining-speed + drop gating from M19).
@@ -888,10 +982,23 @@ pub fn required_harvest(id: BlockId) -> u8 {
 /// Time in seconds to break a block by hand (tools speed this up in M19). INFINITY = unbreakable.
 pub fn hardness(id: BlockId) -> f32 {
     match id {
-        BEDROCK => f32::INFINITY,
+        // Reinforced deepslate is unbreakable like bedrock (breakable() returns false for non-finite).
+        BEDROCK | REINFORCED_DEEPSLATE => f32::INFINITY,
         AIR | WATER | LAVA => 0.0,
         LEAVES | TORCH | GLOWSTONE => 0.3,
+        // U4 thin foliage: azalea leaves are leaf-soft; glow lichen / sculk vein are cross billboards
+        // but slightly tougher than 0 (listed BEFORE the `is_plant => 0.0` fallback so they win).
+        AZALEA_LEAVES => 0.2,
+        GLOW_LICHEN | SCULK_VEIN => 0.2,
+        MOSS_BLOCK => 0.4,
         DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY => 0.6,
+        // U4: amethyst family, pointed dripstone, rooted dirt, sculk sensor — stone-soft (1.5).
+        AMETHYST_BLOCK | BUDDING_AMETHYST | AMETHYST_CLUSTER | SMALL_AMETHYST_BUD
+        | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD | POINTED_DRIPSTONE | SCULK_SENSOR => 1.5,
+        ROOTED_DIRT => 0.5,
+        // U4: sculk core blocks are 0.6; the shrieker/catalyst are tougher (3.0).
+        SCULK => 0.6,
+        SCULK_SHRIEKER | SCULK_CATALYST => 3.0,
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => 1.2,
         COBBLESTONE_WALL => 2.0,
         STONE | COBBLESTONE | BRICKS | COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE
@@ -933,10 +1040,14 @@ pub fn tool_class(id: BlockId) -> ToolClass {
         | CALCITE | GRANITE | POLISHED_GRANITE | DIORITE | POLISHED_DIORITE | ANDESITE
         | POLISHED_ANDESITE | DRIPSTONE_BLOCK | SMOOTH_BASALT | COBBLED_DEEPSLATE
         | POLISHED_DEEPSLATE | DEEPSLATE_BRICKS | DEEPSLATE_TILES | CUT_COPPER => ToolClass::Pickaxe,
+        // U4: amethyst family + pointed dripstone are pickaxe-mined (reinforced deepslate is unbreakable
+        // so its tool is moot; sculk/moss/foliage are tool::None and fall through below).
+        AMETHYST_BLOCK | BUDDING_AMETHYST | AMETHYST_CLUSTER | SMALL_AMETHYST_BUD
+        | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD | POINTED_DRIPSTONE => ToolClass::Pickaxe,
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB | WOODEN_DOOR
         | WOODEN_TRAPDOOR | WOODEN_FENCE => ToolClass::Axe,
         COBBLESTONE_WALL | BUTTON => ToolClass::Pickaxe,
-        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY => ToolClass::Shovel,
+        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY | ROOTED_DIRT => ToolClass::Shovel,
         _ => ToolClass::None,
     }
 }
@@ -974,6 +1085,17 @@ pub fn drops(id: BlockId, state: u8) -> Option<(crate::item::ItemId, u8)> {
         // Stone-type drops: deepslate cobbles like stone, clay yields 4 clay balls (no silk touch yet).
         DEEPSLATE => (COBBLED_DEEPSLATE, 1),
         CLAY => (item::CLAY_BALL, 4),
+        // U4 cave-biome drops. Amethyst cluster shatters into 4 shards; cave-vine berries yield 1 glow
+        // berry. The amethyst buds + budding amethyst drop nothing (only the full cluster is harvestable),
+        // azalea leaves drop nothing (like LEAVES), and the sculk family + reinforced deepslate drop
+        // nothing (sculk needs silk touch in MC; reinforced deepslate is uncraftable/unbreakable). Every
+        // other U4 block (amethyst block, pointed dripstone, moss, glow lichen, cave vine, azaleas,
+        // dripleaves, rooted dirt, hanging roots, spore blossom) drops itself via the `_` fallthrough.
+        AMETHYST_CLUSTER => (item::AMETHYST_SHARD, 4),
+        CAVE_VINE_BERRIES => (item::GLOW_BERRIES, 1),
+        BUDDING_AMETHYST | SMALL_AMETHYST_BUD | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD
+        | AZALEA_LEAVES | SCULK | SCULK_VEIN | SCULK_SENSOR | SCULK_SHRIEKER | SCULK_CATALYST
+        | REINFORCED_DEEPSLATE => return None,
         _ => (id, 1),
     })
 }
@@ -1099,6 +1221,32 @@ pub mod tile {
     pub const DEEPSLATE_BRICKS: u32 = 98;
     pub const DEEPSLATE_TILES: u32 = 99;
     pub const CUT_COPPER: u32 = 100;
+    // U4 cave-biome set (101..=125): cube faces + cross-billboard plant cutouts (painted by paint_plant).
+    pub const AMETHYST_BLOCK: u32 = 101;
+    pub const BUDDING_AMETHYST: u32 = 102;
+    pub const AMETHYST_CLUSTER: u32 = 103;
+    pub const SMALL_AMETHYST_BUD: u32 = 104;
+    pub const MEDIUM_AMETHYST_BUD: u32 = 105;
+    pub const LARGE_AMETHYST_BUD: u32 = 106;
+    pub const POINTED_DRIPSTONE: u32 = 107;
+    pub const MOSS_BLOCK: u32 = 108;
+    pub const GLOW_LICHEN: u32 = 109;
+    pub const CAVE_VINE: u32 = 110;
+    pub const CAVE_VINE_BERRIES: u32 = 111;
+    pub const AZALEA: u32 = 112;
+    pub const FLOWERING_AZALEA: u32 = 113;
+    pub const BIG_DRIPLEAF: u32 = 114;
+    pub const SMALL_DRIPLEAF: u32 = 115;
+    pub const ROOTED_DIRT: u32 = 116;
+    pub const HANGING_ROOTS: u32 = 117;
+    pub const SPORE_BLOSSOM: u32 = 118;
+    pub const AZALEA_LEAVES: u32 = 119;
+    pub const SCULK: u32 = 120;
+    pub const SCULK_VEIN: u32 = 121;
+    pub const SCULK_SENSOR: u32 = 122;
+    pub const SCULK_SHRIEKER: u32 = 123;
+    pub const SCULK_CATALYST: u32 = 124;
+    pub const REINFORCED_DEEPSLATE: u32 = 125;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
@@ -1218,6 +1366,32 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         DEEPSLATE_BRICKS => tile::DEEPSLATE_BRICKS,
         DEEPSLATE_TILES => tile::DEEPSLATE_TILES,
         CUT_COPPER => tile::CUT_COPPER,
+        // U4 cave-biome set.
+        AMETHYST_BLOCK => tile::AMETHYST_BLOCK,
+        BUDDING_AMETHYST => tile::BUDDING_AMETHYST,
+        AMETHYST_CLUSTER => tile::AMETHYST_CLUSTER,
+        SMALL_AMETHYST_BUD => tile::SMALL_AMETHYST_BUD,
+        MEDIUM_AMETHYST_BUD => tile::MEDIUM_AMETHYST_BUD,
+        LARGE_AMETHYST_BUD => tile::LARGE_AMETHYST_BUD,
+        POINTED_DRIPSTONE => tile::POINTED_DRIPSTONE,
+        MOSS_BLOCK => tile::MOSS_BLOCK,
+        GLOW_LICHEN => tile::GLOW_LICHEN,
+        CAVE_VINE => tile::CAVE_VINE,
+        CAVE_VINE_BERRIES => tile::CAVE_VINE_BERRIES,
+        AZALEA => tile::AZALEA,
+        FLOWERING_AZALEA => tile::FLOWERING_AZALEA,
+        BIG_DRIPLEAF => tile::BIG_DRIPLEAF,
+        SMALL_DRIPLEAF => tile::SMALL_DRIPLEAF,
+        ROOTED_DIRT => tile::ROOTED_DIRT,
+        HANGING_ROOTS => tile::HANGING_ROOTS,
+        SPORE_BLOSSOM => tile::SPORE_BLOSSOM,
+        AZALEA_LEAVES => tile::AZALEA_LEAVES,
+        SCULK => tile::SCULK,
+        SCULK_VEIN => tile::SCULK_VEIN,
+        SCULK_SENSOR => tile::SCULK_SENSOR,
+        SCULK_SHRIEKER => tile::SCULK_SHRIEKER,
+        SCULK_CATALYST => tile::SCULK_CATALYST,
+        REINFORCED_DEEPSLATE => tile::REINFORCED_DEEPSLATE,
         _ => tile::MAGENTA,
     }
 }

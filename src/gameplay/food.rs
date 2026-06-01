@@ -34,6 +34,8 @@ pub fn food(item: ItemId) -> Option<Food> {
         // Staples.
         item::BREAD => f(5, 6.0),
         item::APPLE => f(4, 2.4),
+        // U4: glow berries (from cave-vine berries) — a small snack.
+        item::GLOW_BERRIES => f(2, 0.4),
         _ => None,
     }
 }

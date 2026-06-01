@@ -92,6 +92,10 @@ pub const COPPER_INGOT: ItemId = MATERIAL_BASE + 35;
 pub const EMERALD: ItemId = MATERIAL_BASE + 36;
 // U3: clay block mines into 4 clay balls (craft back into a clay block).
 pub const CLAY_BALL: ItemId = MATERIAL_BASE + 37;
+// U4: amethyst geode cluster drops 4 shards (craft back into an amethyst block); cave-vine berries
+// drop a glow berry (a small edible — see food.rs).
+pub const AMETHYST_SHARD: ItemId = MATERIAL_BASE + 38;
+pub const GLOW_BERRIES: ItemId = MATERIAL_BASE + 39;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -136,6 +140,8 @@ fn material_name(item: ItemId) -> &'static str {
         COPPER_INGOT => "Copper Ingot",
         EMERALD => "Emerald",
         CLAY_BALL => "Clay Ball",
+        AMETHYST_SHARD => "Amethyst Shard",
+        GLOW_BERRIES => "Glow Berries",
         _ => "Material",
     }
 }
@@ -180,6 +186,8 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         COPPER_INGOT => [0.85, 0.55, 0.40],
         EMERALD => [0.20, 0.80, 0.40],
         CLAY_BALL => [0.62, 0.64, 0.70],
+        AMETHYST_SHARD => [0.62, 0.45, 0.85],
+        GLOW_BERRIES => [0.95, 0.65, 0.20],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -976,6 +984,46 @@ mod tests {
         // New material known + named.
         assert!(is_known(CLAY_BALL));
         assert_eq!(item_name(CLAY_BALL), "Clay Ball");
+    }
+
+    #[test]
+    fn u4_cave_biome_registry() {
+        // Registry: a sample of the new blocks + materials are known and bound by MAX_BLOCK.
+        assert_eq!(block::MAX_BLOCK, block::REINFORCED_DEEPSLATE);
+        assert_eq!(block::REINFORCED_DEEPSLATE, 110);
+        assert!(is_known(block::AMETHYST_BLOCK) && is_known(block::SCULK_CATALYST));
+        assert!(is_known(block::REINFORCED_DEEPSLATE) && is_known(block::SPORE_BLOSSOM));
+        assert!(is_known(AMETHYST_SHARD) && is_known(GLOW_BERRIES));
+        assert_eq!(item_name(AMETHYST_SHARD), "Amethyst Shard");
+        assert_eq!(item_name(GLOW_BERRIES), "Glow Berries");
+        // Render kinds: crystals/plants are cross billboards; the storage/sculk cubes are not.
+        assert!(block::is_plant(block::AMETHYST_CLUSTER));
+        assert!(block::is_plant(block::CAVE_VINE) && block::is_plant(block::SCULK_VEIN));
+        assert!(!block::is_plant(block::MOSS_BLOCK) && !block::is_plant(block::SCULK));
+        // Light emission: cave-vine berries are the brightest cave light; glow lichen a soft glow.
+        assert_eq!(block::light_emission(block::CAVE_VINE_BERRIES), 14);
+        assert_eq!(block::light_emission(block::GLOW_LICHEN), 7);
+        assert_eq!(block::light_emission(block::AMETHYST_CLUSTER), 5);
+        // Reinforced deepslate is unbreakable (non-finite hardness); sculk catalyst is breakable.
+        assert!(!block::breakable(block::REINFORCED_DEEPSLATE));
+        assert!(block::breakable(block::SCULK_CATALYST));
+        // Drops: budding amethyst + the buds drop nothing; only the full cluster yields shards (4);
+        // cave-vine berries yield a glow berry; sculk drops nothing.
+        assert_eq!(block::drops(block::BUDDING_AMETHYST, 0), None);
+        assert_eq!(block::drops(block::SMALL_AMETHYST_BUD, 0), None);
+        assert_eq!(block::drops(block::SCULK, 0), None);
+        assert_eq!(block::drops(block::AMETHYST_CLUSTER, 0), Some((AMETHYST_SHARD, 4)));
+        assert_eq!(block::drops(block::CAVE_VINE_BERRIES, 0), Some((GLOW_BERRIES, 1)));
+        // Self-dropping cave decoration falls through to (id, 1).
+        assert_eq!(block::drops(block::MOSS_BLOCK, 0), Some((block::MOSS_BLOCK, 1)));
+        // Recipe: 4 amethyst shards (2x2) -> 1 amethyst block.
+        let a = AMETHYST_SHARD;
+        assert_eq!(
+            crate::crafting::match_grid(&[a, a, 0, a, a, 0, 0, 0, 0]),
+            Some((block::AMETHYST_BLOCK, 1))
+        );
+        // Glow berries are a small edible.
+        assert!(crate::food::food(GLOW_BERRIES).is_some());
     }
 
     #[test]
