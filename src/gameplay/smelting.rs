@@ -18,6 +18,7 @@ pub fn smelt_output(input: ItemId) -> Option<ItemId> {
         block::GOLD_ORE | block::DEEPSLATE_GOLD_ORE | item::RAW_GOLD => item::GOLD_INGOT,
         block::COPPER_ORE | block::DEEPSLATE_COPPER_ORE | item::RAW_COPPER => item::COPPER_INGOT,
         block::COBBLESTONE => block::STONE, // cobble re-smelts to smooth stone
+        block::COBBLED_DEEPSLATE => block::DEEPSLATE, // U3: cobbled deepslate -> deepslate (mirrors cobble)
         block::SAND => block::GLASS,        // sand -> glass
         block::WOOD => item::CHARCOAL,      // a log (in the input slot) chars to charcoal
         // Cooking raw mob drops (P4).
@@ -33,6 +34,7 @@ pub fn smelt_output(input: ItemId) -> Option<ItemId> {
 pub fn fuel_value(fuel: ItemId) -> Option<f32> {
     Some(match fuel {
         item::COAL | item::CHARCOAL => 8.0 * SMELT_TIME, // a coal smelts 8 items (Minecraft)
+        block::COAL_BLOCK => 8.0 * (8.0 * SMELT_TIME),   // U3: a coal block burns ~8 coal worth
         block::PLANKS => 9.0,                            // 1.5 items
         block::WOOD => 18.0,                             // 3 items — a whole log
         item::STICK => 3.0,                              // 0.5 items
@@ -93,6 +95,14 @@ mod tests {
         assert!(fuel_value(block::WOOD).unwrap() > fuel_value(block::PLANKS).unwrap());
         assert!(fuel_value(item::STICK).is_some());
         assert_eq!(fuel_value(block::IRON_ORE), None); // ore is input, never fuel
+    }
+
+    #[test]
+    fn u3_coal_block_fuel_and_cobbled_deepslate() {
+        assert_eq!(smelt_output(block::COBBLED_DEEPSLATE), Some(block::DEEPSLATE));
+        // A coal block burns far longer than a single coal (it's ~8 coal worth).
+        assert!(fuel_value(block::COAL_BLOCK).unwrap() > fuel_value(item::COAL).unwrap());
+        assert_eq!(fuel_value(block::IRON_BLOCK), None); // storage metal isn't fuel
     }
 
     #[test]

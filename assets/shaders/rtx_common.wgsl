@@ -142,6 +142,35 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 56u: { return vec3<f32>(0.24, 0.36, 0.30); } // deepslate emerald ore
         case 57u: { return vec3<f32>(0.22, 0.26, 0.38); } // deepslate lapis ore
         case 58u: { return vec3<f32>(0.27, 0.37, 0.39); } // deepslate diamond ore
+        // U3 storage/compaction blocks.
+        case 59u: { return vec3<f32>(0.86, 0.84, 0.80); } // iron block
+        case 60u: { return vec3<f32>(0.96, 0.82, 0.25); } // gold block
+        case 61u: { return vec3<f32>(0.40, 0.85, 0.84); } // diamond block
+        case 62u: { return vec3<f32>(0.22, 0.78, 0.42); } // emerald block
+        case 63u: { return vec3<f32>(0.18, 0.32, 0.72); } // lapis block
+        case 64u: { return vec3<f32>(0.72, 0.12, 0.10); } // redstone block
+        case 65u: { return vec3<f32>(0.78, 0.46, 0.34); } // copper block
+        case 66u: { return vec3<f32>(0.10, 0.10, 0.12); } // coal block
+        case 67u: { return vec3<f32>(0.72, 0.58, 0.46); } // raw iron block
+        case 68u: { return vec3<f32>(0.74, 0.46, 0.30); } // raw copper block
+        case 69u: { return vec3<f32>(0.82, 0.66, 0.28); } // raw gold block
+        // U3 stone family.
+        case 70u: { return vec3<f32>(0.42, 0.43, 0.40); } // tuff
+        case 71u: { return vec3<f32>(0.90, 0.90, 0.88); } // calcite
+        case 72u: { return vec3<f32>(0.66, 0.45, 0.38); } // granite
+        case 73u: { return vec3<f32>(0.68, 0.47, 0.40); } // polished granite
+        case 74u: { return vec3<f32>(0.84, 0.84, 0.85); } // diorite
+        case 75u: { return vec3<f32>(0.86, 0.86, 0.87); } // polished diorite
+        case 76u: { return vec3<f32>(0.55, 0.56, 0.57); } // andesite
+        case 77u: { return vec3<f32>(0.57, 0.58, 0.59); } // polished andesite
+        case 78u: { return vec3<f32>(0.62, 0.64, 0.70); } // clay
+        case 79u: { return vec3<f32>(0.55, 0.42, 0.34); } // dripstone block
+        case 80u: { return vec3<f32>(0.28, 0.27, 0.30); } // smooth basalt
+        case 81u: { return vec3<f32>(0.26, 0.26, 0.29); } // cobbled deepslate
+        case 82u: { return vec3<f32>(0.24, 0.24, 0.27); } // polished deepslate
+        case 83u: { return vec3<f32>(0.23, 0.23, 0.26); } // deepslate bricks
+        case 84u: { return vec3<f32>(0.22, 0.22, 0.25); } // deepslate tiles
+        case 85u: { return vec3<f32>(0.78, 0.46, 0.34); } // cut copper
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }

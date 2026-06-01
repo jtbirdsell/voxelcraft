@@ -70,9 +70,38 @@ pub const DEEPSLATE_REDSTONE_ORE: BlockId = 55;
 pub const DEEPSLATE_EMERALD_ORE: BlockId = 56;
 pub const DEEPSLATE_LAPIS_ORE: BlockId = 57;
 pub const DEEPSLATE_DIAMOND_ORE: BlockId = 58;
+// U3: storage/compaction blocks (9 ingots/gems <-> 1 block) + raw-material blocks.
+pub const IRON_BLOCK: BlockId = 59;
+pub const GOLD_BLOCK: BlockId = 60;
+pub const DIAMOND_BLOCK: BlockId = 61;
+pub const EMERALD_BLOCK: BlockId = 62;
+pub const LAPIS_BLOCK: BlockId = 63;
+pub const REDSTONE_BLOCK: BlockId = 64;
+pub const COPPER_BLOCK: BlockId = 65;
+pub const COAL_BLOCK: BlockId = 66;
+pub const RAW_IRON_BLOCK: BlockId = 67;
+pub const RAW_COPPER_BLOCK: BlockId = 68;
+pub const RAW_GOLD_BLOCK: BlockId = 69;
+// U3: the underground stone family (variants in blobs/geodes + their polished/brick build forms).
+pub const TUFF: BlockId = 70;
+pub const CALCITE: BlockId = 71;
+pub const GRANITE: BlockId = 72;
+pub const POLISHED_GRANITE: BlockId = 73;
+pub const DIORITE: BlockId = 74;
+pub const POLISHED_DIORITE: BlockId = 75;
+pub const ANDESITE: BlockId = 76;
+pub const POLISHED_ANDESITE: BlockId = 77;
+pub const CLAY: BlockId = 78;
+pub const DRIPSTONE_BLOCK: BlockId = 79;
+pub const SMOOTH_BASALT: BlockId = 80;
+pub const COBBLED_DEEPSLATE: BlockId = 81;
+pub const POLISHED_DEEPSLATE: BlockId = 82;
+pub const DEEPSLATE_BRICKS: BlockId = 83;
+pub const DEEPSLATE_TILES: BlockId = 84;
+pub const CUT_COPPER: BlockId = 85;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = DEEPSLATE_DIAMOND_ORE;
+pub const MAX_BLOCK: BlockId = CUT_COPPER;
 
 #[inline]
 pub fn is_fence(id: BlockId) -> bool {
@@ -626,6 +655,33 @@ pub fn display_name(id: BlockId) -> &'static str {
         DEEPSLATE_EMERALD_ORE => "Deepslate Emerald Ore",
         DEEPSLATE_LAPIS_ORE => "Deepslate Lapis Ore",
         DEEPSLATE_DIAMOND_ORE => "Deepslate Diamond Ore",
+        IRON_BLOCK => "Block of Iron",
+        GOLD_BLOCK => "Block of Gold",
+        DIAMOND_BLOCK => "Block of Diamond",
+        EMERALD_BLOCK => "Block of Emerald",
+        LAPIS_BLOCK => "Lapis Lazuli Block",
+        REDSTONE_BLOCK => "Block of Redstone",
+        COPPER_BLOCK => "Block of Copper",
+        COAL_BLOCK => "Block of Coal",
+        RAW_IRON_BLOCK => "Block of Raw Iron",
+        RAW_COPPER_BLOCK => "Block of Raw Copper",
+        RAW_GOLD_BLOCK => "Block of Raw Gold",
+        TUFF => "Tuff",
+        CALCITE => "Calcite",
+        GRANITE => "Granite",
+        POLISHED_GRANITE => "Polished Granite",
+        DIORITE => "Diorite",
+        POLISHED_DIORITE => "Polished Diorite",
+        ANDESITE => "Andesite",
+        POLISHED_ANDESITE => "Polished Andesite",
+        CLAY => "Clay",
+        DRIPSTONE_BLOCK => "Dripstone Block",
+        SMOOTH_BASALT => "Smooth Basalt",
+        COBBLED_DEEPSLATE => "Cobbled Deepslate",
+        POLISHED_DEEPSLATE => "Polished Deepslate",
+        DEEPSLATE_BRICKS => "Deepslate Bricks",
+        DEEPSLATE_TILES => "Deepslate Tiles",
+        CUT_COPPER => "Cut Copper",
         _ => "Unknown",
     }
 }
@@ -713,6 +769,35 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         DEEPSLATE_EMERALD_ORE => [0.24, 0.36, 0.30],
         DEEPSLATE_LAPIS_ORE => [0.22, 0.26, 0.38],
         DEEPSLATE_DIAMOND_ORE => [0.27, 0.37, 0.39],
+        // U3 storage blocks (solid metal/gem; raw blocks are chunkier nuggets).
+        IRON_BLOCK => [0.86, 0.84, 0.80],
+        GOLD_BLOCK => [0.96, 0.82, 0.25],
+        DIAMOND_BLOCK => [0.40, 0.85, 0.84],
+        EMERALD_BLOCK => [0.22, 0.78, 0.42],
+        LAPIS_BLOCK => [0.18, 0.32, 0.72],
+        REDSTONE_BLOCK => [0.72, 0.12, 0.10],
+        COPPER_BLOCK => [0.78, 0.46, 0.34],
+        COAL_BLOCK => [0.10, 0.10, 0.12],
+        RAW_IRON_BLOCK => [0.72, 0.58, 0.46],
+        RAW_COPPER_BLOCK => [0.74, 0.46, 0.30],
+        RAW_GOLD_BLOCK => [0.82, 0.66, 0.28],
+        // U3 stone family.
+        TUFF => [0.42, 0.43, 0.40],
+        CALCITE => [0.90, 0.90, 0.88],
+        GRANITE => [0.66, 0.45, 0.38],
+        POLISHED_GRANITE => [0.68, 0.47, 0.40],
+        DIORITE => [0.84, 0.84, 0.85],
+        POLISHED_DIORITE => [0.86, 0.86, 0.87],
+        ANDESITE => [0.55, 0.56, 0.57],
+        POLISHED_ANDESITE => [0.57, 0.58, 0.59],
+        CLAY => [0.62, 0.64, 0.70],
+        DRIPSTONE_BLOCK => [0.55, 0.42, 0.34],
+        SMOOTH_BASALT => [0.28, 0.27, 0.30],
+        COBBLED_DEEPSLATE => [0.26, 0.26, 0.29],
+        POLISHED_DEEPSLATE => [0.24, 0.24, 0.27],
+        DEEPSLATE_BRICKS => [0.23, 0.23, 0.26],
+        DEEPSLATE_TILES => [0.22, 0.22, 0.25],
+        CUT_COPPER => [0.78, 0.46, 0.34],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -788,10 +873,13 @@ pub fn requires_tool(id: BlockId) -> bool {
 pub fn required_harvest(id: BlockId) -> u8 {
     match id {
         IRON_ORE | LAPIS_ORE | COPPER_ORE
-        | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE | DEEPSLATE_LAPIS_ORE => 1,
+        | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE | DEEPSLATE_LAPIS_ORE
+        | IRON_BLOCK | COPPER_BLOCK | LAPIS_BLOCK | REDSTONE_BLOCK | RAW_IRON_BLOCK
+        | RAW_COPPER_BLOCK | CUT_COPPER => 1,
         GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | EMERALD_ORE
         | DEEPSLATE_GOLD_ORE | DEEPSLATE_DIAMOND_ORE | DEEPSLATE_REDSTONE_ORE
-        | DEEPSLATE_EMERALD_ORE => 2,
+        | DEEPSLATE_EMERALD_ORE
+        | GOLD_BLOCK | DIAMOND_BLOCK | EMERALD_BLOCK | RAW_GOLD_BLOCK => 2,
         OBSIDIAN => 3,
         _ => 0,
     }
@@ -803,15 +891,22 @@ pub fn hardness(id: BlockId) -> f32 {
         BEDROCK => f32::INFINITY,
         AIR | WATER | LAVA => 0.0,
         LEAVES | TORCH | GLOWSTONE => 0.3,
-        DIRT | GRASS | SAND | GRAVEL | SNOW => 0.6,
+        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY => 0.6,
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => 1.2,
         COBBLESTONE_WALL => 2.0,
         STONE | COBBLESTONE | BRICKS | COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE
         | REDSTONE_ORE | LAPIS_ORE | COPPER_ORE | EMERALD_ORE => 1.5,
+        TUFF | CALCITE | GRANITE | POLISHED_GRANITE | DIORITE | POLISHED_DIORITE | ANDESITE
+        | POLISHED_ANDESITE | DRIPSTONE_BLOCK | SMOOTH_BASALT => 1.5,
         DEEPSLATE | FURNACE => 2.0,
         DEEPSLATE_COAL_ORE | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE | DEEPSLATE_GOLD_ORE
         | DEEPSLATE_REDSTONE_ORE | DEEPSLATE_EMERALD_ORE | DEEPSLATE_LAPIS_ORE
         | DEEPSLATE_DIAMOND_ORE => 3.0,
+        // Storage/raw blocks + deepslate build variants + cut copper: metal/slate-tough (3.0).
+        IRON_BLOCK | GOLD_BLOCK | DIAMOND_BLOCK | EMERALD_BLOCK | LAPIS_BLOCK | REDSTONE_BLOCK
+        | COPPER_BLOCK | COAL_BLOCK | RAW_IRON_BLOCK | RAW_COPPER_BLOCK | RAW_GOLD_BLOCK
+        | COBBLED_DEEPSLATE | POLISHED_DEEPSLATE | DEEPSLATE_BRICKS | DEEPSLATE_TILES
+        | CUT_COPPER => 3.0,
         OBSIDIAN => 8.0,
         ICE => 0.5,
         PUMPKIN => 1.0,
@@ -833,10 +928,15 @@ pub fn tool_class(id: BlockId) -> ToolClass {
         COPPER_ORE | EMERALD_ORE | DEEPSLATE_COAL_ORE | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE
         | DEEPSLATE_GOLD_ORE | DEEPSLATE_REDSTONE_ORE | DEEPSLATE_EMERALD_ORE | DEEPSLATE_LAPIS_ORE
         | DEEPSLATE_DIAMOND_ORE => ToolClass::Pickaxe,
+        IRON_BLOCK | GOLD_BLOCK | DIAMOND_BLOCK | EMERALD_BLOCK | LAPIS_BLOCK | REDSTONE_BLOCK
+        | COPPER_BLOCK | COAL_BLOCK | RAW_IRON_BLOCK | RAW_COPPER_BLOCK | RAW_GOLD_BLOCK | TUFF
+        | CALCITE | GRANITE | POLISHED_GRANITE | DIORITE | POLISHED_DIORITE | ANDESITE
+        | POLISHED_ANDESITE | DRIPSTONE_BLOCK | SMOOTH_BASALT | COBBLED_DEEPSLATE
+        | POLISHED_DEEPSLATE | DEEPSLATE_BRICKS | DEEPSLATE_TILES | CUT_COPPER => ToolClass::Pickaxe,
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB | WOODEN_DOOR
         | WOODEN_TRAPDOOR | WOODEN_FENCE => ToolClass::Axe,
         COBBLESTONE_WALL | BUTTON => ToolClass::Pickaxe,
-        DIRT | GRASS | SAND | GRAVEL | SNOW => ToolClass::Shovel,
+        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY => ToolClass::Shovel,
         _ => ToolClass::None,
     }
 }
@@ -871,6 +971,9 @@ pub fn drops(id: BlockId, state: u8) -> Option<(crate::item::ItemId, u8)> {
         LAPIS_ORE | DEEPSLATE_LAPIS_ORE => (item::LAPIS, 6),
         COPPER_ORE | DEEPSLATE_COPPER_ORE => (item::RAW_COPPER, 3),
         EMERALD_ORE | DEEPSLATE_EMERALD_ORE => (item::EMERALD, 1),
+        // Stone-type drops: deepslate cobbles like stone, clay yields 4 clay balls (no silk touch yet).
+        DEEPSLATE => (COBBLED_DEEPSLATE, 1),
+        CLAY => (item::CLAY_BALL, 4),
         _ => (id, 1),
     })
 }
@@ -967,6 +1070,35 @@ pub mod tile {
     pub const DS_EMERALD: u32 = 71;
     pub const DS_LAPIS: u32 = 72;
     pub const DS_DIAMOND: u32 = 73;
+    // U3 storage/compaction blocks (metal/gem faces + raw-nugget faces).
+    pub const IRON_BLOCK: u32 = 74;
+    pub const GOLD_BLOCK: u32 = 75;
+    pub const DIAMOND_BLOCK: u32 = 76;
+    pub const EMERALD_BLOCK: u32 = 77;
+    pub const LAPIS_BLOCK: u32 = 78;
+    pub const REDSTONE_BLOCK: u32 = 79;
+    pub const COPPER_BLOCK: u32 = 80;
+    pub const COAL_BLOCK: u32 = 81;
+    pub const RAW_IRON_BLOCK: u32 = 82;
+    pub const RAW_COPPER_BLOCK: u32 = 83;
+    pub const RAW_GOLD_BLOCK: u32 = 84;
+    // U3 underground stone family.
+    pub const TUFF: u32 = 85;
+    pub const CALCITE: u32 = 86;
+    pub const GRANITE: u32 = 87;
+    pub const POLISHED_GRANITE: u32 = 88;
+    pub const DIORITE: u32 = 89;
+    pub const POLISHED_DIORITE: u32 = 90;
+    pub const ANDESITE: u32 = 91;
+    pub const POLISHED_ANDESITE: u32 = 92;
+    pub const CLAY: u32 = 93;
+    pub const DRIPSTONE: u32 = 94;
+    pub const SMOOTH_BASALT: u32 = 95;
+    pub const COBBLED_DEEPSLATE: u32 = 96;
+    pub const POLISHED_DEEPSLATE: u32 = 97;
+    pub const DEEPSLATE_BRICKS: u32 = 98;
+    pub const DEEPSLATE_TILES: u32 = 99;
+    pub const CUT_COPPER: u32 = 100;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
@@ -1059,6 +1191,33 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         DEEPSLATE_EMERALD_ORE => tile::DS_EMERALD,
         DEEPSLATE_LAPIS_ORE => tile::DS_LAPIS,
         DEEPSLATE_DIAMOND_ORE => tile::DS_DIAMOND,
+        IRON_BLOCK => tile::IRON_BLOCK,
+        GOLD_BLOCK => tile::GOLD_BLOCK,
+        DIAMOND_BLOCK => tile::DIAMOND_BLOCK,
+        EMERALD_BLOCK => tile::EMERALD_BLOCK,
+        LAPIS_BLOCK => tile::LAPIS_BLOCK,
+        REDSTONE_BLOCK => tile::REDSTONE_BLOCK,
+        COPPER_BLOCK => tile::COPPER_BLOCK,
+        COAL_BLOCK => tile::COAL_BLOCK,
+        RAW_IRON_BLOCK => tile::RAW_IRON_BLOCK,
+        RAW_COPPER_BLOCK => tile::RAW_COPPER_BLOCK,
+        RAW_GOLD_BLOCK => tile::RAW_GOLD_BLOCK,
+        TUFF => tile::TUFF,
+        CALCITE => tile::CALCITE,
+        GRANITE => tile::GRANITE,
+        POLISHED_GRANITE => tile::POLISHED_GRANITE,
+        DIORITE => tile::DIORITE,
+        POLISHED_DIORITE => tile::POLISHED_DIORITE,
+        ANDESITE => tile::ANDESITE,
+        POLISHED_ANDESITE => tile::POLISHED_ANDESITE,
+        CLAY => tile::CLAY,
+        DRIPSTONE_BLOCK => tile::DRIPSTONE,
+        SMOOTH_BASALT => tile::SMOOTH_BASALT,
+        COBBLED_DEEPSLATE => tile::COBBLED_DEEPSLATE,
+        POLISHED_DEEPSLATE => tile::POLISHED_DEEPSLATE,
+        DEEPSLATE_BRICKS => tile::DEEPSLATE_BRICKS,
+        DEEPSLATE_TILES => tile::DEEPSLATE_TILES,
+        CUT_COPPER => tile::CUT_COPPER,
         _ => tile::MAGENTA,
     }
 }

@@ -90,6 +90,8 @@ pub const CARROT: ItemId = MATERIAL_BASE + 33;
 pub const RAW_COPPER: ItemId = MATERIAL_BASE + 34;
 pub const COPPER_INGOT: ItemId = MATERIAL_BASE + 35;
 pub const EMERALD: ItemId = MATERIAL_BASE + 36;
+// U3: clay block mines into 4 clay balls (craft back into a clay block).
+pub const CLAY_BALL: ItemId = MATERIAL_BASE + 37;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -133,6 +135,7 @@ fn material_name(item: ItemId) -> &'static str {
         RAW_COPPER => "Raw Copper",
         COPPER_INGOT => "Copper Ingot",
         EMERALD => "Emerald",
+        CLAY_BALL => "Clay Ball",
         _ => "Material",
     }
 }
@@ -176,6 +179,7 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         RAW_COPPER => [0.80, 0.50, 0.32],
         COPPER_INGOT => [0.85, 0.55, 0.40],
         EMERALD => [0.20, 0.80, 0.40],
+        CLAY_BALL => [0.62, 0.64, 0.70],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -956,6 +960,22 @@ mod tests {
         // Deepslate ore is tougher than its stone variant; emerald needs an iron pickaxe.
         assert!(block::hardness(block::DEEPSLATE_IRON_ORE) > block::hardness(block::IRON_ORE));
         assert_eq!(block::required_harvest(block::EMERALD_ORE), 2);
+    }
+
+    #[test]
+    fn u3_storage_and_stone_blocks() {
+        // Deepslate now cobbles like stone; clay yields 4 clay balls and is shovel-mined.
+        assert_eq!(block::drops(block::DEEPSLATE, 0), Some((block::COBBLED_DEEPSLATE, 1)));
+        assert_eq!(block::drops(block::CLAY, 0), Some((CLAY_BALL, 4)));
+        assert_eq!(block::tool_class(block::CLAY), block::ToolClass::Shovel);
+        // Storage blocks: known, pickaxe-gated like their ore tier.
+        assert!(is_known(block::IRON_BLOCK) && is_known(block::CUT_COPPER));
+        assert_eq!(block::required_harvest(block::DIAMOND_BLOCK), 2);
+        assert_eq!(block::required_harvest(block::IRON_BLOCK), 1);
+        assert_eq!(block::required_harvest(block::COAL_BLOCK), 0);
+        // New material known + named.
+        assert!(is_known(CLAY_BALL));
+        assert_eq!(item_name(CLAY_BALL), "Clay Ball");
     }
 
     #[test]

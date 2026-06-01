@@ -58,6 +58,17 @@ fn tool_set(r: &mut Vec<Recipe>, m: ItemId, tier: Tier) {
     r.push(shaped(&["MM ", " S ", " S "], leg, item::tool_id(tier, 4), 1)); // hoe
 }
 
+/// U3 compaction pair: 9 of `material` -> 1 `block`, and `block` -> 9 `material` (storage blocks).
+fn storage(r: &mut Vec<Recipe>, material: ItemId, block: ItemId) {
+    r.push(shaped(&["MMM", "MMM", "MMM"], &[('M', material)], block, 1));
+    r.push(shapeless(&[block], material, 9));
+}
+
+/// U3 2x2 -> 4 conversion (granite->polished, cobbled deepslate->polished->bricks->tiles, copper->cut).
+fn square4(r: &mut Vec<Recipe>, input: ItemId, output: ItemId) {
+    r.push(shaped(&["II", "II"], &[('I', input)], output, 4));
+}
+
 /// The 4 armor pieces of a tier from a material `m` (helmet/chestplate/leggings/boots).
 fn armor_set(r: &mut Vec<Recipe>, m: ItemId, tier: u16) {
     let leg = &[('M', m)];
@@ -116,6 +127,28 @@ fn build_recipes() -> Vec<Recipe> {
         item::SHIELD,
         1,
     ));
+    // U3: storage/compaction blocks (9 ingots/gems <-> 1 block; raw-material blocks too).
+    storage(&mut r, item::IRON_INGOT, block::IRON_BLOCK);
+    storage(&mut r, item::GOLD_INGOT, block::GOLD_BLOCK);
+    storage(&mut r, item::DIAMOND, block::DIAMOND_BLOCK);
+    storage(&mut r, item::EMERALD, block::EMERALD_BLOCK);
+    storage(&mut r, item::LAPIS, block::LAPIS_BLOCK);
+    storage(&mut r, item::REDSTONE_DUST, block::REDSTONE_BLOCK);
+    storage(&mut r, item::COPPER_INGOT, block::COPPER_BLOCK);
+    storage(&mut r, item::COAL, block::COAL_BLOCK);
+    storage(&mut r, item::RAW_IRON, block::RAW_IRON_BLOCK);
+    storage(&mut r, item::RAW_COPPER, block::RAW_COPPER_BLOCK);
+    storage(&mut r, item::RAW_GOLD, block::RAW_GOLD_BLOCK);
+    // U3: clay block <-> 4 clay balls.
+    r.push(shaped(&["CC", "CC"], &[('C', item::CLAY_BALL)], block::CLAY, 1));
+    // U3: cut copper + the polished/brick stone chains (2x2 -> 4).
+    square4(&mut r, block::COPPER_BLOCK, block::CUT_COPPER);
+    square4(&mut r, block::GRANITE, block::POLISHED_GRANITE);
+    square4(&mut r, block::DIORITE, block::POLISHED_DIORITE);
+    square4(&mut r, block::ANDESITE, block::POLISHED_ANDESITE);
+    square4(&mut r, block::COBBLED_DEEPSLATE, block::POLISHED_DEEPSLATE);
+    square4(&mut r, block::POLISHED_DEEPSLATE, block::DEEPSLATE_BRICKS);
+    square4(&mut r, block::DEEPSLATE_BRICKS, block::DEEPSLATE_TILES);
     r
 }
 
@@ -232,6 +265,28 @@ mod tests {
     #[test]
     fn empty_grid_no_recipe() {
         assert_eq!(match_grid(&[0; 9]), None);
+    }
+
+    #[test]
+    fn u3_storage_polish_and_clay() {
+        // 9 iron ingots -> iron block, and a single block back to 9 ingots.
+        let i = item::IRON_INGOT;
+        assert_eq!(match_grid(&[i, i, i, i, i, i, i, i, i]), Some((block::IRON_BLOCK, 1)));
+        let mut g = [0; 9];
+        g[4] = block::IRON_BLOCK;
+        assert_eq!(match_grid(&g), Some((i, 9)));
+        // 4 copper blocks (2x2) -> 4 cut copper; a single copper block -> 9 ingots (distinct grids).
+        let b = block::COPPER_BLOCK;
+        assert_eq!(match_grid(&[b, b, 0, b, b, 0, 0, 0, 0]), Some((block::CUT_COPPER, 4)));
+        let mut g = [0; 9];
+        g[0] = b;
+        assert_eq!(match_grid(&g), Some((item::COPPER_INGOT, 9)));
+        // Deepslate polish chain: cobbled -> polished.
+        let cd = block::COBBLED_DEEPSLATE;
+        assert_eq!(match_grid(&[cd, cd, 0, cd, cd, 0, 0, 0, 0]), Some((block::POLISHED_DEEPSLATE, 4)));
+        // 4 clay balls -> clay block.
+        let cb = item::CLAY_BALL;
+        assert_eq!(match_grid(&[cb, cb, 0, cb, cb, 0, 0, 0, 0]), Some((block::CLAY, 1)));
     }
 
     #[test]

@@ -103,6 +103,35 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::DS_EMERALD => [0.24, 0.36, 0.30],
         T::DS_LAPIS => [0.22, 0.26, 0.38],
         T::DS_DIAMOND => [0.27, 0.37, 0.39],
+        // U3 storage blocks (must match block::face_color + voxel_color).
+        T::IRON_BLOCK => [0.86, 0.84, 0.80],
+        T::GOLD_BLOCK => [0.96, 0.82, 0.25],
+        T::DIAMOND_BLOCK => [0.40, 0.85, 0.84],
+        T::EMERALD_BLOCK => [0.22, 0.78, 0.42],
+        T::LAPIS_BLOCK => [0.18, 0.32, 0.72],
+        T::REDSTONE_BLOCK => [0.72, 0.12, 0.10],
+        T::COPPER_BLOCK => [0.78, 0.46, 0.34],
+        T::COAL_BLOCK => [0.10, 0.10, 0.12],
+        T::RAW_IRON_BLOCK => [0.72, 0.58, 0.46],
+        T::RAW_COPPER_BLOCK => [0.74, 0.46, 0.30],
+        T::RAW_GOLD_BLOCK => [0.82, 0.66, 0.28],
+        // U3 stone family.
+        T::TUFF => [0.42, 0.43, 0.40],
+        T::CALCITE => [0.90, 0.90, 0.88],
+        T::GRANITE => [0.66, 0.45, 0.38],
+        T::POLISHED_GRANITE => [0.68, 0.47, 0.40],
+        T::DIORITE => [0.84, 0.84, 0.85],
+        T::POLISHED_DIORITE => [0.86, 0.86, 0.87],
+        T::ANDESITE => [0.55, 0.56, 0.57],
+        T::POLISHED_ANDESITE => [0.57, 0.58, 0.59],
+        T::CLAY => [0.62, 0.64, 0.70],
+        T::DRIPSTONE => [0.55, 0.42, 0.34],
+        T::SMOOTH_BASALT => [0.28, 0.27, 0.30],
+        T::COBBLED_DEEPSLATE => [0.26, 0.26, 0.29],
+        T::POLISHED_DEEPSLATE => [0.24, 0.24, 0.27],
+        T::DEEPSLATE_BRICKS => [0.23, 0.23, 0.26],
+        T::DEEPSLATE_TILES => [0.22, 0.22, 0.25],
+        T::CUT_COPPER => [0.78, 0.46, 0.34],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -221,6 +250,51 @@ fn ore_on(host: [f32; 3], fleck: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3
 /// Stone-host ore tile (the common case): chunky colored lumps on a stone background.
 fn ore(fleck: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3] {
     ore_on(base_color(T::STONE), fleck, x, y, salt)
+}
+
+/// Solid metal/gem storage block (U3): flat base, a beveled darker border + a faint inner highlight,
+/// and a touch of grain so the face doesn't read as a perfectly flat swatch.
+fn metal_block(base: [f32; 3], x: u32, y: u32) -> [f32; 3] {
+    if x == 0 || y == 0 || x == 15 || y == 15 {
+        return shade(base, -0.28); // beveled edge
+    }
+    if x == 1 || y == 1 {
+        return shade(base, 0.16); // top-left inner highlight
+    }
+    shade(base, (hashf(x, y, 91) - 0.5) * 0.08)
+}
+
+/// Raw-material block (U3): chunky nuggets (ore_lump cores) on a darker matrix of the same metal.
+fn raw_block(base: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3] {
+    match ore_lump(x, y, salt) {
+        2 => shade(base, 0.18),
+        1 => shade(base, -0.08),
+        _ => shade(base, -0.28),
+    }
+}
+
+/// Two-tone speckled stone (U3 granite/diorite/andesite): base with scattered lighter + darker flecks.
+fn speckle(base: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3] {
+    let h = hashf(x, y, salt);
+    if h > 0.86 {
+        shade(base, 0.20)
+    } else if h < 0.14 {
+        shade(base, -0.22)
+    } else {
+        shade(base, (hashf(x, y, salt + 1) - 0.5) * 0.12)
+    }
+}
+
+/// Mortar/seam grid (U3): `square` = a square tile grid; else a running-bond brick grid. Returns true
+/// on a seam texel (caller draws mortar), false on the face interior.
+fn grid(x: u32, y: u32, square: bool, cell: u32) -> bool {
+    if square {
+        x % cell == 0 || y % cell == 0
+    } else {
+        let row = y / cell;
+        let bx = (x + (row % 2) * (cell / 2)) % cell;
+        y % cell == 0 || bx == 0
+    }
 }
 
 /// Ore-lump mask with a rim: 2 = lump core, 1 = lump edge, 0 = host stone. Chunkier than a single
@@ -396,6 +470,59 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
         T::DS_EMERALD => c = ore_on(base_color(T::DEEPSLATE), [0.20, 0.80, 0.40], x, y, 77),
         T::DS_LAPIS => c = ore_on(base_color(T::DEEPSLATE), [0.15, 0.28, 0.85], x, y, 68),
         T::DS_DIAMOND => c = ore_on(base_color(T::DEEPSLATE), [0.45, 0.92, 0.90], x, y, 54),
+        // U3 storage blocks: solid metal/gem faces; raw blocks are lumpy nuggets.
+        T::IRON_BLOCK | T::GOLD_BLOCK | T::DIAMOND_BLOCK | T::EMERALD_BLOCK | T::LAPIS_BLOCK
+        | T::REDSTONE_BLOCK | T::COPPER_BLOCK | T::COAL_BLOCK => c = metal_block(base, x, y),
+        T::RAW_IRON_BLOCK => c = raw_block(base, x, y, 12),
+        T::RAW_COPPER_BLOCK => c = raw_block(base, x, y, 18),
+        T::RAW_GOLD_BLOCK => c = raw_block(base, x, y, 24),
+        // U3 stone family.
+        T::TUFF => {
+            c = shade(base, (n - 0.5) * 0.18);
+            if hashf(x, y, 45) > 0.88 {
+                c = shade(base, -0.22);
+            }
+        }
+        T::GRANITE => c = speckle(base, x, y, 51),
+        T::DIORITE => c = speckle(base, x, y, 57),
+        T::ANDESITE => c = speckle(base, x, y, 63),
+        // Polished stones + calcite read smooth: low-amplitude grain only.
+        T::CALCITE | T::POLISHED_GRANITE | T::POLISHED_DIORITE | T::POLISHED_ANDESITE
+        | T::POLISHED_DEEPSLATE | T::SMOOTH_BASALT => c = shade(base, (n - 0.5) * 0.07),
+        T::CLAY => c = shade(base, (m - 0.5) * 0.07),
+        T::DRIPSTONE => {
+            c = shade(base, (m - 0.5) * 0.18);
+            if x % 6 == 0 {
+                c = shade(base, -0.16); // faint vertical flutes
+            }
+        }
+        T::COBBLED_DEEPSLATE => {
+            c = shade(base, (n - 0.5) * 0.30);
+            if blob(x, y, 7) {
+                c = shade(base, -0.35);
+            }
+        }
+        T::DEEPSLATE_BRICKS => {
+            c = if grid(x, y, false, 8) {
+                shade(base, -0.45) // dark mortar
+            } else {
+                shade(base, (n - 0.5) * 0.10)
+            };
+        }
+        T::DEEPSLATE_TILES => {
+            c = if grid(x, y, true, 8) {
+                shade(base, -0.45)
+            } else {
+                shade(base, (n - 0.5) * 0.10)
+            };
+        }
+        T::CUT_COPPER => {
+            c = if grid(x, y, true, 8) {
+                shade(base, -0.28) // copper seam
+            } else {
+                shade(base, (n - 0.5) * 0.08)
+            };
+        }
         T::CRAFTING => {
             c = shade(base, (m - 0.5) * 0.16);
             if x < 2 || y < 2 || x > 13 {
