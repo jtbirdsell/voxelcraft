@@ -236,29 +236,219 @@ impl Worldgen {
         }
     }
 
-    /// Depth-banded ore distribution (diamond/redstone deep, gold lower, iron/coal common), else the
-    /// host rock (deepslate/stone).
-    fn ore_at(&self, wx: i32, wy: i32, wz: i32, ds_top: i32) -> BlockId {
-        let h = hash3(self.seed, wx, wy, wz);
-        if wy < 16 && (h % 1100) < 3 {
-            return block::DIAMOND_ORE;
+    // ── U6: ore generation (region-cell blobs + 1.18 triangular altitude bands + large veins) ────
+    // Ores are placed as small connected blobs (not per-voxel scatter), with a trapezoidal/triangular
+    // probability vs Y per ore type (peaking at the classic depth), the deepslate variant chosen
+    // per-blob by the deepslate boundary, emerald/high-iron gated to Mountains, plus rare 1.18-style
+    // large veins (copper+granite+raw-copper mid-depth, iron+tuff+raw-iron deep).
+
+    /// Blocks an ore may replace (host rock + the stone variants), so ores show up inside granite etc.
+    #[inline]
+    fn is_ore_host(b: BlockId) -> bool {
+        matches!(
+            b,
+            block::STONE
+                | block::DEEPSLATE
+                | block::GRANITE
+                | block::DIORITE
+                | block::ANDESITE
+                | block::TUFF
+        )
+    }
+
+    /// Visit every region-cell candidate (jittered origin + hash) overlapping this chunk for `salt`.
+    fn for_cells(
+        &self,
+        origin: IVec3,
+        salt: u64,
+        cs: i32,
+        reach: i32,
+        mut f: impl FnMut(i32, i32, i32, u32),
+    ) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        let lo_x = (ox - reach).div_euclid(cs);
+        let hi_x = (ox + CHUNK_SIZE_I + reach).div_euclid(cs);
+        let lo_y = (oy - reach).div_euclid(cs);
+        let hi_y = (oy + CHUNK_SIZE_I + reach).div_euclid(cs);
+        let lo_z = (oz - reach).div_euclid(cs);
+        let hi_z = (oz + CHUNK_SIZE_I + reach).div_euclid(cs);
+        for cz in lo_z..=hi_z {
+            for cy in lo_y..=hi_y {
+                for cx in lo_x..=hi_x {
+                    let (ex, ey, ez, h) = self.cell_feature(salt, cx, cy, cz, cs);
+                    f(ex, ey, ez, h);
+                }
+            }
         }
-        if (14..40).contains(&wy) && ((h >> 4) % 1400) < 5 {
-            return block::LAPIS_ORE;
+    }
+
+    /// Stamp one ore blob (roughly round) centered at (ex,ey,ez), replacing ore-host rock and choosing
+    /// the stone- vs deepslate-host variant per-voxel by the (per-column) deepslate boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_ore_blob(
+        &self,
+        chunk: &mut Chunk,
+        ox: i32,
+        oy: i32,
+        oz: i32,
+        ex: i32,
+        ey: i32,
+        ez: i32,
+        radius: i32,
+        h: u32,
+        stone_ore: BlockId,
+        ds_ore: BlockId,
+    ) {
+        let ds0 = self.deepslate_top(ex, ez); // ~constant over the blob's small xz footprint
+        let r = radius.max(1);
+        for dz in -r..=r {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let v = (dx * dx + dy * dy + dz * dz) as f32 / (r * r) as f32;
+                    let jitter =
+                        (hash3(h as u64 ^ 0xABE, ex + dx, ey + dy, ez + dz) & 0xff) as f32 / 255.0;
+                    if v > 1.0 + (jitter - 0.5) * 0.4 {
+                        continue;
+                    }
+                    let lx = ex + dx - ox;
+                    let ly = ey + dy - oy;
+                    let lz = ez + dz - oz;
+                    if lx < 0
+                        || lx >= CHUNK_SIZE_I
+                        || ly < 0
+                        || ly >= CHUNK_SIZE_I
+                        || lz < 0
+                        || lz >= CHUNK_SIZE_I
+                    {
+                        continue;
+                    }
+                    let (lxu, lyu, lzu) = (lx as usize, ly as usize, lz as usize);
+                    if Self::is_ore_host(chunk.get(lxu, lyu, lzu)) {
+                        let ore = if (ey + dy) < ds0 { ds_ore } else { stone_ore };
+                        chunk.set(lxu, lyu, lzu, ore);
+                    }
+                }
+            }
         }
-        if wy < 16 && ((h >> 8) % 1200) < 6 {
-            return block::REDSTONE_ORE;
+    }
+
+    /// Place one ore type across the chunk: `gate(ex,ey,ez,hash) -> Option<radius>` carries the
+    /// triangular altitude band + any biome gate; each hit stamps a blob.
+    #[allow(clippy::too_many_arguments)]
+    fn place_ore(
+        &self,
+        chunk: &mut Chunk,
+        origin: IVec3,
+        salt: u64,
+        cs: i32,
+        reach: i32,
+        stone_ore: BlockId,
+        ds_ore: BlockId,
+        gate: impl Fn(i32, i32, i32, u32) -> Option<i32>,
+    ) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        self.for_cells(origin, salt, cs, reach, |ex, ey, ez, h| {
+            if let Some(r) = gate(ex, ey, ez, h) {
+                self.stamp_ore_blob(chunk, ox, oy, oz, ex, ey, ez, r, h, stone_ore, ds_ore);
+            }
+        });
+    }
+
+    /// A 1.18-style large ore vein: a chain of ore blobs along a hash-derived near-horizontal line,
+    /// wrapped in a `filler` stone (granite/tuff) with occasional `raw_block` nuggets. Rare + big.
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_vein(
+        &self,
+        chunk: &mut Chunk,
+        origin: IVec3,
+        ex: i32,
+        ey: i32,
+        ez: i32,
+        h: u32,
+        stone_ore: BlockId,
+        ds_ore: BlockId,
+        filler: BlockId,
+        raw_block: BlockId,
+    ) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        let len = 10 + (h % 10) as i32; // 10..=19 segments
+        let ang = (h >> 4) as f32 / (1u32 << 28) as f32 * std::f32::consts::TAU;
+        let (sx, sz) = (ang.cos() * 2.0, ang.sin() * 2.0);
+        let (mut fx, mut fy, mut fz) = (ex as f32, ey as f32, ez as f32);
+        for i in 0..len {
+            let sh = hash3(h as u64 ^ 0x5E1, i, 0, 0);
+            let (cx, cy, cz) = (fx.round() as i32, fy.round() as i32, fz.round() as i32);
+            // Filler shell (replaces stone/deepslate) then the ore core (replaces the filler too).
+            self.stamp_ellipsoid(chunk, ox, oy, oz, cx, cy, cz, 3 + (sh % 2) as i32, sh, filler);
+            self.stamp_ore_blob(
+                chunk, ox, oy, oz, cx, cy, cz, 1 + (sh >> 8) as i32 % 2, sh, stone_ore, ds_ore,
+            );
+            if sh % 5 == 0 {
+                let (lx, ly, lz) = (cx - ox, cy - oy, cz - oz);
+                if (0..CHUNK_SIZE_I).contains(&lx)
+                    && (0..CHUNK_SIZE_I).contains(&ly)
+                    && (0..CHUNK_SIZE_I).contains(&lz)
+                {
+                    let cur = chunk.get(lx as usize, ly as usize, lz as usize);
+                    if Self::is_ore_host(cur) || cur == stone_ore || cur == ds_ore {
+                        chunk.set(lx as usize, ly as usize, lz as usize, raw_block);
+                    }
+                }
+            }
+            fx += sx + ((sh & 0xf) as f32 / 15.0 - 0.5);
+            fz += sz + (((sh >> 4) & 0xf) as f32 / 15.0 - 0.5);
+            fy += ((sh >> 8) & 0x7) as f32 / 7.0 - 0.5; // gentle vertical wander
         }
-        if wy < 32 && ((h >> 12) % 1500) < 4 {
-            return block::GOLD_ORE;
-        }
-        if wy < 64 && ((h >> 16) % 900) < 7 {
-            return block::IRON_ORE;
-        }
-        if wy < 128 && ((h >> 22) % 700) < 8 {
-            return block::COAL_ORE;
-        }
-        Self::host_stone(wy, ds_top)
+    }
+
+    /// U6 ore pass: standard ore blobs (triangular bands) + mountain-gated emerald/high-iron + rare
+    /// large copper/iron veins. Runs after the stone-variant blobs so ores can sit inside them.
+    fn place_ores(&self, chunk: &mut Chunk, origin: IVec3) {
+        use block::*;
+        // (salt, cell, reach, stone, deepslate, lo, peak, hi, peak-per-mille, max radius extra)
+        self.place_ore(chunk, origin, 0xC0A1, 10, 4, COAL_ORE, DEEPSLATE_COAL_ORE, |_x, ey, _z, h| {
+            ore_gate(ey, 40, 96, 140, 130, h, 3)
+        });
+        self.place_ore(chunk, origin, 0x1207, 10, 4, IRON_ORE, DEEPSLATE_IRON_ORE, |_x, ey, _z, h| {
+            ore_gate(ey, 3, 20, 56, 115, h, 2)
+        });
+        self.place_ore(chunk, origin, 0xC0FF, 12, 5, COPPER_ORE, DEEPSLATE_COPPER_ORE, |_x, ey, _z, h| {
+            ore_gate(ey, 0, 48, 96, 95, h, 3)
+        });
+        self.place_ore(chunk, origin, 0x901D, 14, 4, GOLD_ORE, DEEPSLATE_GOLD_ORE, |_x, ey, _z, h| {
+            ore_gate(ey, 3, 12, 44, 55, h, 2)
+        });
+        self.place_ore(chunk, origin, 0x5ED5, 12, 4, REDSTONE_ORE, DEEPSLATE_REDSTONE_ORE, |_x, ey, _z, h| {
+            ore_gate(ey, 3, 6, 26, 105, h, 2)
+        });
+        self.place_ore(chunk, origin, 0x1A21, 14, 4, LAPIS_ORE, DEEPSLATE_LAPIS_ORE, |_x, ey, _z, h| {
+            ore_gate(ey, 3, 14, 44, 62, h, 2)
+        });
+        self.place_ore(chunk, origin, 0xD1A3, 16, 4, DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, |_x, ey, _z, h| {
+            ore_gate(ey, 3, 7, 22, 42, h, 2)
+        });
+        // Mountain-gated emerald (sparse) + a high iron band.
+        self.place_ore(chunk, origin, 0xE3E5, 20, 4, EMERALD_ORE, DEEPSLATE_EMERALD_ORE, |x, ey, z, h| {
+            let r = ore_gate(ey, 96, 130, 170, 60, h, 1)?;
+            (self.biome(x, self.height(x, z), z) == Biome::Mountains).then_some(r)
+        });
+        self.place_ore(chunk, origin, 0x1207_AA, 12, 4, IRON_ORE, DEEPSLATE_IRON_ORE, |x, ey, z, h| {
+            let r = ore_gate(ey, 96, 140, 170, 95, h, 2)?;
+            (self.biome(x, self.height(x, z), z) == Biome::Mountains).then_some(r)
+        });
+        // 1.18 large ore veins (rare, big).
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        let _ = (ox, oy, oz);
+        self.for_cells(origin, 0xC0FF_5E1, 80, 40, |ex, ey, ez, h| {
+            if (18..52).contains(&ey) && h % 100 < 35 {
+                self.stamp_vein(chunk, origin, ex, ey, ez, h, COPPER_ORE, DEEPSLATE_COPPER_ORE, GRANITE, RAW_COPPER_BLOCK);
+            }
+        });
+        self.for_cells(origin, 0x1207_5E1, 80, 40, |ex, ey, ez, h| {
+            if (3..18).contains(&ey) && h % 100 < 28 {
+                self.stamp_vein(chunk, origin, ex, ey, ez, h, IRON_ORE, DEEPSLATE_IRON_ORE, TUFF, RAW_IRON_BLOCK);
+            }
+        });
     }
 
     // ── U5: cross-chunk-safe region-cell blob engine ────────────────────────────────────────────
@@ -450,7 +640,8 @@ impl Worldgen {
                         } else if wy >= 3 && wy < height - 1 && self.is_cave(wx, wy, wz) {
                             id = block::AIR;
                         } else if id == block::STONE {
-                            id = self.ore_at(wx, wy, wz, ds_top);
+                            // Host rock only; ores are placed as blobs by place_ores (U6) after blobs.
+                            id = Self::host_stone(wy, ds_top);
                         }
                         if id != block::AIR {
                             chunk.set(lx, ly, lz, id);
@@ -468,9 +659,10 @@ impl Worldgen {
             }
         }
 
-        // U5: underground material blobs (stone variants + dirt/gravel/clay), wherever rock exists.
+        // U5/U6: underground material blobs (stone variants + dirt/gravel/clay) then ore blobs/veins.
         if oy <= hmax {
             self.place_blobs(&mut chunk, origin);
+            self.place_ores(&mut chunk, origin);
         }
 
         // Trees + surface decoration only for chunks overlapping the surface band.
@@ -698,6 +890,28 @@ fn hash3(seed: u64, x: i32, y: i32, z: i32) -> u32 {
         ^ (y as i64 as u64).wrapping_mul(0x85EB_CA6B_C2B2_AE35)
         ^ (z as i64 as u64).wrapping_mul(0xC2B2AE3D27D4EB4F);
     mix64(h) as u32
+}
+
+/// Triangular probability weight in [0,1] (U6 ore bands): 0 outside (lo,hi), peaking at 1.0 at `peak`.
+fn tri(wy: i32, lo: i32, peak: i32, hi: i32) -> f32 {
+    if wy <= lo || wy >= hi {
+        return 0.0;
+    }
+    if wy <= peak {
+        (wy - lo) as f32 / (peak - lo).max(1) as f32
+    } else {
+        (hi - wy) as f32 / (hi - peak).max(1) as f32
+    }
+}
+
+/// Ore-blob activation gate: the triangular Y band scaled by `peak_pm` (per-mille at the peak).
+/// Returns a blob radius (1 + 0..max_extra) on a hit, else None.
+fn ore_gate(wy: i32, lo: i32, peak: i32, hi: i32, peak_pm: i32, h: u32, max_extra: i32) -> Option<i32> {
+    let w = tri(wy, lo, peak, hi);
+    if w <= 0.0 || (h % 1000) as f32 >= w * peak_pm as f32 {
+        return None;
+    }
+    Some(1 + (h >> 11) as i32 % max_extra.max(1))
 }
 
 #[cfg(test)]
@@ -938,5 +1152,71 @@ mod tests {
         let n1 = wg.generate_chunk(IVec3::new(1, 0, 0));
         let n2 = wg.generate_chunk(IVec3::new(1, 0, 0));
         assert_eq!(n1.blocks, n2.blocks);
+    }
+
+    /// U6 (ore blobs + triangular bands): ores generate as blobs in the right altitude bands, the
+    /// deepslate variants appear at depth, copper exists, and generation stays deterministic.
+    #[test]
+    fn u6_ore_bands_blobs_and_variants() {
+        let wg = Worldgen::new(0x0DE_5EED);
+        let (mut diamond_max, mut coal_max) = (i32::MIN, i32::MIN);
+        let (mut copper, mut iron, mut lapis, mut redstone, mut gold, mut ds_variants) =
+            (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+        for cy in 0..4 {
+            for cx in -2..=2 {
+                for cz in -2..=2 {
+                    let c = wg.generate_chunk(IVec3::new(cx, cy, cz));
+                    for ly in 0..CHUNK_SIZE {
+                        let wy = cy * CHUNK_SIZE_I + ly as i32;
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                let id = c.get(lx, ly, lz);
+                                match id {
+                                    block::DIAMOND_ORE | block::DEEPSLATE_DIAMOND_ORE => {
+                                        diamond_max = diamond_max.max(wy)
+                                    }
+                                    block::COAL_ORE | block::DEEPSLATE_COAL_ORE => {
+                                        coal_max = coal_max.max(wy)
+                                    }
+                                    block::COPPER_ORE | block::DEEPSLATE_COPPER_ORE => copper += 1,
+                                    block::IRON_ORE | block::DEEPSLATE_IRON_ORE => iron += 1,
+                                    block::LAPIS_ORE | block::DEEPSLATE_LAPIS_ORE => lapis += 1,
+                                    block::REDSTONE_ORE | block::DEEPSLATE_REDSTONE_ORE => redstone += 1,
+                                    block::GOLD_ORE | block::DEEPSLATE_GOLD_ORE => gold += 1,
+                                    _ => {}
+                                }
+                                if matches!(
+                                    id,
+                                    block::DEEPSLATE_COAL_ORE
+                                        | block::DEEPSLATE_IRON_ORE
+                                        | block::DEEPSLATE_COPPER_ORE
+                                        | block::DEEPSLATE_GOLD_ORE
+                                        | block::DEEPSLATE_REDSTONE_ORE
+                                        | block::DEEPSLATE_LAPIS_ORE
+                                        | block::DEEPSLATE_DIAMOND_ORE
+                                ) {
+                                    ds_variants += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The full overworld ore set generates (copper/emerald are the U2 additions); deepslate
+        // variants appear at depth. Thresholds are lenient (100-chunk underground sample).
+        assert!(copper > 20, "too little copper ore ({copper})");
+        assert!(iron > 20, "too little iron ore ({iron})");
+        assert!(lapis > 10, "too little lapis ore ({lapis})");
+        assert!(redstone > 10, "too little redstone ore ({redstone})");
+        assert!(gold > 5, "too little gold ore ({gold})");
+        assert!(ds_variants > 10, "too few deepslate ore variants at depth ({ds_variants})");
+        // Diamond stays in the deep band; coal reaches the upper band (the triangular distribution).
+        assert!(diamond_max < 30, "diamond appears too high (max y={diamond_max})");
+        assert!(coal_max > 60, "coal never reaches its upper band (max y={coal_max})");
+        // Determinism with the new ore engine.
+        let a = wg.generate_chunk(IVec3::new(0, 0, 0));
+        let b = wg.generate_chunk(IVec3::new(0, 0, 0));
+        assert_eq!(a.blocks, b.blocks);
     }
 }
