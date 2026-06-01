@@ -72,6 +72,18 @@ fn classify(c: Climate, _height: i32) -> Biome {
     }
 }
 
+/// What a cell becomes if a cave carves it (U7): solid keeps its block; the rest become air / aquifer
+/// water / lava.
+enum Carve {
+    None,
+    Air,
+    Aquifer,
+    Lava,
+}
+
+/// Carved cells at or below this y flood with lava (deep lava lakes near bedrock).
+const LAVA_LEVEL: i32 = 8;
+
 pub struct Worldgen {
     seed: u64,
     continent: FastNoiseLite,
@@ -83,6 +95,11 @@ pub struct Worldgen {
     cave_b: FastNoiseLite,
     cheese: FastNoiseLite,
     deepslate: FastNoiseLite,
+    // U7 cave overhaul: thin noodle worms, variable spaghetti width, localized aquifer level.
+    noodle_a: FastNoiseLite,
+    noodle_b: FastNoiseLite,
+    spaghetti_radius: FastNoiseLite,
+    water_table: FastNoiseLite,
 }
 
 impl Worldgen {
@@ -112,6 +129,10 @@ impl Worldgen {
             cave_b: mk(7, NoiseType::OpenSimplex2S, 0.018, 2),
             cheese: mk(8, NoiseType::OpenSimplex2, 0.010, 2),
             deepslate: mk(9, NoiseType::OpenSimplex2, 0.010, 2),
+            noodle_a: mk(10, NoiseType::OpenSimplex2, 0.050, 2),
+            noodle_b: mk(11, NoiseType::OpenSimplex2S, 0.050, 2),
+            spaghetti_radius: mk(12, NoiseType::OpenSimplex2, 0.006, 2),
+            water_table: mk(13, NoiseType::OpenSimplex2, 0.004, 2),
         }
     }
 
@@ -205,16 +226,75 @@ impl Worldgen {
         }
     }
 
-    fn is_cave(&self, wx: i32, wy: i32, wz: i32) -> bool {
+    /// Local aquifer water level for a column (U7): "wet" regions (positive table noise) hold an
+    /// underground water level near y40; dry regions return below the world so their caves stay air.
+    fn local_water_table(&self, wx: i32, wz: i32) -> i32 {
+        let wt = self.water_table.get_noise_2d(wx as f32, wz as f32); // [-1, 1]
+        if wt > 0.25 {
+            28 + (wt * 12.0) as i32 // ~y31..40 in the wettest columns (localized underground lakes)
+        } else {
+            i32::MIN // dry column: no aquifer
+        }
+    }
+
+    /// What a cell becomes if it's carved (U7): cheese caverns + variable-width spaghetti + thin noodle
+    /// worms. Carved space below LAVA_LEVEL fills with lava, below the local water table with water
+    /// (localized aquifers), else air.
+    fn carve(&self, wx: i32, wy: i32, wz: i32) -> Carve {
         let (fx, fy, fz) = (wx as f32, wy as f32, wz as f32);
-        // Spaghetti tunnels: two noise fields both near zero.
+        let cheese = self.cheese.get_noise_3d(fx, fy * 1.3, fz) > 0.78;
+        // Variable-width spaghetti: both fields within a region-modulated radius.
+        let r = 0.06 + 0.04 * self.spaghetti_radius.get_noise_3d(fx, fy, fz).max(0.0);
         let a = self.cave_a.get_noise_3d(fx, fy, fz);
         let b = self.cave_b.get_noise_3d(fx, fy, fz);
-        if a.abs() < 0.05 && b.abs() < 0.05 {
-            return true;
+        let spaghetti = a.abs() < r && b.abs() < r;
+        // Thin noodle worms: two high-frequency fields, both very near zero.
+        let noodle = self.noodle_a.get_noise_3d(fx, fy, fz).abs() < 0.025
+            && self.noodle_b.get_noise_3d(fx, fy, fz).abs() < 0.025;
+        if !(cheese || spaghetti || noodle) {
+            return Carve::None;
         }
-        // Cheese pockets (vertically squashed for wider caverns).
-        self.cheese.get_noise_3d(fx, fy * 1.4, fz) > 0.80
+        if wy <= LAVA_LEVEL {
+            Carve::Lava
+        } else if wy < self.local_water_table(wx, wz) {
+            Carve::Aquifer
+        } else {
+            Carve::Air
+        }
+    }
+
+    /// U7 cave post-pass: carve caves AFTER the ore/blob passes so the walls expose ore. Never touches
+    /// the bedrock band or the top surface skin; fills carved space with air/water/lava per `carve`.
+    fn carve_caves(
+        &self,
+        chunk: &mut Chunk,
+        origin: IVec3,
+        heights: &[i32; CHUNK_SIZE * CHUNK_SIZE],
+    ) {
+        let (ox, oy, oz) = (origin.x, origin.y, origin.z);
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let height = heights[lz * CHUNK_SIZE + lx];
+                let (wx, wz) = (ox + lx as i32, oz + lz as i32);
+                for ly in 0..CHUNK_SIZE {
+                    let wy = oy + ly as i32;
+                    if wy < 3 || wy >= height - 1 {
+                        continue; // protect the bedrock band + the top solid skin
+                    }
+                    let cur = chunk.get(lx, ly, lz);
+                    if cur == block::AIR || cur == block::BEDROCK {
+                        continue;
+                    }
+                    let fill = match self.carve(wx, wy, wz) {
+                        Carve::None => continue,
+                        Carve::Air => block::AIR,
+                        Carve::Aquifer => block::WATER,
+                        Carve::Lava => block::LAVA,
+                    };
+                    chunk.set(lx, ly, lz, fill);
+                }
+            }
+        }
     }
 
     /// The y below which a column is deepslate, as a noise-perturbed per-column band just above
@@ -637,15 +717,11 @@ impl Worldgen {
                             wy == 0 || (wy <= 2 && (hash3(self.seed ^ 0xB, wx, wy, wz) % 4) as i32 > wy);
                         if bedrock {
                             id = block::BEDROCK;
-                        } else if wy >= 3 && wy < height - 1 && self.is_cave(wx, wy, wz) {
-                            id = block::AIR;
                         } else if id == block::STONE {
-                            // Host rock only; ores are placed as blobs by place_ores (U6) after blobs.
+                            // Host rock only; ores (U6) + caves (U7) are post-passes after the fill.
                             id = Self::host_stone(wy, ds_top);
                         }
-                        if id != block::AIR {
-                            chunk.set(lx, ly, lz, id);
-                        }
+                        chunk.set(lx, ly, lz, id);
                     } else if wy < SEA_LEVEL {
                         // Cold columns freeze their water *surface* into ice. Keyed on temperature
                         // directly — biome() classifies any water column as Ocean, never Snowy, so a
@@ -659,10 +735,11 @@ impl Worldgen {
             }
         }
 
-        // U5/U6: underground material blobs (stone variants + dirt/gravel/clay) then ore blobs/veins.
+        // U5/U6/U7: material blobs -> ore blobs/veins -> carve caves (after ores, so walls expose ore).
         if oy <= hmax {
             self.place_blobs(&mut chunk, origin);
             self.place_ores(&mut chunk, origin);
+            self.carve_caves(&mut chunk, origin, &heights);
         }
 
         // Trees + surface decoration only for chunks overlapping the surface band.
@@ -1218,5 +1295,66 @@ mod tests {
         let a = wg.generate_chunk(IVec3::new(0, 0, 0));
         let b = wg.generate_chunk(IVec3::new(0, 0, 0));
         assert_eq!(a.blocks, b.blocks);
+    }
+
+    /// U7 (cave carving + fluids): caves carve a sensible fraction, lava only near bedrock, aquifers
+    /// exist, the bedrock floor survives carving, and generation stays deterministic.
+    #[test]
+    fn u7_caves_fluids_and_bedrock() {
+        let wg = Worldgen::new(0xCA7E5);
+        let (mut carved, mut solid) = (0u64, 0u64);
+        let (mut lava_above, mut water_at_lava) = (0u64, 0u64);
+        let (mut saw_lava, mut saw_aquifer, mut floor_intact) = (false, false, true);
+        for cy in 0..3 {
+            for cx in -1..=1 {
+                for cz in -1..=1 {
+                    let c = wg.generate_chunk(IVec3::new(cx, cy, cz));
+                    for ly in 0..CHUNK_SIZE {
+                        let wy = cy * CHUNK_SIZE_I + ly as i32;
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                let id = c.get(lx, ly, lz);
+                                if wy >= 3 && wy < SEA_LEVEL {
+                                    match id {
+                                        block::AIR | block::WATER | block::LAVA => carved += 1,
+                                        _ => solid += 1,
+                                    }
+                                }
+                                if id == block::LAVA {
+                                    saw_lava = true;
+                                    if wy > LAVA_LEVEL {
+                                        lava_above += 1;
+                                    }
+                                }
+                                if id == block::WATER {
+                                    if wy <= LAVA_LEVEL {
+                                        water_at_lava += 1;
+                                    }
+                                    if (3..SEA_LEVEL - 6).contains(&wy) {
+                                        saw_aquifer = true; // underground water = an aquifer pool
+                                    }
+                                }
+                                // The y0 floor is always bedrock and is never carved.
+                                if wy == 0 && id != block::BEDROCK {
+                                    floor_intact = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let frac = carved as f64 / (carved + solid) as f64;
+        assert!(frac > 0.02 && frac < 0.40, "cave fraction {frac} out of range");
+        assert!(saw_lava, "no lava generated near bedrock");
+        assert_eq!(lava_above, 0, "gen-time lava above LAVA_LEVEL");
+        assert_eq!(water_at_lava, 0, "cave water at/below the lava level");
+        assert!(saw_aquifer, "no underground aquifer water generated");
+        assert!(floor_intact, "bedrock floor at y0 was carved away");
+        // Determinism with caves + fluids.
+        let a = wg.generate_chunk(IVec3::new(0, 0, 0));
+        let b = wg.generate_chunk(IVec3::new(0, 0, 0));
+        assert_eq!(a.blocks, b.blocks);
+        assert_eq!(a.solid_count, b.solid_count);
     }
 }
