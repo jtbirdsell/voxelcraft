@@ -192,15 +192,35 @@ fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
     }
 }
 
-/// Stone-host ore tile: speckled stone with colored ore flecks.
-fn ore(fleck: [f32; 3], x: u32, y: u32) -> [f32; 3] {
+/// Stone-host ore tile: stone with chunky colored ore lumps (a brighter core + a darker rim so the
+/// lumps read as faceted gems/metal rather than flat dots).
+fn ore(fleck: [f32; 3], x: u32, y: u32, salt: u32) -> [f32; 3] {
     let host = base_color(T::STONE);
     let n = hashf(x, y, 77);
-    if blob(x, y, 3) {
-        fleck
-    } else {
-        shade(host, (n - 0.5) * 0.14)
+    match ore_lump(x, y, salt) {
+        2 => shade(fleck, 0.12 + (n - 0.5) * 0.10), // bright core
+        1 => shade(fleck, -0.22),                   // darker rim, for depth
+        _ => shade(host, (n - 0.5) * 0.14),
     }
+}
+
+/// Ore-lump mask with a rim: 2 = lump core, 1 = lump edge, 0 = host stone. Chunkier than a single
+/// speck so ore blocks read like Minecraft veins.
+fn ore_lump(x: u32, y: u32, salt: u32) -> u8 {
+    let mut best = 0u8;
+    for i in 0..5u32 {
+        let cx = (hashf(i, 0, salt + 1) * 11.0) as i32 + 2;
+        let cy = (hashf(i, 1, salt + 5) * 11.0) as i32 + 2;
+        let dx = x as i32 - cx;
+        let dy = y as i32 - cy;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= 2 {
+            return 2; // core
+        } else if d2 <= 5 {
+            best = best.max(1); // rim
+        }
+    }
+    best
 }
 
 /// Paint one texel of a tile. Detail is brightness variation around the base color (mean-preserving),
@@ -285,21 +305,8 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
         T::SNOW => {
             c = shade(base, (n - 0.5) * 0.06);
         }
-        T::COAL => {
-            // Stone host with black coal blobs.
-            let stone = base_color(T::STONE);
-            c = shade(stone, (n - 0.5) * 0.14);
-            if blob(x, y, 0) {
-                c = [0.07, 0.07, 0.08];
-            }
-        }
-        T::IRON => {
-            let stone = base_color(T::STONE);
-            c = shade(stone, (n - 0.5) * 0.14);
-            if blob(x, y, 9) {
-                c = [0.74, 0.58, 0.42]; // ore fleck
-            }
-        }
+        T::COAL => c = ore([0.10, 0.10, 0.11], x, y, 0),
+        T::IRON => c = ore([0.78, 0.62, 0.45], x, y, 9),
         T::LAVA => {
             // Cracked crust: brighter molten cells separated by dark seams.
             let cell = ((x / 4) ^ (y / 4)).wrapping_mul(2654435761);
@@ -355,10 +362,10 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
                 c = shade(base, (n - 0.5) * 0.12);
             }
         }
-        T::GOLD => c = ore([0.95, 0.78, 0.25], x, y),
-        T::DIAMOND => c = ore([0.45, 0.92, 0.90], x, y),
-        T::REDSTONE => c = ore([0.85, 0.12, 0.12], x, y),
-        T::LAPIS => c = ore([0.15, 0.28, 0.85], x, y),
+        T::GOLD => c = ore([0.95, 0.78, 0.25], x, y, 3),
+        T::DIAMOND => c = ore([0.45, 0.92, 0.90], x, y, 14),
+        T::REDSTONE => c = ore([0.85, 0.12, 0.12], x, y, 21),
+        T::LAPIS => c = ore([0.15, 0.28, 0.85], x, y, 28),
         T::CRAFTING => {
             c = shade(base, (m - 0.5) * 0.16);
             if x < 2 || y < 2 || x > 13 {

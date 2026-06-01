@@ -1,10 +1,13 @@
 // Screen-space UI: NDC position + atlas UV + RGBA color + mode, alpha-blended, no depth.
 //   mode 0 = flat color (rects)
-//   mode 1 = atlas sample * color (block/item icons)
+//   mode 1 = font atlas sample * color (unused; the font path is mode 2)
 //   mode 2 = font coverage: rgb = color.rgb, alpha = color.a * atlas.r (crisp bitmap glyphs)
+//   mode 3 = block atlas sample * color (textured block-item icons)
 
 @group(0) @binding(0) var ui_tex: texture_2d<f32>;
 @group(0) @binding(1) var ui_samp: sampler;
+@group(0) @binding(2) var block_tex: texture_2d<f32>;
+@group(0) @binding(3) var block_samp: sampler;
 
 struct VsIn {
     @location(0) pos: vec2<f32>,
@@ -33,6 +36,11 @@ fn vs_main(in: VsIn) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (in.mode == 0u) {
         return in.color;
+    }
+    if (in.mode == 3u) {
+        // Textured block-item icon: sample the block atlas, tinted by color (alpha for cutouts).
+        let b = textureSample(block_tex, block_samp, in.uv);
+        return b * in.color;
     }
     let tex = textureSample(ui_tex, ui_samp, in.uv);
     if (in.mode == 2u) {

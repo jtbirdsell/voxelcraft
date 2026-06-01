@@ -121,6 +121,44 @@ fn push_px_rect(
     }
 }
 
+/// Atlas UV rect for a block-atlas tile (8x8 grid), inset half a texel so nearest sampling never
+/// bleeds a neighbor tile at the icon edge.
+fn tile_uv(tile: u32) -> ([f32; 2], [f32; 2]) {
+    let cols = crate::texture::ATLAS_COLS as f32;
+    let rows = crate::texture::ATLAS_ROWS as f32;
+    let col = (tile % crate::texture::ATLAS_COLS) as f32;
+    let row = (tile / crate::texture::ATLAS_COLS) as f32;
+    let ins = 0.5 / crate::texture::ATLAS_W as f32;
+    (
+        [col / cols + ins, row / rows + ins],
+        [(col + 1.0) / cols - ins, (row + 1.0) / rows - ins],
+    )
+}
+
+/// One textured block-atlas quad (mode 3) at pixel rect (x,y,w,h) for `tile`, tinted by `color`.
+#[allow(clippy::too_many_arguments)]
+fn push_icon(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, w: f32, h: f32, tile: u32, color: [f32; 4]) {
+    let to_ndc = |px: f32, py: f32| [px / sw * 2.0 - 1.0, 1.0 - py / sh * 2.0];
+    let (uv0, uv1) = tile_uv(tile);
+    let p = [to_ndc(x, y), to_ndc(x + w, y), to_ndc(x + w, y + h), to_ndc(x, y + h)];
+    let uv = [[uv0[0], uv0[1]], [uv1[0], uv0[1]], [uv1[0], uv1[1]], [uv0[0], uv1[1]]];
+    for &i in &[0usize, 1, 2, 0, 2, 3] {
+        out.push(UiVertex { pos: p[i], uv: uv[i], color, mode: 3.0 });
+    }
+}
+
+/// Draw an item's icon inside an inner rect: a textured block tile for block-items, else a flat
+/// color swatch (tools / materials / foods get painted item sprites in a later visual pass).
+fn item_icon(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, size: f32, item: item::ItemId) {
+    if let Some(b) = item::block_of_item(item) {
+        let tile = crate::block::face_tile(b, [0, 0, 1]); // a representative side face
+        push_icon(out, sw, sh, x, y, size, size, tile, [1.0, 1.0, 1.0, 1.0]);
+    } else {
+        let c = item::item_color(item);
+        push_px_rect(out, sw, sh, x, y, size, size, [c[0], c[1], c[2], 1.0]);
+    }
+}
+
 /// One textured glyph quad (mode 2 = font coverage) at pixel rect (x,y,size,size), atlas `uv`.
 #[allow(clippy::too_many_arguments)]
 fn push_glyph(
@@ -219,8 +257,7 @@ pub fn craft_output_rect(width: u32, height: u32, size: usize) -> (f32, f32) {
 fn slot_item(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, stack: Option<item::ItemStack>) {
     push_px_rect(out, sw, sh, x, y, INV_SLOT, INV_SLOT, [0.28, 0.28, 0.32, 1.0]);
     if let Some(s) = stack {
-        let c = item::item_color(s.item);
-        push_px_rect(out, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
+        item_icon(out, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, s.item);
         if s.count > 1 {
             let label = format!("{}", s.count);
             let tw = text_width(&label, 2.0);
@@ -263,14 +300,7 @@ pub fn build_inventory_screen(
         let bg = if hover { [0.45, 0.45, 0.5, 1.0] } else { [0.28, 0.28, 0.32, 1.0] };
         push_px_rect(&mut v, sw, sh, x, y, INV_SLOT, INV_SLOT, bg);
         if let Some(stack) = inv.slots[slot_i] {
-            let c = item::item_color(stack.item);
-            push_px_rect(&mut v, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
-            if stack.count > 1 {
-                let label = format!("{}", stack.count);
-                let tw = text_width(&label, 2.0);
-                push_text(&mut v, sw, sh, x + INV_SLOT - tw - 3.0, y + INV_SLOT - 18.0, 2.0, &label, [1.0, 1.0, 1.0, 1.0]);
-            }
-            durability_bar(&mut v, sw, sh, x, y, INV_SLOT, stack);
+            draw_stack(&mut v, sw, sh, x, y, stack);
         }
     }
     // Craft grid + output preview, on its own backing panel above the inventory grid.
@@ -307,10 +337,9 @@ pub fn build_inventory_screen(
 
     // Held stack follows the cursor.
     if let Some(held) = inv.held {
-        let c = item::item_color(held.item);
         let sz = INV_SLOT - 6.0;
         let (hx, hy) = (cursor.0 - sz * 0.5, cursor.1 - sz * 0.5); // centered on the cursor
-        push_px_rect(&mut v, sw, sh, hx, hy, sz, sz, [c[0], c[1], c[2], 1.0]);
+        item_icon(&mut v, sw, sh, hx, hy, sz, held.item);
         if held.count > 1 {
             let label = format!("{}", held.count);
             let tw = text_width(&label, 2.0);
@@ -366,8 +395,7 @@ pub fn armor_slot_rects(width: u32, height: u32) -> [(usize, f32, f32); 4] {
 
 /// Draw a stack's swatch + count + durability inside a slot (the slot background is drawn already).
 fn draw_stack(out: &mut Vec<UiVertex>, sw: f32, sh: f32, x: f32, y: f32, stack: item::ItemStack) {
-    let c = item::item_color(stack.item);
-    push_px_rect(out, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, INV_SLOT - 6.0, [c[0], c[1], c[2], 1.0]);
+    item_icon(out, sw, sh, x + 3.0, y + 3.0, INV_SLOT - 6.0, stack.item);
     if stack.count > 1 {
         let label = format!("{}", stack.count);
         let tw = text_width(&label, 2.0);
@@ -469,10 +497,9 @@ pub fn build_furnace_screen(
 
     // Held stack follows the cursor; otherwise a hover tooltip (furnace slot beats inventory slot).
     if let Some(held) = inv.held {
-        let c = item::item_color(held.item);
         let sz = INV_SLOT - 6.0;
         let (hx, hy) = (cursor.0 - sz * 0.5, cursor.1 - sz * 0.5);
-        push_px_rect(&mut v, sw, sh, hx, hy, sz, sz, [c[0], c[1], c[2], 1.0]);
+        item_icon(&mut v, sw, sh, hx, hy, sz, held.item);
         if held.count > 1 {
             let label = format!("{}", held.count);
             let tw = text_width(&label, 2.0);
@@ -564,10 +591,9 @@ pub fn build_chest_screen(
 
     // Held stack follows the cursor; else a hover tooltip (chest slot beats inventory slot).
     if let Some(held) = inv.held {
-        let c = item::item_color(held.item);
         let sz = INV_SLOT - 6.0;
         let (hx, hy) = (cursor.0 - sz * 0.5, cursor.1 - sz * 0.5);
-        push_px_rect(&mut v, sw, sh, hx, hy, sz, sz, [c[0], c[1], c[2], 1.0]);
+        item_icon(&mut v, sw, sh, hx, hy, sz, held.item);
         if held.count > 1 {
             let label = format!("{}", held.count);
             let tw = text_width(&label, 2.0);
@@ -668,8 +694,7 @@ pub fn build_ui(
         }
         match inv.slots[i] {
             Some(stack) => {
-                let c = item::item_color(stack.item);
-                push_px_rect(&mut v, sw, sh, sx, y, slot, slot, [c[0], c[1], c[2], 1.0]);
+                item_icon(&mut v, sw, sh, sx, y, slot, stack.item);
                 if stack.count > 1 {
                     let label = format!("{}", stack.count);
                     let tw = text_width(&label, 2.0);

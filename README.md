@@ -124,7 +124,8 @@ position, albedo + skylight) and an ACES tonemap.
   gauge and smelt-progress arrow; a `step_furnaces` tick consumes fuel (planks/logs/sticks) to smelt
   ores into **iron / gold ingots** (and cobblestone back to stone). Breaking a lit furnace spills it.
 - A real **inventory** (9 hotbar + 27 main + armor + cursor), stack merging/splitting, an inventory
-  screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities.
+  screen with drag/drop and tooltips, item drops (blocks **and** tools) as world entities. Block items
+  render as **textured icons** (sampled from the block atlas) in every slot, not flat color swatches.
 - **Chests**: right-click a chest for a 27-slot storage screen (drag/drop against your inventory);
   breaking a chest spills its contents. A generic `Container` so future storage blocks reuse it.
 - **Persistence**: edited chunks (LZ4 blocks **+ block-state**), the level header, the full inventory +
