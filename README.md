@@ -207,10 +207,14 @@ default 8), `VOXELCRAFT_GI_ACCUM=1` (opt-in GI temporal accumulation), `VOXELCRA
 `VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance` (DLSS Ray Reconstruction),
 `VOXELCRAFT_SS=1.5` (supersample ×SS then downscale — render above native; clamped 1–4),
 `VOXELCRAFT_FG=1` (DLSS Frame Generation on top of RR; needs `STREAMLINE_SDK` set + a focused window).
-DLSS needs `DLSS_SDK` + `LIBCLANG_PATH` set at build time (see the dlss section). Frame Generation can
-be smoke-tested headlessly with `VOXELCRAFT_FG_TEST=N` (auto-pans the camera for N frames, logs the
-max `num_frames_actually_presented` — 2 means DLSS-G is generating — then exits). `VOXELCRAFT_PERSIST_TEST=1`
-round-trips a sample inventory/armor/furnace/survival state through the real save/load (no window).
+DLSS needs `DLSS_SDK` + `LIBCLANG_PATH` set at build time. **Build features:** DLSS is gated behind the
+default `dlss` (Ray Reconstruction + supersampling) and `frame-generation` (DLSS-G; implies `dlss`)
+cargo features — `cargo build --no-default-features` compiles and runs the engine **natively with no
+NVIDIA SDK / libclang / Streamline** (no RR/FG), and `--features dlss` builds RR without Frame
+Generation. Frame Generation can be smoke-tested headlessly with `VOXELCRAFT_FG_TEST=N` (auto-pans the
+camera for N frames, logs the max `num_frames_actually_presented` — 2 means DLSS-G is generating — then
+exits). `VOXELCRAFT_PERSIST_TEST=1` round-trips a sample inventory/armor/furnace/survival state through
+the real save/load (no window).
 
 ## Roadmap
 
