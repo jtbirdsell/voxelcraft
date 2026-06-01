@@ -294,7 +294,7 @@ impl Player {
 
     /// True if a solid surface (full or partial) sits directly beneath the AABB footprint (sneak
     /// ledge test) — a sub-box whose top reaches the player's feet counts as support.
-    fn ground_below(&self, block_at: &impl Fn(IVec3) -> BlockId) -> bool {
+    fn ground_below(&self, block_at: &impl Fn(IVec3) -> (BlockId, u8)) -> bool {
         let (min, max) = self.aabb();
         let foot = min.y - 0.06;
         let y = foot.floor() as i32;
@@ -304,7 +304,8 @@ impl Player {
         let z1 = (max.z - 1e-4).floor() as i32;
         for vx in x0..=x1 {
             for vz in z0..=z1 {
-                for b in block::solid_boxes(block_at(IVec3::new(vx, y, vz))) {
+                let (id, st) = block_at(IVec3::new(vx, y, vz));
+                for b in block::solid_boxes(id, st) {
                     if y as f32 + b[4] >= foot {
                         return true;
                     }
@@ -350,7 +351,7 @@ impl Player {
         dt: f32,
         yaw: f32,
         input: &Input,
-        block_at: impl Fn(IVec3) -> BlockId,
+        block_at: impl Fn(IVec3) -> (BlockId, u8),
         armor_points: u32,
     ) {
         self.armor_points = armor_points;
@@ -374,10 +375,10 @@ impl Player {
         let wish = wish.normalize_or_zero();
 
         // Sample the surrounding fluid once per frame (skipped in fly mode — treated as creative).
-        let in_water = !self.flying && self.aabb_any(|c| block_at(c) == block::WATER);
-        let in_lava = !self.flying && self.aabb_any(|c| block_at(c) == block::LAVA);
+        let in_water = !self.flying && self.aabb_any(|c| block_at(c).0 == block::WATER);
+        let in_lava = !self.flying && self.aabb_any(|c| block_at(c).0 == block::LAVA);
         // The head being in *any* fluid stops breathing — you can't breathe in lava either.
-        let head_block = if self.flying { block::AIR } else { block_at(self.head_cell()) };
+        let head_block = if self.flying { block::AIR } else { block_at(self.head_cell()).0 };
         let head_submerged = head_block == block::WATER || head_block == block::LAVA;
 
         if self.flying {
@@ -466,7 +467,7 @@ impl Player {
     /// Move along one axis, then resolve overlap by clamping the player AABB to the nearest face of
     /// any block sub-box it penetrates (full cubes, but also slab/stair half-boxes). Returns true if
     /// a collision was resolved.
-    fn move_axis(&mut self, axis: usize, amount: f32, block_at: &impl Fn(IVec3) -> BlockId) -> bool {
+    fn move_axis(&mut self, axis: usize, amount: f32, block_at: &impl Fn(IVec3) -> (BlockId, u8)) -> bool {
         if amount == 0.0 {
             return false;
         }
@@ -489,7 +490,8 @@ impl Player {
             for vy in lo[1]..=hi[1] {
                 for vz in lo[2]..=hi[2] {
                     let base = [vx as f32, vy as f32, vz as f32];
-                    for b in block::solid_boxes(block_at(IVec3::new(vx, vy, vz))) {
+                    let (id, st) = block_at(IVec3::new(vx, vy, vz));
+                    for b in block::solid_boxes(id, st) {
                         // World-space sub-box.
                         let bmin = [base[0] + b[0], base[1] + b[1], base[2] + b[2]];
                         let bmax = [base[0] + b[3], base[1] + b[4], base[2] + b[5]];
@@ -526,12 +528,12 @@ impl Player {
 mod tests {
     use super::*;
 
-    const ALL_AIR: fn(IVec3) -> BlockId = |_| block::AIR;
+    const ALL_AIR: fn(IVec3) -> (BlockId, u8) = |_| (block::AIR, 0);
 
     #[test]
     fn player_falls_and_lands_on_floor() {
         // Solid floor occupying y in 0..10; air above.
-        let blocks = |p: IVec3| if (0..10).contains(&p.y) { block::STONE } else { block::AIR };
+        let blocks = |p: IVec3| if (0..10).contains(&p.y) { (block::STONE, 0) } else { (block::AIR, 0) };
         let mut player = Player::new(Vec3::new(0.5, 20.0, 0.5), false);
         let input = Input::default();
         for _ in 0..600 {
@@ -550,7 +552,7 @@ mod tests {
     fn player_rests_at_half_height_on_a_slab() {
         // A floor of stone slabs at y=0 (solid only in y 0..0.5); the player must rest at y=0.5,
         // not y=1.0 — proves slabs collide as their true half-box, not a full cube.
-        let blocks = |p: IVec3| if p.y == 0 { block::STONE_SLAB } else { block::AIR };
+        let blocks = |p: IVec3| if p.y == 0 { (block::STONE_SLAB, 0) } else { (block::AIR, 0) };
         let mut p = Player::new(Vec3::new(0.5, 8.0, 0.5), false);
         let input = Input::default();
         for _ in 0..600 {
@@ -567,7 +569,7 @@ mod tests {
     #[test]
     fn player_cannot_pass_through_wall() {
         // Wall at x >= 5.
-        let blocks = |p: IVec3| if p.x >= 5 { block::STONE } else { block::AIR };
+        let blocks = |p: IVec3| if p.x >= 5 { (block::STONE, 0) } else { (block::AIR, 0) };
         let mut player = Player::new(Vec3::new(0.5, 50.0, 0.5), true); // fly, no gravity
         let mut input = Input::default();
         input.forward = true; // yaw 0 -> forward is +x
@@ -581,7 +583,7 @@ mod tests {
 
     #[test]
     fn air_drains_underwater_and_refills_in_air() {
-        let water = |_: IVec3| block::WATER;
+        let water = |_: IVec3| (block::WATER, 0);
         let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
         // Fully submerged: air should fall below full.
         for _ in 0..120 {
@@ -600,7 +602,7 @@ mod tests {
 
     #[test]
     fn drowning_damages_when_out_of_air() {
-        let water = |_: IVec3| block::WATER;
+        let water = |_: IVec3| (block::WATER, 0);
         let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
         for _ in 0..1200 {
             p.update(1.0 / 60.0, 0.0, &Input::default(), water, 0);
@@ -624,7 +626,7 @@ mod tests {
     #[test]
     fn saturation_drains_before_hunger() {
         // Ground at y<0 (stone) so the player rests at y=0; air (not water) elsewhere.
-        let blocks = |p: IVec3| if p.y < 0 { block::STONE } else { block::AIR };
+        let blocks = |p: IVec3| if p.y < 0 { (block::STONE, 0) } else { (block::AIR, 0) };
         let mut p = Player::new(Vec3::new(0.5, 0.0, 0.5), false);
         let full_hunger = p.hunger;
         let mut input = Input::default();

@@ -204,7 +204,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
             // the wasted coplanar quad + its z-fighting.
             block::RenderKind::Stairs => {
                 emit_box(&mut mesh.opaque, origin, x, y, z, [0.0, 0.0, 0.0], [1.0, 0.5, 1.0], id, l, 0);
-                let ub = block::stair_upper_box(block::stair_facing(id));
+                let ub = block::stair_upper_box(block::stair_facing(neigh.state_at(x, y, z)));
                 emit_box(
                     &mut mesh.opaque,
                     origin,

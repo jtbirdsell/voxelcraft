@@ -368,7 +368,7 @@ impl App {
             dt,
             yaw,
             &state.input,
-            |p| game_ref.block_at(p),
+            |p| game_ref.block_state_at(p),
             armor,
         );
         state.camera.position = state.player.eye();
@@ -527,9 +527,10 @@ impl App {
                     state.pending_open = Some(Screen::Furnace(hit.block));
                 } else {
                     let place = hit.block + hit.normal;
-                    let mut id = state.inventory.selected_block();
-                    // Stairs orient by where the player faces: the high step rises away from you.
-                    if id == block::STONE_STAIRS {
+                    let id = state.inventory.selected_block();
+                    // Orientation state for the placed block. Stairs orient by where the player
+                    // faces: the high step rises away from you.
+                    let place_state = if id == block::STONE_STAIRS {
                         let f = state.camera.forward();
                         let facing = if f.x.abs() > f.z.abs() {
                             if f.x > 0.0 { 1 } else { 3 }
@@ -538,12 +539,16 @@ impl App {
                         } else {
                             2
                         };
-                        id = block::stair_with_facing(facing);
-                    }
+                        block::stair_state(facing)
+                    } else {
+                        0
+                    };
                     let blocks_player = block::is_solid(id) && state.player.intersects_block(place);
                     if id != block::AIR
                         && !blocks_player
-                        && state.game.set_block(&state.gpu, &state.renderer, place, id)
+                        && state
+                            .game
+                            .set_block_state(&state.gpu, &state.renderer, place, id, place_state)
                     {
                         state.inventory.consume_selected();
                         if block::is_fluid(id) {
@@ -999,13 +1004,15 @@ impl ApplicationHandler for App {
                 (v.len() == 4).then(|| (IVec3::new(v[0] as i32, v[1] as i32, v[2] as i32), v[3]))
             });
 
-            // Debug knob: VOXELCRAFT_PLACE="x,y,z,id;x,y,z,id" places blocks before the shot
-            // (milestone verification — e.g. a glowstone to check emissive lighting).
+            // Debug knob: VOXELCRAFT_PLACE="x,y,z,id[,state];..." places blocks before the shot
+            // (milestone verification — e.g. a glowstone to check emissive lighting, or an oriented
+            // stair/slab/door via the optional 5th block-state field).
             if let Ok(s) = std::env::var("VOXELCRAFT_PLACE") {
                 for spec in s.split(';') {
                     let v: Vec<i32> = spec.split(',').filter_map(|t| t.trim().parse().ok()).collect();
-                    if v.len() == 4 {
-                        game.set_block(&gpu, &renderer, IVec3::new(v[0], v[1], v[2]), v[3] as u16);
+                    if v.len() >= 4 {
+                        let bs = if v.len() >= 5 { v[4] as u8 } else { 0 };
+                        game.set_block_state(&gpu, &renderer, IVec3::new(v[0], v[1], v[2]), v[3] as u16, bs);
                     }
                 }
             }

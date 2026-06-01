@@ -239,4 +239,36 @@ impl Neighborhood {
         }
         self.center.get(x as usize, y as usize, z as usize)
     }
+
+    /// Block-state byte at a (possibly cross-chunk) cell — mirrors `block_at`. Used by the mesher to
+    /// read oriented-block state (stairs facing now; fence/wall/pane connections + stair corners
+    /// will read neighbor states here). Out-of-view neighbors default to 0.
+    #[inline]
+    pub fn state_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        const S: i32 = CHUNK_SIZE_I;
+        let get = |c: &Option<Arc<Chunk>>, x: i32, y: i32, z: i32| -> u8 {
+            c.as_ref()
+                .map(|c| c.state(x as usize, y as usize, z as usize))
+                .unwrap_or(0)
+        };
+        if x < 0 {
+            return get(&self.neg_x, x + S, y, z);
+        }
+        if x >= S {
+            return get(&self.pos_x, x - S, y, z);
+        }
+        if y < 0 {
+            return get(&self.neg_y, x, y + S, z);
+        }
+        if y >= S {
+            return get(&self.pos_y, x, y - S, z);
+        }
+        if z < 0 {
+            return get(&self.neg_z, x, y, z + S);
+        }
+        if z >= S {
+            return get(&self.pos_z, x, y, z - S);
+        }
+        self.center.state(x as usize, y as usize, z as usize)
+    }
 }

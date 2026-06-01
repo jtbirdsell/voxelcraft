@@ -580,14 +580,44 @@ impl Game {
         crate::block::is_solid(self.block_at(wp))
     }
 
-    /// Set a block at a world position and synchronously re-mesh the affected chunk(s).
-    /// Returns true if a change was made.
+    /// Block id + block-state byte at a world position (air/0 if the chunk isn't loaded). Used by the
+    /// player collision closure so stair facing (and future oriented blocks) collide correctly.
+    pub fn block_state_at(&self, wp: IVec3) -> (crate::block::BlockId, u8) {
+        let cpos = world::chunk_of(wp);
+        let origin = world::chunk_origin(cpos);
+        match self.world.get(cpos) {
+            Some(chunk) => {
+                let (x, y, z) = (
+                    (wp.x - origin.x) as usize,
+                    (wp.y - origin.y) as usize,
+                    (wp.z - origin.z) as usize,
+                );
+                (chunk.get(x, y, z), chunk.state(x, y, z))
+            }
+            None => (crate::block::AIR, 0),
+        }
+    }
+
+    /// Set a block with its default state (0). Delegates to `set_block_state`.
     pub fn set_block(
         &mut self,
         gpu: &Gpu,
         renderer: &ChunkRenderer,
         wp: IVec3,
         id: crate::block::BlockId,
+    ) -> bool {
+        self.set_block_state(gpu, renderer, wp, id, 0)
+    }
+
+    /// Set a block id + block-state byte at a world position and synchronously re-mesh the affected
+    /// chunk(s). Returns true if a change was made (a different id OR a different orientation/state).
+    pub fn set_block_state(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        wp: IVec3,
+        id: crate::block::BlockId,
+        state: u8,
     ) -> bool {
         let cpos = world::chunk_of(wp);
         let origin = world::chunk_origin(cpos);
@@ -603,10 +633,10 @@ impl Game {
             };
             let chunk = Arc::make_mut(arc);
             let old = chunk.get(lx, ly, lz);
-            if old == id {
+            if old == id && chunk.state(lx, ly, lz) == state {
                 return false;
             }
-            chunk.set(lx, ly, lz, id);
+            chunk.set_state(lx, ly, lz, id, state);
             old
         };
 

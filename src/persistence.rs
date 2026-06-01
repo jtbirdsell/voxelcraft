@@ -254,6 +254,30 @@ pub fn load_state(dir: &Path, creative_default: bool) -> (Inventory, Vec<Furnace
     (inv, furnaces)
 }
 
+/// Migrate legacy block ids to the current id + block-state scheme.
+/// P2: the old fixed-orientation stair ids (42 = STONE_STAIRS_E, 43 = _S, 44 = _W) become
+/// STONE_STAIRS (40) with the facing carried in the state byte (1/2/3); the base STONE_STAIRS(40)
+/// was already facing 0 (state 0). Idempotent and cheap (a single scan over the chunk).
+fn migrate_legacy_blocks(blocks: &mut [BlockId], states: &mut [u8]) {
+    for (b, s) in blocks.iter_mut().zip(states.iter_mut()) {
+        match *b {
+            42 => {
+                *b = crate::block::STONE_STAIRS;
+                *s = 1;
+            }
+            43 => {
+                *b = crate::block::STONE_STAIRS;
+                *s = 2;
+            }
+            44 => {
+                *b = crate::block::STONE_STAIRS;
+                *s = 3;
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
     let mut map = FxHashMap::default();
     let Ok(d) = fs::read(dir.join("chunks.bin")) else {
@@ -301,10 +325,11 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
         }
         if let Ok(raw) = blocks_raw {
             if raw.len() == CHUNK_VOLUME * 2 {
-                let blocks: Vec<BlockId> = raw
+                let mut blocks: Vec<BlockId> = raw
                     .chunks_exact(2)
                     .map(|b| u16::from_le_bytes([b[0], b[1]]))
                     .collect();
+                migrate_legacy_blocks(&mut blocks, &mut states);
                 let solid_count = blocks.iter().filter(|&&b| b != 0).count() as u32;
                 let emitter_count =
                     blocks.iter().filter(|&&b| crate::block::light_emission(b) > 0).count() as u32;
@@ -456,6 +481,50 @@ mod tests {
         let lc = loaded.get(&pos).unwrap();
         assert_eq!(lc.get(4, 0, 3), crate::block::COBBLESTONE); // index 100 = 4 + 32*(3 + 32*0)
         assert_eq!(lc.states, vec![0u8; CHUNK_VOLUME]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_stair_ids_migrate_to_state() {
+        // Old fixed-orientation stair ids (42/43/44) must become STONE_STAIRS + facing in the state
+        // byte, so worlds built before P2 keep their oriented stairs.
+        let dir = std::env::temp_dir().join(format!("voxelcraft_stairmig_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut blocks = vec![0u16; CHUNK_VOLUME];
+        blocks[0] = 42; // old STONE_STAIRS_E -> facing 1
+        blocks[1] = 43; // old STONE_STAIRS_S -> facing 2
+        blocks[2] = 44; // old STONE_STAIRS_W -> facing 3
+        blocks[3] = crate::block::STONE_STAIRS; // 40, already facing 0
+        let pos = IVec3::new(0, 0, 0);
+        let mut b = Vec::new();
+        b.extend_from_slice(&MAGIC.to_le_bytes()); // legacy VCR1 (block ids only)
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&pos.x.to_le_bytes());
+        b.extend_from_slice(&pos.y.to_le_bytes());
+        b.extend_from_slice(&pos.z.to_le_bytes());
+        let mut raw = Vec::new();
+        for &blk in &blocks {
+            raw.extend_from_slice(&blk.to_le_bytes());
+        }
+        let comp = lz4_flex::compress_prepend_size(&raw);
+        b.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        b.extend_from_slice(&comp);
+        fs::write(dir.join("chunks.bin"), b).unwrap();
+
+        let loaded = load_chunks(&dir);
+        let lc = loaded.get(&pos).unwrap();
+        for x in 0..4 {
+            assert_eq!(lc.get(x, 0, 0), crate::block::STONE_STAIRS);
+        }
+        assert_eq!(lc.state(0, 0, 0), 1);
+        assert_eq!(lc.state(1, 0, 0), 2);
+        assert_eq!(lc.state(2, 0, 0), 3);
+        assert_eq!(lc.state(3, 0, 0), 0);
+        // No retired stair ids survive migration.
+        assert!(lc.blocks.iter().all(|&b| b <= crate::block::MAX_BLOCK));
 
         let _ = fs::remove_dir_all(&dir);
     }
