@@ -89,6 +89,43 @@ fn grow_decision(
     }
 }
 
+/// U10 sculk-spread tuning: conversions per tick, the catalyst detection radius from a mob death.
+const SCULK_BUDGET: u32 = 24;
+const SCULK_CATALYST_RANGE: i32 = 8;
+/// How long a vibration lives so consumers (sensors / the Warden) can react over a short window.
+const VIBRATION_TTL: f32 = 0.6;
+
+/// One in-flight sculk-spread charge (U10): a budget of conversions creeping out from a catalyst bloom.
+struct SculkCharge {
+    pos: IVec3,
+    amount: u16,
+}
+
+/// A vibration (game event) the sculk family + Warden listen for (U10): block edits, mob deaths,
+/// footsteps. `freq` is the MC frequency class; `ttl` ages it out.
+#[derive(Clone, Copy)]
+pub struct Vibration {
+    pub pos: Vec3,
+    pub freq: u8,
+    ttl: f32,
+}
+
+/// Whether sculk spread may convert this block into sculk (exposed solid rock/ground, never bedrock,
+/// reinforced deepslate, or the sculk family itself).
+fn sculk_convertible(b: BlockId) -> bool {
+    block::is_opaque(b)
+        && block::is_cube(b)
+        && !matches!(
+            b,
+            block::BEDROCK
+                | block::REINFORCED_DEEPSLATE
+                | block::SCULK
+                | block::SCULK_SENSOR
+                | block::SCULK_SHRIEKER
+                | block::SCULK_CATALYST
+        )
+}
+
 /// Natural-spawn tuning (P16: light + biome-gated, per-category caps, packs).
 const SPAWN_INTERVAL: f32 = 2.0; // seconds between spawn attempts
 const HOSTILE_CAP: usize = 12; // max live hostile mobs (continuous night spawning is MC-faithful)
@@ -330,6 +367,12 @@ pub struct Game {
     /// Random-block-tick cadence + RNG (U9): drives amethyst/dripstone/cave-vine growth in near chunks.
     tick_timer: f32,
     tick_rng: u64,
+
+    /// U10 sculk: in-flight catalyst spread charges (a budgeted frontier; transient — dropped on save
+    /// like the fluid frontier, but the sculk BLOCKS persist via the normal edited-chunk path).
+    sculk_charges: VecDeque<SculkCharge>,
+    /// U10 vibrations (game events) emitted recently, aged by TTL; heard by the Warden (U11).
+    vibrations: Vec<Vibration>,
 }
 
 impl Game {
@@ -395,6 +438,8 @@ impl Game {
             spawn_rng: seed ^ 0x5FA1_2E37_9B1D_C0DE,
             tick_timer: 0.0,
             tick_rng: seed ^ 0x7A1C_9E37_55C0_1DEF,
+            sculk_charges: VecDeque::new(),
+            vibrations: Vec::new(),
         }
     }
 
@@ -436,6 +481,12 @@ impl Game {
     ) -> crate::entity::Collected {
         self.center = Self::center_of(camera_pos);
         let r = self.render_distance;
+
+        // U10: age out old vibrations so consumers (sculk sensors / the Warden) see only recent events.
+        self.vibrations.retain_mut(|v| {
+            v.ttl -= dt;
+            v.ttl > 0.0
+        });
 
         // 1. Drain worker results.
         for result in self.pool.drain() {
@@ -627,6 +678,19 @@ impl Game {
                 collected.player_damage.push((dmg, center)); // source = blast center
             }
         }
+
+        // U10: mob deaths emit a vibration and, near a sculk catalyst, seed a sculk bloom.
+        for &death in &collected.deaths {
+            self.emit_vibration(death, 13); // freq 13 ≈ mob death (MC)
+            let dpos = death.floor().as_ivec3();
+            if self.catalyst_near(dpos, SCULK_CATALYST_RANGE) {
+                self.sculk_charges.push_back(SculkCharge {
+                    pos: dpos,
+                    amount: 12,
+                });
+            }
+        }
+        self.step_sculk(gpu, renderer);
 
         // Feed the GPU voxel volume (ray-traced lighting) around the player.
         self.volume.update(gpu, &self.world, self.center);
@@ -871,6 +935,9 @@ impl Game {
             self.pending_mesh.remove(&p);
             self.remesh_sync(gpu, renderer, p);
         }
+        // U10: a block edit is a vibration the sculk family + Warden hear (break vs place frequency).
+        let freq = if id == block::AIR { 6 } else { 9 };
+        self.emit_vibration(wp.as_vec3() + Vec3::splat(0.5), freq);
         true
     }
 
@@ -1225,6 +1292,110 @@ impl Game {
         }
         self.apply_block_changes(gpu, renderer, &changes);
         true
+    }
+
+    /// U10: emit a vibration (game event) at a world position with an MC frequency class. Heard by the
+    /// sculk family + the Warden (U11) over a short TTL.
+    pub fn emit_vibration(&mut self, pos: Vec3, freq: u8) {
+        self.vibrations.push(Vibration {
+            pos,
+            freq,
+            ttl: VIBRATION_TTL,
+        });
+    }
+
+    /// The position of the most recent live vibration within `range` of `from` (U11 Warden targeting).
+    pub fn nearest_vibration(&self, from: Vec3, range: f32) -> Option<Vec3> {
+        self.vibrations
+            .iter()
+            .rev()
+            .find(|v| (v.pos - from).length() <= range)
+            .map(|v| v.pos)
+    }
+
+    /// Whether a sculk catalyst sits within `r` blocks of `pos` (scanned on mob death; deaths are rare).
+    fn catalyst_near(&self, pos: IVec3, r: i32) -> bool {
+        for dy in -r..=r {
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    if self.block_at(pos + IVec3::new(dx, dy, dz)) == block::SCULK_CATALYST {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// True if any of the 6 face neighbors of `p` is air (so sculk only spreads over exposed surfaces).
+    fn exposed_to_air(&self, p: IVec3) -> bool {
+        const DIRS: [IVec3; 6] =
+            [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        DIRS.iter().any(|d| self.block_at(p + *d) == block::AIR)
+    }
+
+    /// U10 sculk spread tick: drain a budget of catalyst charges; each FLOODS to a few exposed
+    /// convertible neighbors (so a bloom grows as a patch, not a thread), enqueuing a reduced child at
+    /// each and occasionally capping it with a sculk sensor. Batched edits (persist via the edited path).
+    fn step_sculk(&mut self, gpu: &Gpu, renderer: &ChunkRenderer) {
+        if self.sculk_charges.is_empty() {
+            return;
+        }
+        const DIRS: [IVec3; 6] =
+            [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
+        let mut done: FxHashSet<IVec3> = FxHashSet::default(); // cells converted in this batch
+        let mut rng = self.tick_rng;
+        let mut budget = SCULK_BUDGET;
+        while budget > 0 {
+            let Some(charge) = self.sculk_charges.pop_front() else {
+                break;
+            };
+            if charge.amount == 0 {
+                continue;
+            }
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let start = (rng % 6) as usize;
+            let mut converted = 0;
+            for i in 0..6 {
+                if budget == 0 || converted >= 3 {
+                    break;
+                }
+                let np = charge.pos + DIRS[(start + i) % 6];
+                if done.contains(&np)
+                    || !sculk_convertible(self.block_at(np))
+                    || !self.exposed_to_air(np)
+                {
+                    continue;
+                }
+                done.insert(np);
+                changes.push((np, block::SCULK, 0));
+                budget -= 1;
+                converted += 1;
+                if charge.amount > 1 {
+                    self.sculk_charges.push_back(SculkCharge {
+                        pos: np,
+                        amount: charge.amount - 1,
+                    });
+                }
+                // A high-charge bloom occasionally sprouts a sculk sensor on the new sculk.
+                if charge.amount > 8 && rng % 20 == 0 && self.block_at(np + IVec3::Y) == block::AIR {
+                    changes.push((np + IVec3::Y, block::SCULK_SENSOR, 0));
+                }
+            }
+        }
+        self.tick_rng = rng;
+        if !changes.is_empty() {
+            self.apply_block_changes(gpu, renderer, &changes);
+        }
+    }
+
+    /// Debug/headless: seed a sculk-spread charge at `pos` (simulates a catalyst bloom) so the next
+    /// update ticks spread sculk over the surrounding exposed rock. Used for U10 verification.
+    pub fn debug_seed_sculk(&mut self, pos: IVec3, amount: u16) {
+        self.sculk_charges.push_back(SculkCharge { pos, amount });
     }
 
     pub fn spawn_mob(&mut self, pos: Vec3, species: crate::entity::Species) {
@@ -1681,6 +1852,18 @@ mod furnace_tests {
         );
         assert_eq!(grow_decision(block::POINTED_DRIPSTONE, 0, block::AIR, block::STONE, 0), None);
         assert!(random_tickable(block::BUDDING_AMETHYST) && !random_tickable(block::STONE));
+    }
+
+    #[test]
+    fn u10_sculk_convertible() {
+        // Exposed solid rock/ground converts to sculk; air/fluids/non-cubes + the sculk family don't.
+        assert!(sculk_convertible(block::STONE));
+        assert!(sculk_convertible(block::DEEPSLATE) && sculk_convertible(block::DIRT));
+        assert!(sculk_convertible(block::GRANITE) && sculk_convertible(block::COBBLED_DEEPSLATE));
+        assert!(!sculk_convertible(block::AIR) && !sculk_convertible(block::WATER));
+        assert!(!sculk_convertible(block::BEDROCK) && !sculk_convertible(block::REINFORCED_DEEPSLATE));
+        assert!(!sculk_convertible(block::SCULK) && !sculk_convertible(block::SCULK_CATALYST));
+        assert!(!sculk_convertible(block::POINTED_DRIPSTONE)); // non-cube billboard
     }
 
     #[test]

@@ -1460,6 +1460,15 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // Debug: VOXELCRAFT_SCULK="x,y,z,amount" seeds a sculk-spread charge (U10 verification);
+            // seeded BEFORE the ticks so VOXELCRAFT_TICKS drives the spread over the exposed rock.
+            if let Ok(s) = std::env::var("VOXELCRAFT_SCULK") {
+                let v: Vec<i32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                if v.len() == 4 {
+                    game.debug_seed_sculk(IVec3::new(v[0], v[1], v[2]), v[3] as u16);
+                }
+            }
+
             // Debug: VOXELCRAFT_TICKS=N advances the game N update steps before the shot — verifies
             // time-based features (U9 amethyst/dripstone/cave-vine growth, fluids). Pair with PLACE.
             if let Ok(Ok(n)) = std::env::var("VOXELCRAFT_TICKS").map(|s| s.trim().parse::<u32>()) {

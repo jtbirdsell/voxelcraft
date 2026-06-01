@@ -433,6 +433,9 @@ pub struct Collected {
     /// Environmental damage (fall/lava/drown/starve) is applied directly in player.rs, never here.
     pub player_damage: Vec<(f32, Vec3)>,
     pub explosions: Vec<(Vec3, f32)>,
+    /// World positions where a mob died this frame (U10): drives sculk-catalyst spread + a death
+    /// vibration the Warden/sensors can hear.
+    pub deaths: Vec<Vec3>,
 }
 
 struct Entity {
@@ -1220,6 +1223,7 @@ impl Entities {
         self.list.retain(|e| !e.dead);
         // Killed mobs drop their species loot + experience.
         for (pos, species) in deaths {
+            collected.deaths.push(pos); // U10: sculk-catalyst spread + death vibration
             let drop_at = pos + Vec3::new(0.0, 0.3, 0.0);
             self.spawn_xp(drop_at, species.xp_drop());
             for &(item, count) in species.loot() {
