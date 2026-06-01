@@ -71,11 +71,19 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
 - Infinite world streamed as 32³ chunks, generated and **binary greedy-meshed** across a worker pool
   (cores − 2 threads), with CPU frustum culling.
 - Multi-octave OpenSimplex terrain (deepened: sea level y96, ~90 blocks of underground) with
-  parameter-space **biomes**, 3D-noise **caves**, depth-banded **ores**, a jagged **bedrock** floor,
-  a noise-perturbed **deepslate** boundary at depth, and deterministic **trees** and
-  biome-gated surface **decoration** — flowers, tall grass, **ferns**, **red/brown mushrooms**,
-  **sugar cane** along water edges, **pumpkins**, cactus, and **ice** on frozen lakes in snowy
-  biomes. Fully seed-deterministic.
+  parameter-space **biomes**, a jagged **bedrock** floor, a noise-perturbed **deepslate** boundary,
+  and deterministic **trees** and biome-gated surface **decoration** — flowers, tall grass, **ferns**,
+  **red/brown mushrooms**, **sugar cane** along water edges, **pumpkins**, cactus, and **ice** on
+  frozen lakes in snowy biomes. Fully seed-deterministic.
+- **Full underground overhaul** (a cross-chunk-safe region-cell feature engine): **every overworld ore**
+  — coal, iron, **copper**, gold, redstone, lapis, diamond, **emerald** — each with a **deepslate
+  variant**, generated as connected **ore veins/blobs** on **1.18 triangular altitude bands**, plus rare
+  **large copper/iron veins**. Stone-variant blobs (tuff, granite, diorite, andesite) + dirt/gravel/clay,
+  and the building family (storage blocks, polished/brick deepslate, cut copper). **Rich caves** — cheese
+  caverns, spaghetti tunnels, thin noodle worms, **ravines**, underground **aquifers** + **lava lakes**.
+  **Cave biomes**: amethyst **geodes** (calcite/budding amethyst that grow clusters), **dripstone**,
+  **lush** caves (moss, cave vines + glow berries, azalea), and the **Deep Dark** — the **sculk** family
+  (sculk + veins + sensors + shriekers + a catalyst that spreads sculk when mobs die) and the **Warden**.
 - A **procedural texture atlas** painted in code at startup (stone, ores, planks, bricks, foliage,
   …), with cross-billboard plants drawn via **alpha cutout**.
 - **Translucent glass** (its own alpha-blended, depth-writing render pass — see-through and tinted,
@@ -172,11 +180,13 @@ position, albedo + skylight) and an ACES tonemap.
 - **Armor**: 4 equip slots (helmet/chestplate/leggings/boots) × leather/iron/gold/diamond, drag-to-equip
   in the inventory (each slot only accepts its piece). Equipped defense points reduce incoming damage
   (~4%/point, capped at 80%) for fall/lava/mob hits; a steel armor bar shows on the HUD.
-- **Typed mobs + AI**: twelve species — cow, pig, sheep, chicken, zombie, skeleton, creeper, spider,
+- **Typed mobs + AI**: thirteen species — cow, pig, sheep, chicken, zombie, skeleton, creeper, spider,
   plus a **wolf** (neutral; turns on you when struck), a tall **enderman**, a **slime** (bounces, and
-  **splits into smaller slimes** when killed until the smallest pops), and a passive **villager** —
-  each with its own size, health, and a distinct **multi-box model**, lit by the same ray-traced
-  pipeline as the world. An **Idle / Wander /
+  **splits into smaller slimes** when killed until the smallest pops), a passive **villager**, and the
+  **Warden** — a blind, **vibration-guided** Deep-Dark boss (500 HP) summoned by a **sculk shrieker**:
+  it emerges from the ground, crushes in melee, fires a ranged **sonic boom**, and digs away when it
+  loses your trail (so **sneak** to evade it). Each has its own size, health, and a distinct
+  **multi-box model**, lit by the same ray-traced pipeline as the world. An **Idle / Wander /
   Flee / Chase / Attack** state machine drives them: passive species flee when you crowd them, hostile
   species **chase you on sight** (raycast line-of-sight) and close to attack range. Movement is real
   **local navigation** — mobs **step up** one-block ledges, **avoid walking off cliffs** (passives) and
