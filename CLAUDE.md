@@ -50,4 +50,4 @@ Module layout uses a `foo.rs + foo/` facade pattern (M33-G1 grouping); submodule
 ## Conventions
 
 - Commit subjects use a milestone prefix (`P20: ...`) or conventional type (`fix(visuals): ...`); code comments reference milestone tags like `(M33-G8)`.
-- The README's Features section is the spec of record for gameplay/rendering behavior — update it when behavior changes. (Its Architecture file listing predates the M33-G1 module grouping; trust the layout above / the actual tree.)
+- The README's Features and Architecture sections are the spec of record — update them when behavior or module layout changes.

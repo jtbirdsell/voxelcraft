@@ -214,37 +214,54 @@ the GPU has large headroom, which the lighting spends on per-pixel ray tracing.
 
 ## Architecture
 
+Modules are grouped into subsystems with a `foo.rs + foo/` facade pattern; submodules are re-exported
+at the crate root so flat `crate::camera`-style paths keep resolving.
+
 ```
 src/
-  main.rs           module tree + winit event-loop entry point
-  app.rs            App/State, input routing, per-frame update + render, headless screenshot path
-  gpu.rs            wgpu device/surface/depth; Vulkan-default adapter selection (+DX12/GL), RT-capable device
-  camera.rs         fly camera + globals UBO (view-proj, sun, sky/fog, time)
-  environment.rs    day/night: sun direction, sky/fog color, ambient/intensity
-  world.rs          Chunk (32³ blocks + light), World store, neighborhood view for meshing
-  worldgen.rs       noise terrain, biomes, caves, ores, trees, decoration (Arc-shared across workers)
-  light.rs          skylight + block-light flood (baked per-vertex during meshing)
-  mesher.rs         binary greedy mesher (opaque/water/glass) + cross-billboards + slab/stair boxes
-  texture.rs        procedural block texture atlas (painted in code)
-  font.rs           embedded 8×8 bitmap font, baked to an atlas
-  worker.rs         crossbeam worker pool (generate + mesh off the main thread)
-  game.rs           streaming manager: gen/mesh budgets, frustum cull, edits, fluids, saves
-  voxel_volume.rs   GPU voxel material volume (block ids) for ray-traced shadows + AO/GI
-  raycast.rs        Amanatides–Woo voxel DDA (block targeting)
-  player.rs         AABB collision, gravity/jump/fly, input, survival
-  entity.rs         mobs + dropped items: AABB physics, wander AI, GI-lit box geometry
-  item.rs           item + tool registry, ItemStack (durability), Inventory, slot-click logic
-  crafting.rs       data-driven shaped/shapeless recipe registry + grid matching
-  smelting.rs       furnace smelt-recipe + fuel tables (drives the furnace tick in game.rs)
-  overlay.rs        HUD, hotbar, inventory/crafting screens, block + crack highlight (UI geometry)
-  frustum.rs        Gribb–Hartmann frustum culling
-  renderer.rs       pipelines (chunk/water/glass/GI-compute/composite/tonemap/highlight/UI), HDR frame recording
-  graph.rs          render-graph targets: HDR scene buffer + G-buffer (normal/motion/position/albedo)
-  rt.rs             hardware ray-tracing acceleration structures (per-chunk BLAS + per-frame TLAS)
-  persistence.rs    LZ4 chunk save/load, level header, inventory save_state
-  capture.rs        offscreen screenshot (headless verification)
-assets/shaders/     rtx_common (shared bindings + DDA tracer + GI) + atlas + sun_vis_hw (hardware rayQuery)
-                    + gi_compute / gi_composite + chunk / water / glass / tonemap / line / ui WGSL
+  main.rs             module tree + winit event-loop entry point
+  app.rs              App/State, input routing, per-frame update + render, headless screenshot path
+  game.rs             streaming manager: gen/mesh budgets, frustum cull, edits, fluids, furnace tick, saves
+  persistence.rs      LZ4 chunk save/load, level header, inventory/container/survival save_state
+  world/              world data + generation
+    chunk.rs          Chunk (32³ blocks + light), World store, neighborhood view for meshing
+    block.rs          block registry: u16 ids + property tables
+    worldgen.rs       noise terrain, climate-model biomes, caves, ores, trees, decoration (Arc-shared across workers)
+    light.rs          skylight + block-light flood (baked per-vertex during meshing)
+    worker.rs         crossbeam worker pool (generate + mesh off the main thread)
+  mesh/
+    mesher.rs         binary greedy mesher (opaque/water/glass) + cross-billboards + slab/stair/door/fence boxes
+  gfx/                GPU / rendering
+    device.rs         wgpu instance/surface/device/queue; DX12-default adapter selection (+Vulkan/GL), RT-capable device
+    camera.rs         fly camera + globals UBO (view-proj, sun, sky/fog, time)
+    environment.rs    day/night: sun direction, sky/fog color, ambient/intensity
+    renderer.rs       pipelines (chunk/water/glass/GI-compute/composite/tonemap/highlight/UI), HDR frame recording
+    graph.rs          render-graph targets: HDR scene buffer + G-buffer (normal/motion/position/albedo)
+    rt.rs             hardware ray-tracing acceleration structures (per-chunk BLAS + per-frame TLAS)
+    voxel_volume.rs   GPU voxel material volume (block ids) for the software DDA shadows + AO/GI
+    dlss.rs           DLSS Ray Reconstruction / Super Resolution (feature `dlss`; else dlss_stub.rs)
+    frame_gen.rs      DLSS Frame Generation via Streamline (feature `frame-generation`; else frame_gen_stub.rs)
+    texture.rs        procedural block texture atlas (painted in code)
+    frustum.rs        Gribb–Hartmann frustum culling
+    capture.rs        offscreen screenshot (headless verification)
+    rt_probe.rs       hardware-RT capability probe (VOXELCRAFT_RT_PROBE=1)
+    rt_spike.rs       self-contained hardware-RT proof, isolated from the main render path
+  gameplay/
+    player.rs         AABB collision, gravity/jump/fly, input, survival
+    entity.rs         mobs + dropped items + XP orbs: AABB physics, AI state machine, GI-lit box models
+    item.rs           item + tool registry, ItemStack (durability), Inventory, slot-click logic
+    crafting.rs       data-driven shaped/shapeless recipe registry + grid matching
+    smelting.rs       furnace smelt-recipe + fuel tables (drives the furnace tick in game.rs)
+    food.rs           hunger + saturation values for edible items
+    container.rs      generic block-entity container (chests; future barrels/hoppers)
+    rules.rs          difficulty (Peaceful/Easy/Normal/Hard), persisted per world
+    raycast.rs        Amanatides–Woo voxel DDA (block targeting)
+  ui/
+    overlay.rs        HUD, hotbar, inventory/crafting screens, block + crack highlight (UI geometry)
+    font.rs           embedded 8×8 bitmap font, baked to an atlas
+assets/shaders/       rtx_common (shared bindings + DDA tracer + GI) + atlas + sun_vis_hw (hardware rayQuery)
+                      + gi_compute / gi_composite / gi_temporal + gbuf_downscale / gbuf_upscale / ss_downscale
+                      (DLSS + supersampling resizes) + chunk / water / glass / tonemap / line / ui WGSL
 ```
 
 **Hardware-driven choices:** worker threads keep all cores busy on generation/meshing/lighting while
