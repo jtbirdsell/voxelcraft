@@ -46,9 +46,10 @@ glam029 = { package = "glam", version = "0.29", optional = true }
 # off (native res) when the NGX DLLs/adapter are absent. **OPTIONAL + feature-gated** (M33-G9b): the
 # `dlss` feature enables Ray Reconstruction (needs DLSS_SDK + LIBCLANG_PATH at build time), and
 # `frame-generation` adds DLSS-G (needs STREAMLINE_SDK). `cargo build --no-default-features` builds
-# WITHOUT this dep — no NVIDIA SDK / libclang / Streamline required. Pinned to the fork's release main
-# (3e79f06 = v0.1.0 + the render_resolution()->optimal fix); its wgpu pin must match [patch] below.
-dlss_wgpu_dx12 = { git = "https://github.com/jtbirdsell/dlss_wgpu_dx12", rev = "3e79f0693965bba4fd2329116a19a7b0a75b9f96", default-features = false, optional = true }
+# WITHOUT this dep — no NVIDIA SDK / libclang / Streamline required. Pinned to branch wgpu-bump-933587
+# (901c6b4 = 3e79f06 [v0.1.0 + the render_resolution()->optimal fix] + the wgpu pin bump to 933587);
+# its wgpu pin must match [patch] below.
+dlss_wgpu_dx12 = { git = "https://github.com/jtbirdsell/dlss_wgpu_dx12", rev = "901c6b41e20916ed4e082a3a2426acaef6592798", default-features = false, optional = true }
 
 # M33-G9b feature gates. `dlss` (Ray Reconstruction + supersampling) and `frame-generation` (DLSS-G,
 # implies dlss) are on by default; `--no-default-features` compiles the engine natively with no DLSS
@@ -91,7 +92,9 @@ debug = true
 # patches (the `CommandEncoder::raw_command_list`/raw_device/raw_queue accessors, wgpu PR #8888, +
 # a Streamline factory-upgrade for Frame Generation) that let dlss_wgpu_dx12 reach the open ID3D12
 # command list and record the DLSS evaluate on our queue. Same 29.0.3 ABI, so engine code is
-# unchanged. The rev MUST match dlss_wgpu_dx12's own wgpu pin so the two resolve to one wgpu.
+# unchanged. P22: rev 933587 = d81d755 + the Metal acceleration-structure fence sync (fixes
+# gfx-rs/wgpu#9215; upstream PR #9645 — fork-only until that merges), which unblocks hardware RT
+# on Apple Silicon. The rev MUST match dlss_wgpu_dx12's own wgpu pin so the two resolve to one wgpu.
 [patch.crates-io]
-wgpu = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38" }
-wgpu-hal = { git = "https://github.com/jtbirdsell/wgpu", rev = "d81d7552cf201d47359e993fbebc9c088142bc38" }
+wgpu = { git = "https://github.com/jtbirdsell/wgpu", rev = "933587187b48314553915aa75abddf54987895b0" }
+wgpu-hal = { git = "https://github.com/jtbirdsell/wgpu", rev = "933587187b48314553915aa75abddf54987895b0" }
