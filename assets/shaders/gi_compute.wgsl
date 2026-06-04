@@ -11,7 +11,9 @@
 @group(2) @binding(1) var g_normal: texture_2d<f32>;  // world normal .xyz (emission .w)
 @group(2) @binding(2) var gi_out: texture_storage_2d<rgba16float, write>;
 
-@compute @workgroup_size(8, 8, 1)
+// GI_WG_X/Y are injected by the renderer (P21): (8,4) on Metal — one 32-wide AGX SIMD-group per
+// workgroup — and the original (8,8) elsewhere. The dispatch div_ceil uses the same source values.
+@compute @workgroup_size(GI_WG_X, GI_WG_Y, 1)
 fn gi_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dim = textureDimensions(gi_out);
     if (gid.x >= dim.x || gid.y >= dim.y) {

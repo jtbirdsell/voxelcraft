@@ -19,7 +19,8 @@ struct Camera {
 struct Volume {
     origin: vec4<i32>,
     params: vec4<u32>,  // size_xz, rtx_mode, gi_rays, size_y
-    paramsf: vec4<f32>, // gi_dist, gi_strength, sky_boost, _
+    paramsf: vec4<f32>, // gi_dist, gi_strength, sky_boost, water_smooth
+    paramsg: vec4<f32>, // sun_dist, gi_sun_dist, water_refl_max, water_depth_max (P21 tier)
 };
 @group(1) @binding(0) var voxels: texture_3d<u32>;
 @group(1) @binding(1) var<uniform> volume: Volume;
@@ -295,7 +296,9 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
             let ndl_h = max(dot(h.normal, sun), 0.0);
             var vis = 1.0;
             if (ndl_h > 0.0) {
-                vis = sun_visibility(h.pos, h.normal, gi_dist);
+                // Secondary sun ray from the bounce point. Its range is a tier knob (P21,
+                // paramsg.y): the maxed tier sets it == gi_dist, the pre-P21 behavior.
+                vis = sun_visibility(h.pos, h.normal, volume.paramsg.y);
             }
             // Bounced radiance leaving the hit surface: its own ambient + direct sun term, plus any
             // self-emission (lava) so emissive blocks cast colored indirect light.

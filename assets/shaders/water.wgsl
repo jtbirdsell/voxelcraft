@@ -10,8 +10,9 @@
 // blue-green. `WATER_TINT` is the body color seen once the floor is fully absorbed.
 const WATER_EXTINCTION: vec3<f32> = vec3<f32>(0.42, 0.20, 0.12);
 const WATER_TINT:       vec3<f32> = vec3<f32>(0.06, 0.22, 0.30);
-const DEPTH_MAX:        f32 = 24.0;   // cap on the downward depth march (deep just saturates)
-const REFL_MAX:         f32 = 80.0;   // reflection ray range
+// P21: the depth-march cap (was const DEPTH_MAX = 24.0) and reflection range (was const
+// REFL_MAX = 80.0) are now tier knobs in volume.paramsg.w / .z; the maxed tier writes the old
+// values, so the step budgets and fade math below evaluate exactly as before.
 const RIPPLE_AMP:       f32 = 0.06;   // tangent-space tilt of the static ripple (small => calm)
 const RIPPLE_SCALE:     f32 = 0.55;   // spatial frequency of the dominant wave
 
@@ -57,17 +58,19 @@ fn reflection_color(world_pos: vec3<f32>, n: vec3<f32>, incident: vec3<f32>) -> 
     let refl = reflect(incident, n);
     let origin = world_pos + n * 0.05 + refl * 0.05;
     let sky = sky_radiance(refl, sun, sun_intensity);
-    let h = trace(origin, refl, REFL_MAX, 180);
+    let refl_max = volume.paramsg.z;
+    // ~2.25 voxel boundaries per block keeps the old 80-block/180-step ratio at any tier range.
+    let h = trace(origin, refl, refl_max, i32(refl_max * 2.25));
     if (h.hit) {
         let ndl = max(dot(h.normal, sun), 0.0);
         var vis = 1.0;
         if (ndl > 0.0) {
-            vis = sun_visibility(h.pos, h.normal, 64.0);
+            vis = sun_visibility(h.pos, h.normal, min(volume.paramsg.x, 64.0));
         }
         var lit = voxel_color(h.id) * (ambient + sun_intensity * ndl * vis) + voxel_emission(h.id);
         lit = min(lit, vec3<f32>(2.0)); // tame emissive spikes
         let d = length(h.pos - origin);
-        let fade = smoothstep(REFL_MAX * 0.6, REFL_MAX, d);
+        let fade = smoothstep(refl_max * 0.6, refl_max, d);
         return mix(lit, sky, fade);
     }
     return sky;
@@ -78,12 +81,13 @@ fn reflection_color(world_pos: vec3<f32>, n: vec3<f32>, incident: vec3<f32>) -> 
 // first floor voxel; that hit distance IS the depth. Marching straight down (rather than along the
 // view ray) keeps depth a stable per-location property, so it adds no per-pixel direction noise.
 fn water_depth(p: vec3<f32>) -> f32 {
+    let depth_max = volume.paramsg.w;
     let origin = p + vec3<f32>(0.0, -0.05, 0.0); // nudge just below the surface
-    let h = trace(origin, vec3<f32>(0.0, -1.0, 0.0), DEPTH_MAX, i32(DEPTH_MAX * 2.0) + 4);
+    let h = trace(origin, vec3<f32>(0.0, -1.0, 0.0), depth_max, i32(depth_max * 2.0) + 4);
     if (h.hit) {
-        return clamp(length(origin - h.pos), 0.0, DEPTH_MAX);
+        return clamp(length(origin - h.pos), 0.0, depth_max);
     }
-    return DEPTH_MAX; // no floor within range -> treat as deep
+    return depth_max; // no floor within range -> treat as deep
 }
 
 fn depth_to_clarity(depth: f32) -> f32 {
@@ -103,9 +107,10 @@ fn smoothed_clarity(p: vec3<f32>, side_face: bool, r: f32) -> f32 {
         center = max(center, 4.0); // thin vertical edges hold ~1 block; floor so they read as water
     }
     // Smoothing only reshapes the shallow->deep transition. Deep water is already saturated-opaque,
-    // and screen-filling deep water is the costly case (every tap marches the full DEPTH_MAX), so
+    // and screen-filling deep water is the costly case (every tap marches the full depth cap), so
     // short-circuit it to a single march; the neighbour taps couldn't lift its clarity meaningfully.
-    if (r < 0.01 || center > 20.0) {
+    // (`cap - 4` == the old literal 20.0 at the maxed tier's 24-block cap.)
+    if (r < 0.01 || center > volume.paramsg.w - 4.0) {
         return depth_to_clarity(center);
     }
     let d = r * 0.707; // diagonal taps
@@ -151,7 +156,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Shadow ray uses the TRUE flat normal/origin to avoid ripple-induced self-intersection acne.
     var shadow = 1.0;
     if (rtx) {
-        shadow = sun_visibility(in.world_pos, base_n, 96.0);
+        // Primary sun-shadow ray; range is a tier knob (P21, paramsg.x; maxed tier = the old 96.0).
+        shadow = sun_visibility(in.world_pos, base_n, volume.paramsg.x);
     }
     let lit = ambient + sun_intensity * ndl * shadow;
 

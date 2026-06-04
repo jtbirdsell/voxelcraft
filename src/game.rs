@@ -275,14 +275,15 @@ impl Game {
         gpu: &Gpu,
         volume_bgl: &wgpu::BindGroupLayout,
         seed: u64,
-        render_distance: i32,
+        quality: &crate::quality::Quality,
         saved_chunks: FxHashMap<IVec3, Chunk>,
     ) -> Self {
+        let render_distance = quality.render_distance;
         let saved: FxHashMap<IVec3, Arc<Chunk>> = saved_chunks
             .into_iter()
             .map(|(pos, chunk)| (pos, Arc::new(chunk)))
             .collect();
-        let volume = VoxelVolume::new(gpu, volume_bgl);
+        let volume = VoxelVolume::new(gpu, volume_bgl, quality);
         let r = render_distance + 1;
         let mut offsets = Vec::new();
         for dz in -r..=r {
@@ -295,8 +296,13 @@ impl Game {
         }
         offsets.sort_by_key(|&(_, _, d2)| d2);
 
+        // Reserve cores for the main/render thread + the GPU driver. P21: reserve one more on
+        // macOS — Apple-silicon parts split P/E cores (the M3 is 4+4) and oversubscribing the
+        // P-cluster with throughput workers stalls the latency-critical main thread; gen/mesh
+        // throughput is GPU-bound there anyway. Worker count never affects worldgen output.
+        let reserve = if cfg!(target_os = "macos") { 3 } else { 2 };
         let workers = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(2))
+            .map(|n| n.get().saturating_sub(reserve))
             .unwrap_or(4)
             .max(1);
         let worldgen = Arc::new(Worldgen::new(seed));
@@ -654,6 +660,38 @@ impl Game {
         }
     }
 
+    /// Block until every in-flight mesh job is drained and uploaded. Headless paths need this
+    /// after scripted edits (P21): boundary-neighbor remeshes now run on the worker pool, and a
+    /// screenshot taken before they land would capture the stale seam. Bounded so a lost job
+    /// can't hang a headless run.
+    pub fn flush_meshes(&mut self, gpu: &Gpu, renderer: &ChunkRenderer) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !self.pending_mesh.is_empty() {
+            for result in self.pool.drain() {
+                if let JobResult::Meshed { pos, version, mesh } = result {
+                    self.pending_mesh.remove(&pos);
+                    if self.versions.get(&pos).copied().unwrap_or(0) != version {
+                        continue; // stale (re-edited since submission)
+                    }
+                    let gpu_mesh = if mesh.is_empty() {
+                        None
+                    } else {
+                        Some(renderer.upload_mesh(gpu, &mesh))
+                    };
+                    self.meshes.insert(pos, gpu_mesh);
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                log::warn!(
+                    "flush_meshes: {} mesh job(s) unresolved after 5s; continuing",
+                    self.pending_mesh.len()
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+    }
+
     /// Block id at a world position (air if the chunk isn't loaded).
     pub fn block_at(&self, wp: IVec3) -> crate::block::BlockId {
         let cpos = world::chunk_of(wp);
@@ -795,10 +833,36 @@ impl Game {
             affected.push(cpos + IVec3::Z);
         }
 
+        // P21: the edited chunk re-meshes synchronously — the player must see the block change
+        // this frame. Boundary NEIGHBORS re-mesh on the worker pool instead: their only change is
+        // the shared face's culling/light seam, so the 1–2 frame lag is invisible, while 7 chunks
+        // of synchronous mesh+upload was a visible main-thread hitch on every edit (worst on the
+        // M3, where a frame budget is 16 ms). Version bumps keep stale async results discarded.
+        let mut affected = affected.into_iter();
+        let edited = affected.next().expect("edited chunk is always present");
+        *self.versions.entry(edited).or_insert(0) += 1;
+        self.pending_mesh.remove(&edited);
+        self.remesh_sync(gpu, renderer, edited);
         for p in affected {
-            *self.versions.entry(p).or_insert(0) += 1;
-            self.pending_mesh.remove(&p);
-            self.remesh_sync(gpu, renderer, p);
+            let version = {
+                let v = self.versions.entry(p).or_insert(0);
+                *v += 1;
+                *v
+            };
+            if let Some(neigh) = self.world.neighborhood(p) {
+                let origin = world::chunk_origin(p).to_array();
+                // Keep `p` in pending_mesh while the job is in flight so the streaming loop
+                // doesn't double-submit; the drain's version check routes the result normally.
+                self.pending_mesh.insert(p);
+                self.pool.submit(Job::Mesh {
+                    pos: p,
+                    version,
+                    neigh,
+                    origin,
+                });
+            } else {
+                self.pending_mesh.remove(&p);
+            }
         }
         true
     }
@@ -1314,6 +1378,11 @@ impl Game {
     /// Raise the GI hemisphere ray count (offscreen screenshots want many more than interactive).
     pub fn set_rtx_quality(&mut self, rays: u32) {
         self.volume.set_gi_rays(rays);
+    }
+
+    /// Force a ray-traced lighting mode: 0 off, 1 shadows, 2 shadows+GI (P21 headless knob).
+    pub fn set_rtx_mode(&mut self, mode: u32) {
+        self.volume.set_rtx_mode(mode);
     }
 
     /// Water depth-clarity smoothing radius in blocks (debug knob; 0 disables smoothing).

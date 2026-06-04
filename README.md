@@ -1,11 +1,13 @@
 # Voxelcraft
 
-A Minecraft-style voxel sandbox written from scratch in **Rust + [wgpu](https://wgpu.rs)** (Vulkan,
-with a DirectX 12 fallback), tuned for a high-end PC (developed on an RTX 4090 / i9-14900K). It features an infinite,
-procedurally-generated world streamed across all CPU cores, a procedural texture atlas, real
-block-light + skylight (dark caves, glowing torches), a full inventory, and **ray-traced lighting** —
-sun shadows, ambient occlusion, one-bounce colored global illumination, water reflections, and
-emissive blocks — all computed against the actual voxel geometry on the GPU.
+A Minecraft-style voxel sandbox written from scratch in **Rust + [wgpu](https://wgpu.rs)** (DX12 /
+Vulkan / Metal), tuned for a high-end PC (developed on an RTX 4090 / i9-14900K) but it also builds
+and runs on **macOS / Apple Silicon** via the Metal backend (software-traced lighting — hardware RT
+and DLSS remain Windows/RTX-only). It features an infinite, procedurally-generated world streamed
+across all CPU cores, a procedural texture atlas, real block-light + skylight (dark caves, glowing
+torches), a full inventory, and **ray-traced lighting** — sun shadows, ambient occlusion, one-bounce
+colored global illumination, water reflections, and emissive blocks — all computed against the
+actual voxel geometry on the GPU.
 
 > **Status:** the engine and world systems are complete and the survival loop is in active
 > development (see [Roadmap](#roadmap)). Everything here is built from scratch — no game engine, and
@@ -13,7 +15,9 @@ emissive blocks — all computed against the actual voxel geometry on the GPU.
 
 ## Run
 
-Requires the Rust toolchain (stable, MSVC on Windows). From the project directory:
+Requires the Rust toolchain (stable; MSVC on Windows, Xcode Command Line Tools on macOS). The same
+plain command works on both — no NVIDIA SDK is needed off-Windows (the DLSS deps are gated to
+`cfg(windows)`). From the project directory:
 
 ```sh
 cargo run --release
@@ -30,16 +34,49 @@ The world auto-saves to `saves/world/` on quit.
 
 ## GPU backend
 
-Defaults to the **DX12** backend with hardware ray tracing via the **DXC** shader compiler (the
-default FXC cannot compile ray-tracing shaders). The build script stages `dxcompiler.dll` +
-`dxil.dll` next to the executable — from a vendored `dll/` directory if present, else your installed
-Windows SDK; if neither is found, DX12 falls back to FXC and the software DDA tracer. (`dxil.dll` is a
-Microsoft redistributable and is **not** committed to this repo — it is copied from your local
-Windows SDK at build time.)
+The default is platform-aware. On Windows/Linux it's the **DX12** backend with hardware ray tracing
+via the **DXC** shader compiler (the default FXC cannot compile ray-tracing shaders). The build
+script stages `dxcompiler.dll` + `dxil.dll` next to the executable — from a vendored `dll/`
+directory if present, else your installed Windows SDK; if neither is found, DX12 falls back to FXC
+and the software DDA tracer. (`dxil.dll` is a Microsoft redistributable and is **not** committed to
+this repo — it is copied from your local Windows SDK at build time.)
 
-Override with `VOXELCRAFT_BACKEND=dx12|vulkan|gl`. **Vulkan** is the fallback: it also has hardware RT
-and is the only backend wgpu exposes **DLSS** on, but DX12 renders better here so it's the default.
-GL has no hardware RT (software DDA tracer only).
+On **macOS** the default is **Metal**, the only native backend there. Metal exposes no hardware ray
+tracing through wgpu (and no DLSS), so the lighting runs the **software DDA tracer** + the deferred
+compute GI — the same fully-featured fallback path GL uses, with a tuned-down **platform quality
+tier** (below) sized for 60 FPS on Apple-silicon GPUs. The swapchain renders at 0.57× of the
+window's *logical* resolution by default (the compositor stretches the drawable); override with
+`VOXELCRAFT_RENDER_SCALE=0.25..1.0`, a fraction of *physical* pixels (Metal-only; `1.0` = native
+pixels, e.g. for screenshots).
+
+### Platform quality tier
+
+A `Quality` tier resolves once at startup (`gfx/quality.rs`): every non-Metal backend gets the
+**maxed** tier — exactly the pre-tier hardcoded defaults, unit-test-anchored so the Windows/RTX
+experience can never drift — while **Metal** gets values benchmarked for 60 FPS on a base M3.
+Each knob is only a default; the env vars override either tier:
+
+| Knob (env var) | Maxed (Windows) | Metal tier | Controls |
+|---|---|---|---|
+| `VOXELCRAFT_GI_RAYS` | 8 | 2 | GI hemisphere rays/pixel |
+| `VOXELCRAFT_GI_ACCUM` | off | **on** | GI temporal accumulation (denoises the low ray count) |
+| `VOXELCRAFT_GI_DIST` | 22 | 12 | GI bounce-ray range (blocks) |
+| `VOXELCRAFT_GI_SUN_DIST` | 22 | 12 | secondary sun ray from GI hits |
+| `VOXELCRAFT_SUN_DIST` | 96 | 18 | primary sun-shadow ray range |
+| `VOXELCRAFT_WSMOOTH` | 3 | 1 | water depth-clarity smoothing radius |
+| `VOXELCRAFT_WREFL` | 80 | 24 | water reflection-ray range |
+| `VOXELCRAFT_WDEPTH` | 24 | 12 | water depth-march cap |
+| `VOXELCRAFT_VOLUME_CHUNKS` | 24 | 20 | tracer voxel-volume extent (chunks; ~302 → ~210 MB) |
+| `VOXELCRAFT_RENDER_DISTANCE` | 12 | 8 | chunk render distance (fog scales with it) |
+| `VOXELCRAFT_UPLOAD_BUDGET` | 48 | 32 | volume chunk uploads/frame |
+
+The tier values flow through the `Volume` uniform, so the shared HW-RT/DDA shader code is
+bit-identical on Windows by construction, and the `VOXELCRAFT_GI=fragment` parity oracle holds on
+both paths.
+
+Override with `VOXELCRAFT_BACKEND=dx12|vulkan|gl|metal` (a backend your OS lacks just fails adapter
+selection). **Vulkan** is the Windows fallback: it also has hardware RT, but DX12 renders better
+here so it's the default. GL has no hardware RT (software DDA tracer only).
 
 ## Controls
 
@@ -210,7 +247,13 @@ position, albedo + skylight) and an ACES tonemap.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
 
 Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;
-the GPU has large headroom, which the lighting spends on per-pixel ray tracing.
+the GPU has large headroom, which the lighting spends on per-pixel ray tracing. On Apple Silicon
+(software DDA path) the per-pixel ray cost dominates — the Metal **quality tier** (see *GPU
+backend*) lands 60 FPS on a base M3 (13.7 ms GPU p50 on the benchmark vista, from 147 ms before
+the tier) by shortening ray ranges, quartering GI rays into the temporal accumulator, and rendering
+at 0.57× logical resolution; the headroom under the 16.67 ms vblank absorbs the windowed loop's
+serialized CPU work (Metal runs one frame in flight), keeping ProMotion from quantizing busy views
+down to 40 FPS. `VOXELCRAFT_BENCH=N` measures any knob combination headlessly.
 
 ## Architecture
 
@@ -232,7 +275,7 @@ src/
   mesh/
     mesher.rs         binary greedy mesher (opaque/water/glass) + cross-billboards + slab/stair/door/fence boxes
   gfx/                GPU / rendering
-    device.rs         wgpu instance/surface/device/queue; DX12-default adapter selection (+Vulkan/GL), RT-capable device
+    device.rs         wgpu instance/surface/device/queue; platform-aware adapter selection — DX12 (Win/Linux) / Metal (macOS), +Vulkan/GL; RT-capable device
     camera.rs         fly camera + globals UBO (view-proj, sun, sky/fog, time)
     environment.rs    day/night: sun direction, sky/fog color, ambient/intensity
     renderer.rs       pipelines (chunk/water/glass/GI-compute/composite/tonemap/highlight/UI), HDR frame recording
@@ -242,8 +285,10 @@ src/
     dlss.rs           DLSS Ray Reconstruction / Super Resolution (feature `dlss`; else dlss_stub.rs)
     frame_gen.rs      DLSS Frame Generation via Streamline (feature `frame-generation`; else frame_gen_stub.rs)
     texture.rs        procedural block texture atlas (painted in code)
+    quality.rs        platform quality tier: maxed (Windows, == legacy defaults) vs Metal (60 FPS on M3)
     frustum.rs        Gribb–Hartmann frustum culling
     capture.rs        offscreen screenshot (headless verification)
+    bench.rs          headless benchmark (VOXELCRAFT_BENCH=N): per-pass GPU timestamps + frame stats
     rt_probe.rs       hardware-RT capability probe (VOXELCRAFT_RT_PROBE=1)
     rt_spike.rs       self-contained hardware-RT proof, isolated from the main render path
   gameplay/
@@ -274,13 +319,21 @@ Setting `VOXELCRAFT_SHOT=path.png` renders a single frame offscreen to a PNG and
 verify each change without a human in the loop. Companion debug knobs: `VOXELCRAFT_CAM="x,y,z,yaw,pitch"`,
 `VOXELCRAFT_TIME=secs`, `VOXELCRAFT_PLACE="x,y,z,id;..."`, `VOXELCRAFT_SCREEN=inv|craft|furnace`,
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
-armor bars). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl`, `VOXELCRAFT_TRACER=dda|hwrt`
-(software DDA vs hardware ray query), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
+armor bars). Rendering knobs: `VOXELCRAFT_BACKEND=vulkan|dx12|gl|metal`, `VOXELCRAFT_TRACER=dda|hwrt`
+(software DDA vs hardware ray query), `VOXELCRAFT_RENDER_SCALE=0.25..1.0` (Metal-only sub-native
+swapchain; defaults to 0.60× logical resolution on macOS — set `1.0` for native-pixel screenshots /
+cross-OS comparisons), `VOXELCRAFT_RTX=0|1|2` (force lighting off / shadows / shadows+GI — cost
+isolation), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
 `VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_GI_RAYS=N` (GI samples/pixel,
-default 8), `VOXELCRAFT_GI_ACCUM=1` (opt-in GI temporal accumulation), `VOXELCRAFT_DLSS=off|rr` +
+tier default), `VOXELCRAFT_GI_ACCUM=1|0` (GI temporal accumulation; tier default), the quality-tier
+knobs above (`VOXELCRAFT_SUN_DIST`, `VOXELCRAFT_GI_DIST`, `VOXELCRAFT_GI_SUN_DIST`,
+`VOXELCRAFT_WREFL`, `VOXELCRAFT_WDEPTH`, `VOXELCRAFT_VOLUME_CHUNKS`, `VOXELCRAFT_RENDER_DISTANCE`,
+`VOXELCRAFT_UPLOAD_BUDGET`), `VOXELCRAFT_DLSS=off|rr` +
 `VOXELCRAFT_DLSS_QUALITY=dlaa|quality|balanced|performance` (DLSS Ray Reconstruction),
 `VOXELCRAFT_SS=1.5` (supersample ×SS then downscale — render above native; clamped 1–4),
-`VOXELCRAFT_FG=1` (DLSS Frame Generation on top of RR; needs `STREAMLINE_SDK` set + a focused window).
+`VOXELCRAFT_FG=1` (DLSS Frame Generation on top of RR; needs `STREAMLINE_SDK` set + a focused window),
+`VOXELCRAFT_GPU_WATCHDOG=secs` (windowed GPU-wedge fail-safe: if submitted frames stop completing
+for this long, save the world and exit instead of feeding a dead driver queue; default 5, `0` off).
 DLSS needs `DLSS_SDK` + `LIBCLANG_PATH` set at build time. **Build features:** DLSS is gated behind the
 default `dlss` (Ray Reconstruction + supersampling) and `frame-generation` (DLSS-G; implies `dlss`)
 cargo features — `cargo build --no-default-features` compiles and runs the engine **natively with no
@@ -289,6 +342,17 @@ Generation. Frame Generation can be smoke-tested headlessly with `VOXELCRAFT_FG_
 camera for N frames, logs the max `num_frames_actually_presented` — 2 means DLSS-G is generating — then
 exits). `VOXELCRAFT_PERSIST_TEST=1` round-trips a sample inventory/armor/furnace/survival state through
 the real save/load (no window).
+
+**Headless benchmark:** `VOXELCRAFT_BENCH=N` renders N timed frames offscreen (never touching the
+swapchain) and prints p50/p95 frame + per-pass GPU timings from stage-boundary timestamp queries
+(the only flavor Apple GPUs support; whole-frame wall time elsewhere if unavailable). Defaults to
+the tier's interactive GI rays so numbers reflect gameplay cost. Knobs: `VOXELCRAFT_BENCH_WARMUP=W`
+(discarded frames, default max(3, N/10)), `VOXELCRAFT_BENCH_LABEL=tag`, `VOXELCRAFT_BENCH_CSV=path`
+(append one row per run for A/B sweeps), `VOXELCRAFT_BENCH_GPU=0` (wall-time only). Canonical bench
+scene: default camera + `VOXELCRAFT_TIME=0.30`, e.g.
+`VOXELCRAFT_BENCH=120 VOXELCRAFT_TIME=0.30 cargo run --release`. On Apple-silicon TBDR the per-pass
+render timings overlap (passes execute concurrently) — treat them as relative weights and
+`gpu_frame` as the absolute verdict; the compute-pass (`gi_compute`) timing is reliable.
 
 ## Roadmap
 

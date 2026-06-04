@@ -48,7 +48,8 @@ fn fs_main(in: VsOut) -> FragOut {
 
     var shadow = 1.0;
     if (volume.params.y >= 1u) {
-        shadow = sun_visibility(in.world_pos, n, 96.0);
+        // Primary sun-shadow ray; range is a tier knob (P21, paramsg.x; maxed tier = the old 96.0).
+        shadow = sun_visibility(in.world_pos, n, volume.paramsg.x);
     }
     let direct = sun_intensity * ndl * shadow;
 

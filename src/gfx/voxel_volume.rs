@@ -18,6 +18,8 @@ use crate::gpu::Gpu;
 use crate::world::{Chunk, World, CHUNK_SIZE, CHUNK_SIZE_I};
 
 /// Horizontal extent (covers render distance) and vertical extent (full world height), in blocks.
+/// P21: the XZ extent here is the MAXED-tier default — the live value is per-instance (tier-driven,
+/// `Quality::volume_chunks_xz`); Y stays compile-time (full world height, never scaled).
 pub const VOL_SIZE_XZ: i32 = 768;
 pub const VOL_SIZE_Y: i32 = 256;
 pub const VOL_CHUNKS_XZ: i32 = VOL_SIZE_XZ / CHUNK_SIZE_I; // 24
@@ -33,8 +35,11 @@ struct VolumeUniform {
     origin: [i32; 4],
     /// (size_xz, rtx_mode, gi_rays, size_y) — rtx_mode: 0 off, 1 shadows, 2 shadows+GI.
     params: [u32; 4],
-    /// (gi_dist, gi_strength, sky_boost, _)
+    /// (gi_dist, gi_strength, sky_boost, water_smooth)
     paramsf: [f32; 4],
+    /// (sun_dist, gi_sun_dist, water_refl_max, water_depth_max) — P21 quality-tier ray ranges;
+    /// the maxed tier writes the exact pre-P21 shader literals, so Windows output is unchanged.
+    paramsg: [f32; 4],
 }
 
 /// Ray-traced lighting mode, cycled by the `R` key.
@@ -48,6 +53,10 @@ pub struct VoxelVolume {
     bind_group: wgpu::BindGroup,
     origin_chunk: IVec3,
     occupant: FxHashMap<(i32, i32, i32), IVec3>,
+    /// Horizontal extent in chunks / blocks (P21: tier-driven — `VOL_CHUNKS_XZ`/`VOL_SIZE_XZ` are
+    /// the maxed defaults). The Y extent stays compile-time: it is the full world height.
+    chunks_xz: i32,
+    size_xz: i32,
     rtx_mode: u32,
     /// Hemisphere ray count for GI (low interactive, high for offscreen screenshots).
     gi_rays: u32,
@@ -56,9 +65,19 @@ pub struct VoxelVolume {
     sky_boost: f32,
     /// Water depth-clarity smoothing kernel radius, in blocks (0 = single straight-down tap).
     water_smooth: f32,
+    /// P21 tier-driven ray ranges (uniform `paramsg`; see Quality for the per-field docs).
+    sun_dist: f32,
+    gi_sun_dist: f32,
+    water_refl_max: f32,
+    water_depth_max: f32,
     upload_budget: usize,
     /// Reused padded scratch (row stride = 256 texels) for texture writes.
     scratch: Vec<u16>,
+    /// XZ chunk offsets (0..VOL_CHUNKS_XZ each axis) sorted nearest-to-player-first, so budgeted
+    /// streaming makes the camera's surroundings coherent in the first frames instead of filling
+    /// corner-first (2026-06-03 hardening: the tracer marches a partially-populated volume during
+    /// initial streaming — fill what the rays actually hit first).
+    scan_order: Vec<(i32, i32)>,
 }
 
 impl VoxelVolume {
@@ -91,13 +110,15 @@ impl VoxelVolume {
         })
     }
 
-    pub fn new(gpu: &Gpu, bgl: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(gpu: &Gpu, bgl: &wgpu::BindGroupLayout, quality: &crate::quality::Quality) -> Self {
+        let chunks_xz = quality.volume_chunks_xz;
+        let size_xz = chunks_xz * CHUNK_SIZE_I;
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("voxel-volume"),
             size: wgpu::Extent3d {
-                width: VOL_SIZE_XZ as u32,
+                width: size_xz as u32,
                 height: VOL_SIZE_Y as u32,
-                depth_or_array_layers: VOL_SIZE_XZ as u32,
+                depth_or_array_layers: size_xz as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -134,17 +155,36 @@ impl VoxelVolume {
             bind_group,
             origin_chunk: IVec3::new(i32::MIN, 0, i32::MIN),
             occupant: FxHashMap::default(),
+            chunks_xz,
+            size_xz,
             rtx_mode: RTX_GI,
-            // 8 hemisphere samples/pixel (was 4): the GI trace has no in-engine temporal accumulation,
-            // so DLSS-RR denoises this raw — more samples = less grain. Linear cost; the GPU has
-            // headroom. Override with VOXELCRAFT_GI_RAYS. (M33-G9)
-            gi_rays: 8,
-            gi_dist: 22.0,
+            // GI defaults come from the platform tier (P21): 8 samples/pixel maxed (DLSS-RR
+            // denoises raw — M33-G9), fewer on the mac tier where the temporal accumulator
+            // denoises instead. Override with VOXELCRAFT_GI_RAYS.
+            gi_rays: quality.gi_rays,
+            gi_dist: quality.gi_dist,
             gi_strength: 1.0,
             sky_boost: 0.55,
-            water_smooth: 3.0,
-            upload_budget: 48,
+            water_smooth: quality.water_smooth,
+            sun_dist: quality.sun_dist,
+            gi_sun_dist: quality.gi_sun_dist,
+            water_refl_max: quality.water_refl_max,
+            water_depth_max: quality.water_depth_max,
+            upload_budget: quality.upload_budget,
             scratch: vec![0u16; SCRATCH_ROW * CHUNK_SIZE * CHUNK_SIZE],
+            scan_order: {
+                // The player chunk sits at offset chunks_xz/2 from the origin (see `update`),
+                // i.e. half a chunk past the exact grid center — sort by doubled offsets so the
+                // distance key stays integral.
+                let mut order: Vec<(i32, i32)> = (0..chunks_xz)
+                    .flat_map(|dz| (0..chunks_xz).map(move |dx| (dx, dz)))
+                    .collect();
+                order.sort_by_key(|&(dx, dz)| {
+                    let (fx, fz) = (2 * dx - (chunks_xz - 1), 2 * dz - (chunks_xz - 1));
+                    fx * fx + fz * fz
+                });
+                order
+            },
         }
     }
 
@@ -167,6 +207,11 @@ impl VoxelVolume {
         self.rtx_mode
     }
 
+    /// Force a ray-traced lighting mode (P21: headless `VOXELCRAFT_RTX` cost-isolation knob).
+    pub fn set_rtx_mode(&mut self, mode: u32) {
+        self.rtx_mode = mode.min(RTX_GI);
+    }
+
     /// Set the hemisphere ray count used for GI (offscreen screenshots crank this up).
     pub fn set_gi_rays(&mut self, rays: u32) {
         self.gi_rays = rays;
@@ -180,59 +225,78 @@ impl VoxelVolume {
     /// Mark a chunk so it re-uploads (e.g. after an edit), if currently in the volume.
     pub fn invalidate(&mut self, pos: IVec3) {
         let key = (
-            pos.x.rem_euclid(VOL_CHUNKS_XZ),
+            pos.x.rem_euclid(self.chunks_xz),
             pos.y,
-            pos.z.rem_euclid(VOL_CHUNKS_XZ),
+            pos.z.rem_euclid(self.chunks_xz),
         );
         if self.occupant.get(&key) == Some(&pos) {
             self.occupant.remove(&key);
         }
     }
 
-    /// Re-center on the player and upload a budget of in-range chunks per frame.
+    /// Re-center on the player and upload a budget of in-range chunks per frame, nearest XZ
+    /// columns first; toroidal slots still holding a scrolled-out chunk's texels are zeroed (air)
+    /// when their replacement chunk isn't loaded yet.
     pub fn update(&mut self, gpu: &Gpu, world: &World, player_chunk: IVec3) {
         self.origin_chunk = IVec3::new(
-            player_chunk.x - VOL_CHUNKS_XZ / 2,
+            player_chunk.x - self.chunks_xz / 2,
             0,
-            player_chunk.z - VOL_CHUNKS_XZ / 2,
+            player_chunk.z - self.chunks_xz / 2,
         );
         let origin_world = self.origin_chunk * CHUNK_SIZE_I;
 
         let uni = VolumeUniform {
             origin: [origin_world.x, 0, origin_world.z, 0],
             params: [
-                VOL_SIZE_XZ as u32,
+                self.size_xz as u32,
                 self.rtx_mode,
                 self.gi_rays,
                 VOL_SIZE_Y as u32,
             ],
             paramsf: [self.gi_dist, self.gi_strength, self.sky_boost, self.water_smooth],
+            paramsg: [
+                self.sun_dist,
+                self.gi_sun_dist,
+                self.water_refl_max,
+                self.water_depth_max,
+            ],
         };
         gpu.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uni));
 
         let (ox, oz) = (self.origin_chunk.x, self.origin_chunk.z);
         let mut budget = self.upload_budget;
-        'outer: for cz in oz..oz + VOL_CHUNKS_XZ {
-            for cx in ox..ox + VOL_CHUNKS_XZ {
-                for cy in 0..VOL_CHUNKS_Y {
-                    let pos = IVec3::new(cx, cy, cz);
-                    let key = (
-                        cx.rem_euclid(VOL_CHUNKS_XZ),
-                        cy,
-                        cz.rem_euclid(VOL_CHUNKS_XZ),
-                    );
-                    if self.occupant.get(&key) == Some(&pos) {
-                        continue;
-                    }
-                    if let Some(chunk) = world.get(pos) {
-                        self.upload_chunk(gpu, pos, chunk);
-                        self.occupant.insert(key, pos);
-                        budget -= 1;
-                        if budget == 0 {
-                            break 'outer;
-                        }
-                    }
+        'outer: for i in 0..self.scan_order.len() {
+            let (dx, dz) = self.scan_order[i];
+            let (cx, cz) = (ox + dx, oz + dz);
+            for cy in 0..VOL_CHUNKS_Y {
+                let pos = IVec3::new(cx, cy, cz);
+                let key = (
+                    cx.rem_euclid(self.chunks_xz),
+                    cy,
+                    cz.rem_euclid(self.chunks_xz),
+                );
+                let occupant = self.occupant.get(&key).copied();
+                if occupant == Some(pos) {
+                    continue;
+                }
+                if let Some(chunk) = world.get(pos) {
+                    self.upload_chunk(gpu, pos, chunk);
+                    self.occupant.insert(key, pos);
+                } else if occupant.is_some() {
+                    // The slot still holds another region's texels (its old chunk scrolled out and
+                    // the new one isn't loaded yet) — the tracer would march stale blocks as if
+                    // they were here. Zero it (= air) and forget the occupant; virgin slots stay
+                    // skipped below, so each stale slot is healed once. (2026-06-03 hardening.)
+                    self.upload_zeros(gpu, pos);
+                    self.occupant.remove(&key);
+                } else {
+                    // Virgin slot (zero since texture creation) with no chunk loaded yet.
+                    continue;
+                }
+                budget -= 1;
+                if budget == 0 {
+                    break 'outer;
                 }
             }
         }
@@ -241,16 +305,12 @@ impl VoxelVolume {
     /// Upload all in-range chunks at once (used for headless screenshots).
     pub fn prime(&mut self, gpu: &Gpu, world: &World, player_chunk: IVec3) {
         let saved = self.upload_budget;
-        self.upload_budget = (VOL_CHUNKS_XZ * VOL_CHUNKS_XZ * VOL_CHUNKS_Y) as usize;
+        self.upload_budget = (self.chunks_xz * self.chunks_xz * VOL_CHUNKS_Y) as usize;
         self.update(gpu, world, player_chunk);
         self.upload_budget = saved;
     }
 
     fn upload_chunk(&mut self, gpu: &Gpu, pos: IVec3, chunk: &Chunk) {
-        let tx = (pos.x * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_XZ) as u32;
-        let ty = (pos.y * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_Y) as u32;
-        let tz = (pos.z * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_XZ) as u32;
-
         // Texture data order is x (fastest), then y, then z; row stride 128 texels (= 256 bytes,
         // a multiple of COPY_BYTES_PER_ROW_ALIGNMENT). Volume-solid blocks store their id so the
         // tracer can read material color; air, water, and glass store 0 and cast no shadow. Slabs/
@@ -265,6 +325,21 @@ impl VoxelVolume {
                 }
             }
         }
+        self.write_scratch(gpu, pos);
+    }
+
+    /// Overwrite a chunk's volume slot with air — heals slots whose occupant scrolled out before
+    /// the replacement chunk loaded, so the tracer never marches another region's stale blocks.
+    fn upload_zeros(&mut self, gpu: &Gpu, pos: IVec3) {
+        self.scratch.fill(0);
+        self.write_scratch(gpu, pos);
+    }
+
+    /// Write the scratch buffer into `pos`'s 32³ toroidal sub-box of the volume texture.
+    fn write_scratch(&self, gpu: &Gpu, pos: IVec3) {
+        let tx = (pos.x * CHUNK_SIZE_I).rem_euclid(self.size_xz) as u32;
+        let ty = (pos.y * CHUNK_SIZE_I).rem_euclid(VOL_SIZE_Y) as u32;
+        let tz = (pos.z * CHUNK_SIZE_I).rem_euclid(self.size_xz) as u32;
 
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
