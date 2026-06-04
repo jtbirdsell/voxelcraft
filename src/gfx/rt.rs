@@ -191,7 +191,8 @@ pub fn log_as_stats(gpu: &Gpu, meshes: &[&GpuMesh]) {
     });
     enc.build_acceleration_structures(build_entries.iter(), iter::once(&tlas));
     gpu.queue.submit(Some(enc.finish()));
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    // P22: bounded — a wedged AS build exits 70 instead of hanging the headless run.
+    crate::gpu::headless_wait_idle(device, &gpu.queue, "AS_STATS build");
 
     let ms = t0.elapsed().as_secs_f32() * 1000.0;
     log::info!(

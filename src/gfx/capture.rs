@@ -123,8 +123,8 @@ pub fn screenshot(
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv().expect("map channel closed").expect("buffer map failed");
+        // P22: bounded — the Metal hwrt first-frame hang used to spin forever right here.
+        crate::gpu::headless_wait_map(device, &rx, "SHOT readback");
 
         let data = slice.get_mapped_range();
         let mut rgba = vec![0u8; (width * height * 4) as usize];
@@ -195,6 +195,12 @@ pub fn screenshot(
         );
         if save_frames {
             save_png(&format!("{path}.{i}.png"));
+        }
+        // P22: bounded completion check on the FIRST warm-up frame, so a wedged pipeline (the
+        // historical Metal hwrt failure mode) is caught at frame 0 with a clean exit(70) instead
+        // of after `warmup` queued frames at the final readback.
+        if i == 0 {
+            crate::gpu::headless_wait_idle(device, &gpu.queue, "SHOT warm-up frame 0");
         }
     }
     save_png(path);

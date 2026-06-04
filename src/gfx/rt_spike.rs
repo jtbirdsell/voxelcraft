@@ -218,7 +218,8 @@ pub fn run() {
         iter::once(&tlas),
     );
     queue.submit(Some(build_enc.finish()));
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    // P22: bounded — rt_spike is the first hwrt code run on a new backend; it must fail safe.
+    crate::gpu::headless_wait_idle(&device, &queue, "RT_SPIKE AS build");
     log::info!("RT_SPIKE: acceleration structures built");
 
     // ---- Output target + uniforms ----
@@ -375,8 +376,8 @@ pub fn run() {
     slice.map_async(wgpu::MapMode::Read, move |res| {
         let _ = tx.send(res);
     });
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().expect("map channel closed").expect("buffer map failed");
+    // P22: bounded — a wedged trace/readback exits 70 instead of hanging the process.
+    crate::gpu::headless_wait_map(&device, &rx, "RT_SPIKE readback");
 
     let data = slice.get_mapped_range();
     let mut rgba = vec![0u8; (WIDTH * HEIGHT * 4) as usize];

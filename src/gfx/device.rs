@@ -302,6 +302,57 @@ impl GpuWatchdog {
     }
 }
 
+/// P22: deadline for the bounded waits in headless paths (SHOT / AS_STATS / RT_SPIKE), which never
+/// arm the `GpuWatchdog`. The Metal hwrt first-frame hang spun forever inside
+/// `PollType::wait_indefinitely()`; bounding every headless wait turns "babysit a frozen process"
+/// into a clean `exit(70)` (the same code the watchdog exit and bench's `FRAME_DEADLINE` use).
+/// 30 s is far above any legitimate cold first frame (worldgen + uploads + AS builds).
+pub const HEADLESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bounded wait until all work submitted so far completes; `what` names the wait in the failure
+/// log. On deadline, logs and exits 70 *without* touching the GPU again (wedged-driver etiquette,
+/// matching `GpuWatchdog`'s caller contract).
+pub fn headless_wait_idle(device: &wgpu::Device, queue: &wgpu::Queue, what: &str) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    queue.on_submitted_work_done(move || {
+        let _ = tx.send(());
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(HEADLESS_DEADLINE),
+    });
+    if rx.recv_timeout(HEADLESS_DEADLINE).is_err() {
+        log::error!(
+            "{what}: GPU did not complete within {HEADLESS_DEADLINE:?} — appears wedged; aborting"
+        );
+        std::process::exit(70);
+    }
+}
+
+/// Bounded wait for a `map_async` result delivered on `rx`. On deadline the buffer is NOT mapped
+/// — this exits 70 so callers can never reach `get_mapped_range()`. A delivered map *error* still
+/// panics, like the `wait_indefinitely()` code this replaces.
+pub fn headless_wait_map(
+    device: &wgpu::Device,
+    rx: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    what: &str,
+) {
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(HEADLESS_DEADLINE),
+    });
+    match rx.recv_timeout(HEADLESS_DEADLINE) {
+        Ok(res) => res.expect("buffer map failed"),
+        Err(_) => {
+            log::error!(
+                "{what}: GPU readback did not complete within {HEADLESS_DEADLINE:?} — appears \
+                 wedged; aborting"
+            );
+            std::process::exit(70);
+        }
+    }
+}
+
 /// Effective swapchain scale: `VOXELCRAFT_RENDER_SCALE` (clamped 0.25..=1.0, a fraction of the
 /// window's PHYSICAL size) when set, else `METAL_LOGICAL_SCALE / scale_factor` on macOS — i.e. a
 /// tier-tuned fraction of *logical* resolution, DPI-independent (P21: 0.70× logical on the M3;
