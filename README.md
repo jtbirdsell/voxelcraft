@@ -292,11 +292,13 @@ the real save/load (no window).
 
 ## Roadmap
 
-Done: the full engine, world generation, lighting, rendering, the block/item library, inventory,
+Done: the full engine, world generation, lighting (ray-traced GI with DLSS Ray Reconstruction
+denoising + Frame Generation), rendering, the block/item library and surface decoration, inventory,
 **progressive mining, tools + durability, crafting, furnace smelting, survival depth** (swimming/air,
-lava damage, sneak, XP & levels), **armor, and full save/reload persistence**. Next up: billboard
-decoration + world content, typed mobs + combat, structures (dungeons/villages), an RTX temporal
-denoiser, particles + audio, redstone, and additional dimensions.
+lava damage, sneak, XP & levels), **armor, full save/reload persistence**, and **typed mobs + combat**
+— twelve species with AI, natural spawning, breeding + babies, difficulty, melee (1.9-style timing,
+crits, sweeps), skeleton arrows + creeper explosions, and the bow + shield. Next up: structures
+(dungeons/villages), particles + audio, redstone, and additional dimensions.
 
 ## License
 
