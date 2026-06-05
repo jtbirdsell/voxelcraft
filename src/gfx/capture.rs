@@ -220,3 +220,110 @@ pub fn screenshot(
     }
     save_png(path);
 }
+
+/// M35: render a single full-screen menu (its own `UiVertex` list — no world) to a PNG. Used by the
+/// headless `VOXELCRAFT_MENU` knob to verify menu layouts without a human.
+pub fn screenshot_ui(
+    gpu: &Gpu,
+    renderer: &ChunkRenderer,
+    ui_verts: &[UiVertex],
+    width: u32,
+    height: u32,
+    path: &str,
+) {
+    let device = &gpu.device;
+    let format = gpu.config.format;
+    let color = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("menu-shot-color"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("menu-shot-encoder"),
+    });
+    renderer.render_menu(gpu, &mut enc, &color_view, ui_verts);
+    gpu.queue.submit(Some(enc.finish()));
+    read_texture_to_png(gpu, &color, width, height, format, path);
+}
+
+/// Copy a color texture back to the CPU (handling row padding + BGRA→RGBA) and save it as a PNG.
+fn read_texture_to_png(
+    gpu: &Gpu,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    path: &str,
+) {
+    let device = &gpu.device;
+    let unpadded = width * 4;
+    let padded =
+        unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("menu-shot-readback"),
+        size: (padded * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("menu-shot-copy"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit(Some(encoder.finish()));
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().expect("map channel closed").expect("buffer map failed");
+
+    let swap_rb = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+    );
+    let data = slice.get_mapped_range();
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height as usize {
+        let src = &data[y * padded as usize..y * padded as usize + unpadded as usize];
+        let dst = &mut rgba[y * (width * 4) as usize..(y + 1) * (width * 4) as usize];
+        if swap_rb {
+            for x in 0..width as usize {
+                dst[x * 4] = src[x * 4 + 2];
+                dst[x * 4 + 1] = src[x * 4 + 1];
+                dst[x * 4 + 2] = src[x * 4];
+                dst[x * 4 + 3] = src[x * 4 + 3];
+            }
+        } else {
+            dst.copy_from_slice(src);
+        }
+    }
+    drop(data);
+    readback.unmap();
+    image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8)
+        .expect("failed to save menu PNG");
+    log::info!("Saved menu screenshot: {path} ({width}x{height})");
+}

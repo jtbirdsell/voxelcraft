@@ -100,7 +100,7 @@ pub fn crack_lines(block: IVec3, progress: f32) -> Vec<LineVertex> {
     v
 }
 
-fn push_px_rect(
+pub(crate) fn push_px_rect(
     out: &mut Vec<UiVertex>,
     sw: f32,
     sh: f32,

@@ -2131,6 +2131,12 @@ impl ChunkRenderer {
         }
     }
 
+    /// M35: draw a full-screen menu (its own UI-vertex list) into `view`, clearing first. Used by the
+    /// app's menu scenes (no world render) and the headless `VOXELCRAFT_MENU` screenshot.
+    pub fn render_menu(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, ui_verts: &[UiVertex]) {
+        self.draw_hud(gpu, encoder, view, ui_verts, true);
+    }
+
     /// M33-G9 supersample resolve: tonemap the super-res HDR (`hdr_tonemap_bg`) into the super-res LDR
     /// (`ss_ldr_view`), Catmull-Rom downscale that to the swapchain `final_view` (+ the FG hudless
     /// layer), then draw the crisp HUD at swapchain resolution.

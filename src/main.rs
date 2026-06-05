@@ -12,6 +12,7 @@ mod gameplay;
 mod gfx;
 mod mesh;
 mod persistence;
+mod settings;
 mod ui;
 mod world;
 
@@ -26,7 +27,7 @@ pub(crate) use gfx::{
     renderer, rt_probe, rt_spike, texture, viewmodel, voxel_volume,
 };
 pub(crate) use mesh::mesher;
-pub(crate) use ui::{font, overlay};
+pub(crate) use ui::{font, menu, overlay};
 pub(crate) use world::{block, light, worker, worldgen};
 
 use winit::event_loop::{ControlFlow, EventLoop};

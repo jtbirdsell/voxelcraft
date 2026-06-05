@@ -1523,6 +1523,36 @@ impl ApplicationHandler for App {
         // rendering (off / non-DX12 / unsupported). Used by both the headless and interactive paths.
         let dlss = crate::dlss::Dlss::init(&gpu);
 
+        // M35: VOXELCRAFT_MENU=main|worlds|create|settings|pause renders one menu screen to a PNG (no
+        // world) so menu layouts can be verified headlessly. Path = VOXELCRAFT_SHOT or "menu.png".
+        if let Ok(which) = std::env::var("VOXELCRAFT_MENU") {
+            let (w, h) = (gpu.config.width as f32, gpu.config.height as f32);
+            let ui = crate::menu::UiState { cursor: (-1.0, -1.0), ..Default::default() };
+            let settings = crate::settings::Settings::default();
+            let worlds = vec![
+                crate::menu::WorldEntry { name: "My World".into(), seed: SEED },
+                crate::menu::WorldEntry { name: "Flatlands".into(), seed: 42 },
+            ];
+            let (verts, _rects) = match which.as_str() {
+                "worlds" => crate::menu::build_world_select(w, h, &worlds, 0, &ui),
+                "create" => crate::menu::build_create(w, h, "New World", "", &ui),
+                "settings" => crate::menu::build_settings(
+                    w,
+                    h,
+                    &settings,
+                    crate::rules::Difficulty::Normal,
+                    crate::menu::SettingsTab::Graphics,
+                    &ui,
+                ),
+                "pause" => crate::menu::build_pause(w, h, &ui),
+                _ => crate::menu::build_main(w, h, &ui),
+            };
+            let path = std::env::var("VOXELCRAFT_SHOT").unwrap_or_else(|_| "menu.png".into());
+            capture::screenshot_ui(&gpu, &renderer, &verts, gpu.config.width, gpu.config.height, &path);
+            event_loop.exit();
+            return;
+        }
+
         // Headless path: a fresh generated world with a few verification edits, rendered offscreen.
         // VOXELCRAFT_SHOT=path.png saves one frame; VOXELCRAFT_BENCH=N times N frames (P21) — both
         // may be set (bench, then save the PNG as the run's visual artifact).
