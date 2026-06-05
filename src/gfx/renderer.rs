@@ -183,7 +183,16 @@ impl ChunkRenderer {
         } else {
             "fn trace(o: vec3<f32>, d: vec3<f32>, md: f32, ms: i32) -> Hit { return trace_dda(o, d, md, ms); }\nfn sun_visibility(p: vec3<f32>, n: vec3<f32>, md: f32) -> f32 { return sun_visibility_dda(p, n, md); }\n"
         };
-        let gi_defines = format!("const DEFER_GI: bool = {defer_gi};\n");
+        // M35: ambient floor strength (the lift that keeps fully sun-shadowed, sky-occluded surfaces
+        // off pure black — see chunk.wgsl). Injected as a const so VOXELCRAFT_AMBIENT_FLOOR can A/B and
+        // tune it live without a shader edit (0 = old pure-black behaviour; ~0.25 default; >1 = obvious).
+        let amb_floor = std::env::var("VOXELCRAFT_AMBIENT_FLOOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.25);
+        let gi_defines = format!(
+            "const DEFER_GI: bool = {defer_gi};\nconst AMBIENT_FLOOR_FRAC: f32 = {amb_floor:?};\n"
+        );
         // P21: GI compute workgroup shape. AGX schedules 32-wide SIMD-groups, and one 8×4 = 32
         // workgroup maps the divergent DDA gather onto exactly one of them; every other backend
         // keeps the original 8×8. Single-sourced here and injected into BOTH compute shaders so

@@ -33,7 +33,8 @@ fn ndc_to_uv(clip: vec4<f32>) -> vec2<f32> {
 // `(1 - sky)` weight leaves lit terrain byte-identical) and scales with the day/night `ambient` (so
 // nights stay dark). It is added to the ALWAYS-written base color, so the deferred-GI composite and the
 // in-fragment GI oracle remain in exact parity (the composite only adds the unchanged sky-gated GI).
-const AMBIENT_FLOOR_FRAC: f32 = 0.25;
+// `AMBIENT_FLOOR_FRAC` is injected by the renderer (default 0.25; VOXELCRAFT_AMBIENT_FLOOR overrides,
+// 0 = the old pure-black behaviour) alongside DEFER_GI.
 
 @fragment
 fn fs_main(in: VsOut) -> FragOut {

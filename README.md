@@ -364,7 +364,9 @@ swapchain; defaults to 0.60× logical resolution on macOS — set `1.0` for nati
 cross-OS comparisons), `VOXELCRAFT_RTX=0|1|2` (force lighting off / shadows / shadows+GI — cost
 isolation), `VOXELCRAFT_GI=fragment|compute` (in-shader vs deferred GI),
 `VOXELCRAFT_GI_RAW=1` (dump the raw GI irradiance buffer), `VOXELCRAFT_GI_RAYS=N` (GI samples/pixel,
-tier default), `VOXELCRAFT_GI_ACCUM=1|0` (GI temporal accumulation; tier default), the quality-tier
+tier default), `VOXELCRAFT_GI_ACCUM=1|0` (GI temporal accumulation; tier default),
+`VOXELCRAFT_AMBIENT_FLOOR=<frac>` (ambient lift on sky-occluded shadowed surfaces; default 0.25, `0`
+restores the old pure-black behaviour), the quality-tier
 knobs above (`VOXELCRAFT_SUN_DIST`, `VOXELCRAFT_GI_DIST`, `VOXELCRAFT_GI_SUN_DIST`,
 `VOXELCRAFT_WREFL`, `VOXELCRAFT_WDEPTH`, `VOXELCRAFT_VOLUME_CHUNKS`, `VOXELCRAFT_RENDER_DISTANCE`,
 `VOXELCRAFT_UPLOAD_BUDGET`), `VOXELCRAFT_DLSS=off|rr` +
