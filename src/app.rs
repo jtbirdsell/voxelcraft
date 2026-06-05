@@ -2060,9 +2060,23 @@ impl ApplicationHandler for App {
         let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, &quality, saved);
         game.restore_furnaces(saved_furnaces);
         game.restore_chests(saved_chests);
-        // Fresh world: drop the spawn onto the deepened surface (saved worlds keep their stored spawn).
+        // Fresh world: drop the spawn onto the deepened surface. Loaded world: validate the saved
+        // position — a corrupt / void-fallen save (or one predating the world-deepening) can leave the
+        // player buried below the terrain or below the world floor, with no view. Lift them onto the
+        // surface if their position is below the world (true even when flying — nobody belongs under
+        // bedrock) or, when walking, below the terrain surface. A flying player above bedrock is kept
+        // (creative free-fly / cave exploration).
+        let surf = game.spawn_surface_y(spawn.x as i32, spawn.z as i32);
+        let below_world = !spawn.y.is_finite() || spawn.y < 2.0; // at/under bedrock — invalid for anyone
+        let buried = !flying && spawn.y < surf; // walking, embedded in terrain
         if level.is_none() {
-            spawn.y = game.spawn_surface_y(spawn.x as i32, spawn.z as i32);
+            spawn.y = surf;
+        } else if below_world || buried {
+            log::warn!(
+                "loaded spawn y={:.1} at ({:.0},{:.0}) is buried/out-of-bounds — lifting to the surface ({surf:.1})",
+                spawn.y, spawn.x, spawn.z
+            );
+            spawn.y = surf;
         }
         // World difficulty (P6): VOXELCRAFT_DIFFICULTY overrides; else the saved value; else Normal.
         let difficulty = std::env::var("VOXELCRAFT_DIFFICULTY")
