@@ -25,6 +25,16 @@ fn ndc_to_uv(clip: vec4<f32>) -> vec2<f32> {
     return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }
 
+// M35 visual fix: a small ambient floor so deep, sun-shadowed, zero-skylight surfaces — the bottom of
+// a pit, an overhang, an enclosed concave corner — never collapse to PURE BLACK. The lit color's only
+// sky-driven fill term is `ambient * sky`, which vanishes at sky=0; with the sun shadowed and no block
+// light that leaves `albedo * 0` = black, and because the baked skylight is interpolated per-vertex the
+// black has a smooth gradient halo (the "weird blend out"). This term lifts ONLY low-sky surfaces (the
+// `(1 - sky)` weight leaves lit terrain byte-identical) and scales with the day/night `ambient` (so
+// nights stay dark). It is added to the ALWAYS-written base color, so the deferred-GI composite and the
+// in-fragment GI oracle remain in exact parity (the composite only adds the unchanged sky-gated GI).
+const AMBIENT_FLOOR_FRAC: f32 = 0.25;
+
 @fragment
 fn fs_main(in: VsOut) -> FragOut {
     let n = normalize(in.normal);
@@ -72,8 +82,10 @@ fn fs_main(in: VsOut) -> FragOut {
         }
         indirect = irr * sky;
     }
-    // Lit albedo plus self-emission (lava glows regardless of sun/ambient).
-    var rgb = albedo * (indirect + vec3<f32>(direct) + warm) + albedo * (emission * 2.5);
+    // Lit albedo plus self-emission (lava glows regardless of sun/ambient). `amb_floor` keeps
+    // fully-shadowed, sky-occluded surfaces from going pure black (see AMBIENT_FLOOR_FRAC above).
+    let amb_floor = ambient * AMBIENT_FLOOR_FRAC * (1.0 - sky);
+    var rgb = albedo * (indirect + vec3<f32>(direct) + warm + vec3<f32>(amb_floor)) + albedo * (emission * 2.5);
 
     let dist = length(in.world_pos - camera.cam_pos.xyz);
     let fog = smoothstep(camera.params.x, camera.params.y, dist);

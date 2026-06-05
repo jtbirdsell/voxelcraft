@@ -159,7 +159,10 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
 - **Day/night** cycle with a dynamic sky, distance fog, translucent **water**, and **flowing fluids**
   (water/lava cellular simulation). Animated water ripples and lava.
 - **Block-light + skylight** flood (0–15) baked per-vertex: caves are genuinely dark, and torches /
-  glowstone / lava illuminate their surroundings.
+  glowstone / lava illuminate their surroundings. A small day/night-scaled **ambient floor** keeps
+  fully sun-shadowed, sky-occluded surfaces (a pit bottom, an overhang, a deep concave corner) from
+  collapsing to pure black — they read as a deep shadow rather than a black hole, without lifting the
+  open-sky terrain (the floor is weighted by `1 − skylight`, so lit surfaces stay byte-identical).
 
 **Ray-traced lighting** — traced on the RTX **hardware ray-tracing cores** (a per-chunk BLAS + a
 per-frame TLAS over the greedy-meshed geometry, inline `rayQuery`), with a software DDA march over a
