@@ -2137,6 +2137,39 @@ impl ChunkRenderer {
         self.draw_hud(gpu, encoder, view, ui_verts, true);
     }
 
+    /// M35-N3 interactive menu present: acquire the swapchain, clear it, draw the menu UI, present.
+    /// World-independent (no DLSS / scene targets) — used for every menu/paused scene. Mirrors
+    /// `render_frame`'s acquire/backoff handling so a broken surface backs off instead of spinning.
+    pub fn present_menu(&self, gpu: &Gpu, ui_verts: &[UiVertex]) -> bool {
+        let frame = match gpu.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.surface_errors.set(0);
+                t
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.surface_backoff();
+                return false;
+            }
+            _ => {
+                self.surface_backoff();
+                log::warn!("swapchain acquire failed (lost/outdated) — reconfiguring");
+                gpu.surface.configure(&gpu.device, &gpu.config);
+                return false;
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("menu") });
+        self.render_menu(gpu, &mut enc, &view, ui_verts);
+        gpu.queue.submit(Some(enc.finish()));
+        frame.present();
+        true
+    }
+
     /// M33-G9 supersample resolve: tonemap the super-res HDR (`hdr_tonemap_bg`) into the super-res LDR
     /// (`ss_ldr_view`), Catmull-Rom downscale that to the swapchain `final_view` (+ the FG hudless
     /// layer), then draw the crisp HUD at swapchain resolution.

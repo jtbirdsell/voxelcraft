@@ -99,6 +99,20 @@ struct State {
     /// Fail-safe for GPU/driver wedges (P21, 2026-06-03 Metal incident): when submitted frames stop
     /// completing, save the world and exit instead of piling more work on a dead queue.
     gpu_watchdog: crate::gpu::GpuWatchdog,
+    // ── M35 menu state (used while `session` is None / in a menu scene) ──
+    /// Pointer / hover / focus / caret for the active menu.
+    menu: crate::menu::UiState,
+    /// Persisted player settings (the source of truth; env vars override at startup).
+    settings: crate::settings::Settings,
+    /// The worlds list shown in WorldSelect (refreshed when the screen opens).
+    worlds: Vec<crate::menu::WorldEntry>,
+    /// Selected world row in WorldSelect.
+    world_sel: usize,
+    /// Create-world text-field buffers (name + seed).
+    create_name: String,
+    create_seed: String,
+    /// Active settings tab (the "Back" target rides in `Scene::Settings { return_to }`).
+    settings_tab: crate::menu::SettingsTab,
 }
 
 /// Everything that exists only while a world is loaded — created on Play/Create, dropped on Quit to
@@ -392,13 +406,14 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, event_loop: &ActiveEventLoop) {
+    fn handle_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, _event_loop: &ActiveEventLoop) {
         if code == KeyCode::Escape && pressed {
             if self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None) {
                 self.close_screen();
                 return;
             }
-            event_loop.exit();
+            // M35: Esc in-game opens the pause menu (was: quit the process).
+            self.pause_game();
             return;
         }
         if code == KeyCode::KeyP && pressed && !repeat {
@@ -461,12 +476,344 @@ impl App {
         }
     }
 
+    /// Per-frame dispatcher (M35): the in-game world only ticks + renders in `Scene::InGame`; every
+    /// menu/paused scene renders a 2D menu (the world session, if any, is kept but frozen — not ticked).
     fn frame(&mut self) {
-        let Some(state) = &mut self.state else { return };
-        // N1: only the in-game scene ticks + renders the world. N3 adds menu/paused rendering here.
-        if !matches!(state.scene, Scene::InGame) {
+        // Take a Copy-able decision so the `&self.state` borrow ends before the `&mut self` frame call.
+        match self.state.as_ref().map(|s| matches!(s.scene, Scene::InGame)) {
+            Some(true) => self.frame_ingame(),
+            Some(false) => self.frame_menu(),
+            None => {}
+        }
+    }
+
+    // ── M35-N3: menu scene flow ────────────────────────────────────────────────────────────────────
+
+    /// Build the active scene's menu vertices + hit-rects — the single source of truth shared by the
+    /// renderer (`frame_menu`), hover tracking (CursorMoved), and click routing (`menu_click`).
+    /// `None` for `Scene::InGame` (no menu).
+    fn build_menu(state: &State, w: f32, h: f32) -> Option<crate::menu::Built> {
+        use crate::menu;
+        let ui = &state.menu;
+        let s = &state.settings;
+        Some(match &state.scene {
+            Scene::MainMenu => menu::build_main(w, h, ui),
+            Scene::WorldSelect => menu::build_world_select(w, h, &state.worlds, state.world_sel, ui),
+            Scene::CreateWorld => menu::build_create(w, h, &state.create_name, &state.create_seed, ui),
+            Scene::Settings { .. } => {
+                let diff = state
+                    .session
+                    .as_ref()
+                    .map(|se| se.difficulty)
+                    .unwrap_or(crate::rules::Difficulty::Normal);
+                menu::build_settings(w, h, s, diff, state.settings_tab, ui)
+            }
+            Scene::Paused => menu::build_pause(w, h, ui),
+            Scene::InGame => return None,
+        })
+    }
+
+    /// Render the active menu screen (no world; world-independent render targets). A frozen session is
+    /// left untouched behind the menu.
+    fn frame_menu(&mut self) {
+        let Some(state) = self.state.as_ref() else { return };
+        let (w, h) = (state.gpu.config.width as f32, state.gpu.config.height as f32);
+        let Some((verts, _)) = Self::build_menu(state, w, h) else { return };
+        state.renderer.present_menu(&state.gpu, &verts);
+    }
+
+    /// True while a menu/paused scene is showing (cursor freed, gameplay input suspended).
+    fn in_menu(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|s| !matches!(s.scene, Scene::InGame))
+    }
+
+    /// Cursor is grabbed iff we're actually playing (InGame with no GUI screen open).
+    fn apply_grab_for_scene(&mut self) {
+        let grab = self.state.as_ref().is_some_and(|s| {
+            matches!(s.scene, Scene::InGame)
+                && s.session.as_ref().is_some_and(|se| se.screen == Screen::None)
+        });
+        self.set_grab(grab);
+    }
+
+    /// Left-click in a menu: hit-test the active screen's rects, dispatch the hit widget.
+    fn menu_click(&mut self, event_loop: &ActiveEventLoop) {
+        let hit = {
+            let Some(state) = self.state.as_ref() else { return };
+            let (w, h) = (state.gpu.config.width as f32, state.gpu.config.height as f32);
+            let cursor = state.menu.cursor;
+            Self::build_menu(state, w, h).and_then(|(_, rects)| {
+                rects
+                    .iter()
+                    .find(|(_, r)| r.contains(cursor))
+                    .map(|(id, r)| (*id, *r))
+            })
+        };
+        if let Some((id, rect)) = hit {
+            self.activate(id, rect, event_loop);
+        }
+    }
+
+    /// The single click-dispatch point for every menu widget.
+    fn activate(&mut self, id: crate::menu::WidgetId, rect: crate::menu::Rect, event_loop: &ActiveEventLoop) {
+        use crate::menu::WidgetId as W;
+        match id {
+            // Main menu.
+            W::Singleplayer => self.enter_world(WorldSource::Load), // N3: the single world; N4 → WorldSelect
+            W::MainSettings => self.open_settings(Scene::MainMenu),
+            W::Quit => {
+                self.save_world();
+                event_loop.exit();
+            }
+            // Pause.
+            W::Resume => self.resume_game(),
+            W::PauseSettings => self.open_settings(Scene::Paused),
+            W::SaveQuit => self.to_main_menu(),
+            // Settings nav.
+            W::GeneralTab => self.set_settings_tab(crate::menu::SettingsTab::General),
+            W::GraphicsTab => self.set_settings_tab(crate::menu::SettingsTab::Graphics),
+            W::SettingsBack => self.close_settings(),
+            // Settings controls (mutate + persist; live-apply lands in N5, difficulty is live now).
+            W::ViewBobToggle => self.mutate_settings(|s| s.view_bob = !s.view_bob),
+            W::FrameGenToggle => self.mutate_settings(|s| s.frame_gen = !s.frame_gen),
+            W::DlssModeCycle => self.mutate_settings(|s| s.dlss_mode = s.dlss_mode.next()),
+            W::DlssQualityCycle => self.mutate_settings(|s| s.dlss_quality = s.dlss_quality.next()),
+            W::GiModeCycle => self.mutate_settings(|s| s.gi_mode = s.gi_mode.next()),
+            W::TracerCycle => self.mutate_settings(|s| s.tracer = s.tracer.next()),
+            W::BackendCycle => self.mutate_settings(|s| s.backend = s.backend.next()),
+            W::DifficultyCycle => self.cycle_difficulty(),
+            W::FovSlider => self.slider_set(id, rect, 50.0, 110.0),
+            W::SensSlider => self.slider_set(id, rect, 0.0005, 0.006),
+            W::RenderDistSlider => self.slider_set(id, rect, 4.0, 24.0),
+            W::SupersampleSlider => self.slider_set(id, rect, 1.0, 4.0),
+            W::GiRaysSlider => self.slider_set(id, rect, 1.0, 16.0),
+            // World select / create — fully wired in N4; reachable from the menu only once N4 lands.
+            W::CreateNew => self.set_scene(Scene::CreateWorld),
+            W::BackFromWorlds => self.set_scene(Scene::MainMenu),
+            W::CreateCancel => self.set_scene(Scene::WorldSelect),
+            W::NameField => self.focus_field(W::NameField),
+            W::SeedField => self.focus_field(W::SeedField),
+            W::CreateConfirm | W::WorldRow(_) | W::DeleteWorld(_) => {} // N4
+        }
+    }
+
+    /// Replace the scene and re-evaluate cursor grab.
+    fn set_scene(&mut self, scene: Scene) {
+        if let Some(state) = self.state.as_mut() {
+            state.scene = scene;
+            state.menu.focused = None;
+        }
+        self.apply_grab_for_scene();
+    }
+
+    fn set_settings_tab(&mut self, tab: crate::menu::SettingsTab) {
+        if let Some(state) = self.state.as_mut() {
+            state.settings_tab = tab;
+        }
+    }
+
+    fn open_settings(&mut self, return_to: Scene) {
+        self.set_scene(Scene::Settings {
+            return_to: Box::new(return_to),
+        });
+    }
+
+    fn close_settings(&mut self) {
+        let back = match self.state.as_ref().map(|s| &s.scene) {
+            Some(Scene::Settings { return_to }) => (**return_to).clone(),
+            _ => Scene::MainMenu,
+        };
+        self.set_scene(back);
+    }
+
+    /// Esc in-game → pause (freeze the world, free the cursor).
+    fn pause_game(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.scene = Scene::Paused;
+        }
+        self.set_grab(false);
+    }
+
+    fn resume_game(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.scene = Scene::InGame;
+            state.last_frame = Instant::now(); // avoid a big dt step after a long pause
+        }
+        self.apply_grab_for_scene();
+    }
+
+    /// Build the world session and enter gameplay.
+    fn enter_world(&mut self, source: WorldSource) {
+        let session = {
+            let Some(state) = self.state.as_ref() else { return };
+            create_session(&state.gpu, &state.renderer, &state.quality, source)
+        };
+        if let Some(state) = self.state.as_mut() {
+            state.session = Some(session);
+            state.scene = Scene::InGame;
+            state.last_frame = Instant::now();
+        }
+        self.apply_grab_for_scene();
+    }
+
+    /// Save & Quit to Menu: persist, drop the world (workers exit as their channels close), show the menu.
+    fn to_main_menu(&mut self) {
+        self.save_world();
+        if let Some(state) = self.state.as_mut() {
+            state.session = None;
+            state.scene = Scene::MainMenu;
+            state.menu.hovered = None;
+            state.menu.focused = None;
+        }
+        self.set_grab(false);
+    }
+
+    fn mutate_settings(&mut self, f: impl FnOnce(&mut crate::settings::Settings)) {
+        if let Some(state) = self.state.as_mut() {
+            f(&mut state.settings);
+            state.settings.save();
+        }
+    }
+
+    /// Difficulty has no persisted-settings home (it rides the world): cycle it live on the session.
+    fn cycle_difficulty(&mut self) {
+        if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+            session.difficulty = session.difficulty.next();
+            session.player.difficulty = session.difficulty;
+            session.game.set_difficulty(session.difficulty);
+            if !session.difficulty.spawns_hostiles() {
+                session.game.despawn_hostiles();
+            }
+        }
+    }
+
+    /// Click-to-set a slider: map the cursor X within the track (matching the builder's 14px pad) to
+    /// `lo..hi`, snap integer-valued sliders, persist.
+    fn slider_set(&mut self, id: crate::menu::WidgetId, rect: crate::menu::Rect, lo: f32, hi: f32) {
+        use crate::menu::WidgetId as W;
+        let Some(state) = self.state.as_mut() else { return };
+        let pad = 14.0;
+        let frac = ((state.menu.cursor.0 - (rect.x + pad)) / (rect.w - 2.0 * pad)).clamp(0.0, 1.0);
+        let val = lo + frac * (hi - lo);
+        let s = &mut state.settings;
+        match id {
+            W::FovSlider => s.fov = val.round(),
+            W::SensSlider => s.sensitivity = val,
+            W::RenderDistSlider => s.render_distance = val.round() as i32,
+            W::SupersampleSlider => s.supersample = (val * 20.0).round() / 20.0, // 0.05 steps
+            W::GiRaysSlider => s.gi_rays = val.round().max(1.0) as u32,
+            _ => {}
+        }
+        s.save();
+    }
+
+    fn focus_field(&mut self, id: crate::menu::WidgetId) {
+        use crate::menu::WidgetId as W;
+        if let Some(state) = self.state.as_mut() {
+            state.menu.focused = Some(id);
+            state.menu.caret = match id {
+                W::NameField => state.create_name.len(),
+                W::SeedField => state.create_seed.len(),
+                _ => 0,
+            };
+        }
+    }
+
+    /// Keyboard while a menu is showing: Esc backs out; otherwise feed a focused text field.
+    fn menu_key(&mut self, event: &winit::event::KeyEvent, _event_loop: &ActiveEventLoop) {
+        let code = match event.physical_key {
+            PhysicalKey::Code(c) => Some(c),
+            _ => None,
+        };
+        if code == Some(KeyCode::Escape) {
+            self.menu_escape();
             return;
         }
+        let focused = self.state.as_ref().and_then(|s| s.menu.focused).is_some();
+        if !focused {
+            return;
+        }
+        match code {
+            Some(KeyCode::Backspace) => self.field_backspace(),
+            Some(KeyCode::Tab) => self.field_focus_next(),
+            Some(KeyCode::Enter) | Some(KeyCode::NumpadEnter) => {
+                if let Some(state) = self.state.as_mut() {
+                    state.menu.focused = None;
+                }
+            }
+            _ => {
+                if let Some(txt) = event.text.clone() {
+                    self.field_insert(txt.as_str());
+                }
+            }
+        }
+    }
+
+    /// Esc out of the current menu, back toward gameplay / the previous screen.
+    fn menu_escape(&mut self) {
+        let next = match self.state.as_ref().map(|s| &s.scene) {
+            Some(Scene::Settings { return_to }) => (**return_to).clone(),
+            Some(Scene::WorldSelect) => Scene::MainMenu,
+            Some(Scene::CreateWorld) => Scene::WorldSelect,
+            Some(Scene::Paused) => Scene::InGame,
+            _ => return, // MainMenu / InGame: nothing to back out to
+        };
+        if matches!(next, Scene::InGame) {
+            self.resume_game();
+        } else {
+            self.set_scene(next);
+        }
+    }
+
+    fn field_insert(&mut self, txt: &str) {
+        use crate::menu::WidgetId as W;
+        let Some(state) = self.state.as_mut() else { return };
+        let Some(field) = state.menu.focused else { return };
+        let buf = match field {
+            W::NameField => &mut state.create_name,
+            W::SeedField => &mut state.create_seed,
+            _ => return,
+        };
+        for ch in txt.chars() {
+            let ok = match field {
+                // Name: filename-safe; Seed: digits/sign now, any string hashed in N4.
+                W::NameField => buf.len() < 32 && (ch.is_alphanumeric() || " -_".contains(ch)),
+                W::SeedField => buf.len() < 20 && (ch.is_ascii_digit() || ch == '-'),
+                _ => false,
+            };
+            if ok {
+                buf.push(ch);
+            }
+        }
+        state.menu.caret = buf.len();
+    }
+
+    fn field_backspace(&mut self) {
+        use crate::menu::WidgetId as W;
+        let Some(state) = self.state.as_mut() else { return };
+        let Some(field) = state.menu.focused else { return };
+        let buf = match field {
+            W::NameField => &mut state.create_name,
+            W::SeedField => &mut state.create_seed,
+            _ => return,
+        };
+        buf.pop();
+        state.menu.caret = buf.len();
+    }
+
+    fn field_focus_next(&mut self) {
+        use crate::menu::WidgetId as W;
+        let next = match self.state.as_ref().and_then(|s| s.menu.focused) {
+            Some(W::NameField) => W::SeedField,
+            _ => W::NameField,
+        };
+        self.focus_field(next);
+    }
+
+    fn frame_ingame(&mut self) {
+        let Some(state) = &mut self.state else { return };
         let now = Instant::now();
         let dt = (now - state.last_frame).as_secs_f32().min(0.1);
         state.last_frame = now;
@@ -1295,6 +1642,127 @@ impl App {
     }
 }
 
+/// What world a `Session` is created from (M35).
+#[allow(dead_code)] // `New` is wired to Create World in N4.
+enum WorldSource {
+    /// Load the saved world (or a fresh default world if there's no save yet).
+    Load,
+    /// A brand-new world with this seed — a fresh inventory, ignoring any existing save's blocks.
+    New { seed: u64 },
+}
+
+/// Build the in-game `Session` (world + player + camera + everything that exists only while playing).
+/// Called on Play / Create New; the render stack (gpu/renderer/quality/dlss) already lives on `State`.
+fn create_session(
+    gpu: &Gpu,
+    renderer: &ChunkRenderer,
+    quality: &crate::quality::Quality,
+    source: WorldSource,
+) -> Session {
+    let dir = persistence::save_dir();
+    let default_spawn = Vec3::new(8.0, 96.0, 24.0);
+    let new_seed = match source {
+        WorldSource::New { seed } => Some(seed),
+        WorldSource::Load => None,
+    };
+    // A fresh world ignores any existing save; Load reads level.bin (or a fresh default if absent).
+    let level = if new_seed.is_some() { None } else { persistence::load_level(&dir) };
+    let (seed, mut spawn, yaw, pitch, time, flying) = match (new_seed, &level) {
+        (Some(seed), _) => (seed, default_spawn, -std::f32::consts::FRAC_PI_2, -0.30, 0.34, true),
+        (None, Some(l)) => (l.seed, Vec3::from(l.spawn), l.yaw, l.pitch, l.time, l.flying),
+        (None, None) => (SEED, default_spawn, -std::f32::consts::FRAC_PI_2, -0.30, 0.34, true),
+    };
+    let saved = if new_seed.is_some() {
+        FxHashMap::default()
+    } else {
+        persistence::load_chunks(&dir)
+    };
+    let (inventory, furnaces, chests) = if new_seed.is_some() {
+        (Inventory::new(true), Vec::new(), Vec::new())
+    } else {
+        persistence::load_state(&dir, flying)
+    };
+    let mut game = Game::new(gpu, renderer.volume_bgl(), seed, quality, saved);
+    game.restore_furnaces(furnaces);
+    game.restore_chests(chests);
+    // Spawn validation (see resumed's note): lift a buried / below-world player onto the surface.
+    let surf = game.spawn_surface_y(spawn.x as i32, spawn.z as i32);
+    let below_world = !spawn.y.is_finite() || spawn.y < 2.0;
+    let buried = !flying && spawn.y < surf;
+    if level.is_none() {
+        spawn.y = surf;
+    } else if below_world || buried {
+        log::warn!(
+            "loaded spawn y={:.1} at ({:.0},{:.0}) is buried/out-of-bounds — lifting to the surface ({surf:.1})",
+            spawn.y, spawn.x, spawn.z
+        );
+        spawn.y = surf;
+    }
+    let difficulty = std::env::var("VOXELCRAFT_DIFFICULTY")
+        .ok()
+        .and_then(|s| crate::rules::Difficulty::from_env(&s))
+        .or_else(|| level.as_ref().map(|l| crate::rules::Difficulty::from_u8(l.difficulty)))
+        .unwrap_or_default();
+    game.set_difficulty(difficulty);
+    if let Ok(Ok(rays)) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
+        game.set_rtx_quality(rays.max(1));
+    }
+    // One of each species near spawn (12 ring slots for the P18 species too).
+    let ring = [
+        (-4, -6), (4, -6), (7, 0), (4, 6), (-4, 6), (-7, 0), (0, 8), (0, -8),
+        (8, 8), (-8, 8), (8, -8), (-8, -8),
+    ];
+    for (species, &(dx, dz)) in crate::entity::Species::ALL.iter().zip(ring.iter()) {
+        game.spawn_mob(Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32), *species);
+    }
+    if !difficulty.spawns_hostiles() {
+        game.despawn_hostiles();
+    }
+    let environment = Environment::new(time);
+    let mut player = Player::new(spawn, flying);
+    player.difficulty = difficulty;
+    if let Some(l) = &level {
+        player.restore_state(l.health, l.hunger, l.air, l.saturation, l.xp, l.level);
+    }
+    let camera = Camera::new(player.eye(), yaw, pitch);
+    let mut camera_uniform = CameraUniform::new();
+    camera_uniform.update(&camera, gpu.aspect());
+    camera_uniform.set_environment(&environment, quality.fog_start(), quality.fog_end());
+    renderer.update_camera(gpu, &camera_uniform);
+    renderer.set_sky(environment.wgpu_clear());
+    Session {
+        game,
+        camera,
+        player,
+        input: Input::default(),
+        inventory,
+        environment,
+        camera_uniform,
+        debug_f3: false,
+        elapsed: 0.0,
+        screen: Screen::None,
+        cursor: (0.0, 0.0),
+        craft: [None; 9],
+        pending_open: None,
+        mine_target: None,
+        mine_progress: 0.0,
+        melee_cd: 0.0,
+        melee_was_held: false,
+        melee_prev_sel: 0,
+        eat_progress: 0.0,
+        eat_item: None,
+        draw_progress: 0.0,
+        draw_item: None,
+        shield_progress: 0.0,
+        shield_item: None,
+        difficulty,
+        creative_palette: item::creative_palette(),
+        creative_page: 0,
+        view_model: crate::viewmodel::ViewModel::default(),
+        viewbob: std::env::var("VOXELCRAFT_VIEWBOB").map_or(true, |v| v != "0" && v != "off"),
+    }
+}
+
 fn maybe_select(session: &mut Session, pressed: bool, index: usize) {
     if pressed {
         session.inventory.select(index);
@@ -2041,92 +2509,9 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // Interactive: load a saved world if one exists, else start a new one.
-        let dir = persistence::save_dir();
-        let level = persistence::load_level(&dir);
-        let (seed, mut spawn, yaw, pitch, time, flying) = match &level {
-            Some(l) => (l.seed, Vec3::from(l.spawn), l.yaw, l.pitch, l.time, l.flying),
-            None => (
-                SEED,
-                Vec3::new(8.0, 96.0, 24.0), // y is fixed up to the deepened surface below
-                -std::f32::consts::FRAC_PI_2,
-                -0.30,
-                0.34,
-                true,
-            ),
-        };
-        let saved = persistence::load_chunks(&dir);
-        let (inventory, saved_furnaces, saved_chests) = persistence::load_state(&dir, flying);
-        let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, &quality, saved);
-        game.restore_furnaces(saved_furnaces);
-        game.restore_chests(saved_chests);
-        // Fresh world: drop the spawn onto the deepened surface. Loaded world: validate the saved
-        // position — a corrupt / void-fallen save (or one predating the world-deepening) can leave the
-        // player buried below the terrain or below the world floor, with no view. Lift them onto the
-        // surface if their position is below the world (true even when flying — nobody belongs under
-        // bedrock) or, when walking, below the terrain surface. A flying player above bedrock is kept
-        // (creative free-fly / cave exploration).
-        let surf = game.spawn_surface_y(spawn.x as i32, spawn.z as i32);
-        let below_world = !spawn.y.is_finite() || spawn.y < 2.0; // at/under bedrock — invalid for anyone
-        let buried = !flying && spawn.y < surf; // walking, embedded in terrain
-        if level.is_none() {
-            spawn.y = surf;
-        } else if below_world || buried {
-            log::warn!(
-                "loaded spawn y={:.1} at ({:.0},{:.0}) is buried/out-of-bounds — lifting to the surface ({surf:.1})",
-                spawn.y, spawn.x, spawn.z
-            );
-            spawn.y = surf;
-        }
-        // World difficulty (P6): VOXELCRAFT_DIFFICULTY overrides; else the saved value; else Normal.
-        let difficulty = std::env::var("VOXELCRAFT_DIFFICULTY")
-            .ok()
-            .and_then(|s| crate::rules::Difficulty::from_env(&s))
-            .or_else(|| level.as_ref().map(|l| crate::rules::Difficulty::from_u8(l.difficulty)))
-            .unwrap_or_default();
-        game.set_difficulty(difficulty);
-        // VOXELCRAFT_GI_RAYS overrides the hemisphere GI sample count (default 8) — more samples =
-        // less grain for DLSS-RR to denoise; the GPU has headroom. (M33-G9)
-        if let Ok(n) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
-            if let Ok(rays) = n {
-                game.set_rtx_quality(rays.max(1));
-            }
-        }
-        // One of each species near spawn; they fall onto terrain as it streams in. 12 ring slots so
-        // the four P18 species (wolf/enderman/slime/villager) appear too (zip truncates otherwise).
-        let ring = [
-            (-4, -6), (4, -6), (7, 0), (4, 6), (-4, 6), (-7, 0), (0, 8), (0, -8),
-            (8, 8), (-8, 8), (8, -8), (-8, -8),
-        ];
-        for (species, &(dx, dz)) in crate::entity::Species::ALL.iter().zip(ring.iter()) {
-            game.spawn_mob(
-                Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32),
-                *species,
-            );
-        }
-        // Peaceful clears the spawn ring's hostiles immediately (animals stay).
-        if !difficulty.spawns_hostiles() {
-            game.despawn_hostiles();
-        }
-        let environment = Environment::new(time);
-        let mut player = Player::new(spawn, flying);
-        player.difficulty = difficulty;
-        // Restore persisted survival state (from a loaded level; a new world keeps fresh defaults).
-        if let Some(l) = &level {
-            player.restore_state(l.health, l.hunger, l.air, l.saturation, l.xp, l.level);
-        }
-        let camera = Camera::new(player.eye(), yaw, pitch);
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update(&camera, gpu.aspect());
-        camera_uniform.set_environment(&environment, quality.fog_start(), quality.fog_end());
-        renderer.update_camera(&gpu, &camera_uniform);
-        renderer.set_sky(environment.wgpu_clear());
-
-        // M33-G8: build the DLSS Ray Reconstruction context (if available); scene targets are then
-        // sized to its render resolution, else to the output resolution. M33-G8-FG Phase 3: RR and
-        // Frame Generation now stack — RR denoises + upscales the scene, FG generates intermediate
-        // frames from the (point-upscaled) output-res guides. RR off (VOXELCRAFT_DLSS=off) → FG runs
-        // standalone over the native-res frame.
+        // Interactive: build the world-independent render targets once (resized on window resize),
+        // then either land on the main menu (M35) or — VOXELCRAFT_SKIPMENU — boot straight into the
+        // saved world (dev fast-path + the pre-menu behaviour for scripts).
         let dlss_render = dlss.as_ref().and_then(|d| {
             crate::dlss::DlssRender::new(
                 d,
@@ -2141,36 +2526,11 @@ impl ApplicationHandler for App {
             None => renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height),
         };
         let rt_scene = RtScene::new();
-        let session = Session {
-            game,
-            camera,
-            player,
-            input: Input::default(),
-            inventory,
-            environment,
-            camera_uniform,
-            debug_f3: false,
-            elapsed: 0.0,
-            screen: Screen::None,
-            cursor: (0.0, 0.0),
-            craft: [None; 9],
-            pending_open: None,
-            mine_target: None,
-            mine_progress: 0.0,
-            melee_cd: 0.0,
-            melee_was_held: false,
-            melee_prev_sel: 0,
-            eat_progress: 0.0,
-            eat_item: None,
-            draw_progress: 0.0,
-            draw_item: None,
-            shield_progress: 0.0,
-            shield_item: None,
-            difficulty,
-            creative_palette: item::creative_palette(),
-            creative_page: 0,
-            view_model: crate::viewmodel::ViewModel::default(),
-            viewbob: std::env::var("VOXELCRAFT_VIEWBOB").map_or(true, |v| v != "0" && v != "off"),
+        let skip_menu = std::env::var("VOXELCRAFT_SKIPMENU").is_ok();
+        let (scene, session) = if skip_menu {
+            (Scene::InGame, Some(create_session(&gpu, &renderer, &quality, WorldSource::Load)))
+        } else {
+            (Scene::MainMenu, None)
         };
         self.state = Some(State {
             gpu,
@@ -2184,12 +2544,19 @@ impl ApplicationHandler for App {
             fps_accum: 0.0,
             fps_frames: 0,
             fps_smooth: 0.0,
-            scene: Scene::InGame,
-            session: Some(session),
+            scene,
+            session,
             quality,
             gpu_watchdog: crate::gpu::GpuWatchdog::new(),
+            menu: crate::menu::UiState::default(),
+            settings: crate::settings::Settings::load(),
+            worlds: Vec::new(),
+            world_sel: 0,
+            create_name: String::new(),
+            create_seed: String::new(),
+            settings_tab: crate::menu::SettingsTab::General,
         });
-        self.set_grab(true);
+        self.set_grab(skip_menu);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -2238,6 +2605,13 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => self.set_grab(false),
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
                 let pressed = btn_state == ElementState::Pressed;
+                // M35: menu scenes swallow the mouse — a left press activates the hovered widget.
+                if self.in_menu() {
+                    if pressed && button == MouseButton::Left {
+                        self.menu_click(event_loop);
+                    }
+                    return;
+                }
                 let screen_open = self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None);
                 if pressed && screen_open {
                     self.inventory_click(button);
@@ -2264,14 +2638,25 @@ impl ApplicationHandler for App {
                     // config dims can round the two ratios differently).
                     let sx = state.gpu.config.width as f64 / state.gpu.size.width.max(1) as f64;
                     let sy = state.gpu.config.height as f64 / state.gpu.size.height.max(1) as f64;
-                    if let Some(session) = state.session.as_mut() {
-                        if session.screen != Screen::None {
-                            session.cursor = ((position.x * sx) as f32, (position.y * sy) as f32);
+                    let p = ((position.x * sx) as f32, (position.y * sy) as f32);
+                    if matches!(state.scene, Scene::InGame) {
+                        if let Some(session) = state.session.as_mut() {
+                            if session.screen != Screen::None {
+                                session.cursor = p;
+                            }
                         }
+                    } else {
+                        // M35: in a menu — track the pointer + recompute the hovered widget from the
+                        // active screen's rect list (the same list `menu_click` hit-tests).
+                        state.menu.cursor = p;
+                        let (w, h) = (state.gpu.config.width as f32, state.gpu.config.height as f32);
+                        state.menu.hovered = Self::build_menu(state, w, h).and_then(|(_, rects)| {
+                            rects.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id)
+                        });
                     }
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, .. } if !self.in_menu() => {
                 if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
                     let dir = match delta {
                         MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
@@ -2292,6 +2677,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                // M35: menu scenes route keys to menu navigation / text entry, not gameplay.
+                if self.in_menu() {
+                    if pressed {
+                        self.menu_key(&event, event_loop);
+                    }
+                    return;
+                }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     self.handle_key(code, pressed, event.repeat, event_loop);
                 }

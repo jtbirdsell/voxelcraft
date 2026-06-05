@@ -248,7 +248,7 @@ fn backdrop(out: &mut Vec<UiVertex>, sw: f32, sh: f32) {
 
 // ── builders ─────────────────────────────────────────────────────────────────────────────────────
 
-type Built = (Vec<UiVertex>, Vec<(WidgetId, Rect)>);
+pub type Built = (Vec<UiVertex>, Vec<(WidgetId, Rect)>);
 
 fn emit(out: &mut Vec<UiVertex>, rects: &mut Vec<(WidgetId, Rect)>, id: WidgetId, r: Rect, sw: f32, sh: f32, label: &str, ui: &UiState) {
     button(out, sw, sh, r, label, ui.hovered == Some(id), false);

@@ -30,7 +30,19 @@ compiles faster but runs the worldgen/mesher unoptimized, so use `--release` to 
 cargo test --release   # worldgen determinism, physics, inventory + save round-trips
 ```
 
-The world auto-saves to `saves/world/` on quit.
+Launching drops you at the **main menu** — *Singleplayer* (loads/creates the world), *Settings*, *Quit*.
+In-game, **Esc** opens the **pause menu** (Resume / Settings / Save & Quit to Menu) and frees the cursor.
+`VOXELCRAFT_SKIPMENU=1` boots straight into the world (the pre-menu behaviour, for scripts/screenshots).
+The world auto-saves to `saves/world/` on quit and on *Save & Quit*.
+
+### Settings
+
+A live **General** tab (FOV, mouse sensitivity, render distance, view-bob, difficulty) and a
+**Graphics** tab (DLSS mode/quality, supersampling, GI mode/rays, tracer, backend, frame generation —
+each tagged *(restart)* since they're baked at device/pipeline creation). Persisted to
+`saves/settings.cfg` as plain `key=value` text; the `VOXELCRAFT_*` env vars still override at startup.
+*(N3 wires the menu flow + persistence; the General-tab live-apply and the Graphics-tab restart hooks
+land in N5.)*
 
 ## GPU backend
 
@@ -97,7 +109,7 @@ here so it's the default. GL has no hardware RT (software DDA tracer only).
 | **G** | Cycle difficulty: Peaceful → Easy → Normal → Hard |
 | **F3** | Toggle debug overlay (fps, position, biome, facing, difficulty) |
 | **P** | Save world |
-| **Esc** | Close menu, or quit |
+| **Esc** | Close GUI screen, else open the **pause menu** |
 
 Mining yields drops (stone → cobblestone, ores need the right pickaxe tier) that fall into your
 inventory; the hotbar shows stack counts, durability bars, and the selected item's name.
@@ -340,7 +352,9 @@ verify each change without a human in the loop. Companion debug knobs: `VOXELCRA
 `VOXELCRAFT_CRACK="x,y,z,progress"`, `VOXELCRAFT_ROOM`, `VOXELCRAFT_SURVIVAL=1` (HUD with air + XP +
 armor bars), `VOXELCRAFT_DARK=1` (the Warden's pulsing **Darkness** screen dim),
 `VOXELCRAFT_HELD=<item_id>` + `VOXELCRAFT_VM_POSE=swing|eat|draw|shield|equip|idle` +
-`VOXELCRAFT_VM_T=<0..1>` (force the first-person held item + an animation pose). Rendering knobs:
+`VOXELCRAFT_VM_T=<0..1>` (force the first-person held item + an animation pose),
+`VOXELCRAFT_MENU=main|worlds|create|settings|pause` (render one menu screen to a PNG, no world).
+Rendering knobs:
 `VOXELCRAFT_BACKEND=vulkan|dx12|gl|metal`, `VOXELCRAFT_TRACER=dda|hwrt`
 (software DDA vs hardware ray query), `VOXELCRAFT_RENDER_SCALE=0.25..1.0` (Metal-only sub-native
 swapchain; defaults to 0.60× logical resolution on macOS — set `1.0` for native-pixel screenshots /
