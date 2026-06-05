@@ -13,6 +13,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=STREAMLINE_SDK");
     println!("cargo:rerun-if-env-changed=DLSS_SDK");
 
+    // DXC/Streamline staging is Windows-only (DX12 + DLSS). On macOS/Linux there is nothing to
+    // stage and the "DXC not found" warning would be noise, so bail before it.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
     let Some(exe_dir) = exe_output_dir() else {
         return;
     };

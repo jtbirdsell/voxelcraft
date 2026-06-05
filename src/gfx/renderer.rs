@@ -108,7 +108,14 @@ pub struct ChunkRenderer {
     viewmodel_buffer: wgpu::Buffer,
     viewmodel_bind_group: wgpu::BindGroup,
     viewmodel_depth_view: wgpu::TextureView,
+    /// P21: GI compute workgroup shape — must match the `GI_WG_X/Y` consts injected into the
+    /// gi_compute + gi_temporal shaders (one source: ChunkRenderer::new). (8,4) on Metal, (8,8) else.
+    gi_wg: (u32, u32),
     sky_color: Cell<wgpu::Color>,
+    /// Consecutive swapchain-acquire failures (2026-06-03 wedge hardening): after a few, each retry
+    /// backs off so a persistently broken surface is never hammered with reconfigure/acquire spins.
+    /// Reset on every successful acquire.
+    surface_errors: Cell<u32>,
 }
 
 /// One frame's view-model draw: the (already view-space) geometry, the projection + brightness
@@ -135,7 +142,7 @@ fn make_viewmodel_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
 }
 
 impl ChunkRenderer {
-    pub fn new(gpu: &Gpu) -> Self {
+    pub fn new(gpu: &Gpu, quality: &crate::quality::Quality) -> Self {
         let device = &gpu.device;
 
         // Both the chunk and water shaders are prefixed with the shared RTX scaffolding
@@ -151,10 +158,11 @@ impl ChunkRenderer {
         // in-fragment G5b gather as a switchable parity oracle / non-deferred fallback.
         let defer_gi = std::env::var("VOXELCRAFT_GI").map_or(true, |v| v != "fragment");
         let gi_raw = std::env::var("VOXELCRAFT_GI_RAW").is_ok();
-        // M33-G9: opt-in GI temporal accumulation (off by default — the supersampled default is already
-        // clean, and temporal accumulation risks ghosting). Only meaningful with deferred GI.
-        let gi_accum = defer_gi
-            && matches!(std::env::var("VOXELCRAFT_GI_ACCUM").ok().as_deref(), Some("1") | Some("on"));
+        // M33-G9: GI temporal accumulation; only meaningful with deferred GI. P21: the default is
+        // the platform tier's (off maxed — the supersampled default is already clean and temporal
+        // accumulation risks ghosting; ON for the low-ray mac tier, where it does the denoising).
+        // VOXELCRAFT_GI_ACCUM still overrides either way (folded into Quality::resolve).
+        let gi_accum = defer_gi && quality.gi_accum;
         log::info!(
             "tracer: {} | GI: {}{}",
             if use_hw_rt { "hardware ray query (shadows + GI)" } else { "software DDA" },
@@ -176,6 +184,19 @@ impl ChunkRenderer {
             "fn trace(o: vec3<f32>, d: vec3<f32>, md: f32, ms: i32) -> Hit { return trace_dda(o, d, md, ms); }\nfn sun_visibility(p: vec3<f32>, n: vec3<f32>, md: f32) -> f32 { return sun_visibility_dda(p, n, md); }\n"
         };
         let gi_defines = format!("const DEFER_GI: bool = {defer_gi};\n");
+        // P21: GI compute workgroup shape. AGX schedules 32-wide SIMD-groups, and one 8×4 = 32
+        // workgroup maps the divergent DDA gather onto exactly one of them; every other backend
+        // keeps the original 8×8. Single-sourced here and injected into BOTH compute shaders so
+        // the `@workgroup_size` and the dispatch `div_ceil` below can never drift apart.
+        let gi_wg: (u32, u32) = if gpu.backend == wgpu::Backend::Metal {
+            (8, 4)
+        } else {
+            (8, 8)
+        };
+        let wg_defines = format!(
+            "const GI_WG_X: u32 = {}u;\nconst GI_WG_Y: u32 = {}u;\n",
+            gi_wg.0, gi_wg.1
+        );
         let chunk_src = format!(
             "{rt_prefix}{gi_defines}{rtx_common}{atlas}{sun_vis}{}",
             include_str!("../../assets/shaders/chunk.wgsl")
@@ -1050,7 +1071,7 @@ impl ChunkRenderer {
                 ""
             };
             let gi_src = format!(
-                "{compute_rt_prefix}{rtx_common}{sun_vis}{}",
+                "{compute_rt_prefix}{wg_defines}{rtx_common}{sun_vis}{}",
                 include_str!("../../assets/shaders/gi_compute.wgsl")
             );
             let gi_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1238,7 +1259,11 @@ impl ChunkRenderer {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gi-temporal-shader"),
                 source: wgpu::ShaderSource::Wgsl(
-                    include_str!("../../assets/shaders/gi_temporal.wgsl").into(),
+                    format!(
+                        "{wg_defines}{}",
+                        include_str!("../../assets/shaders/gi_temporal.wgsl")
+                    )
+                    .into(),
                 ),
             });
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1291,12 +1316,14 @@ impl ChunkRenderer {
             viewmodel_buffer,
             viewmodel_bind_group,
             viewmodel_depth_view,
+            gi_wg,
             sky_color: Cell::new(wgpu::Color {
                 r: 0.46,
                 g: 0.64,
                 b: 0.92,
                 a: 1.0,
             }),
+            surface_errors: Cell::new(0),
         }
     }
 
@@ -1369,6 +1396,12 @@ impl ChunkRenderer {
     /// true the render path must rebuild + bind the world TLAS each frame (group 3).
     pub fn use_hw_rt(&self) -> bool {
         self.use_hw_rt
+    }
+
+    /// Whether GI temporal accumulation is active (P21: tier-driven; mac tier default). Capture
+    /// uses this to warm up screenshots so the accumulator converges before the saved frame.
+    pub fn gi_accum(&self) -> bool {
+        self.gi_accum
     }
 
     /// Build the group(3) bind group binding the world TLAS for hardware shadow rays. Only valid
@@ -1600,8 +1633,9 @@ impl ChunkRenderer {
 
     /// Build a tonemap bind group over an arbitrary HDR source view (e.g. the DLSS output texture),
     /// reusing the tonemap layout + sampler. Lets the DLSS path resolve its upscaled output through
-    /// the same ACES pass. (M33-G8) — only used by the DLSS path.
-    #[cfg_attr(not(feature = "dlss"), allow(dead_code))]
+    /// the same ACES pass. (M33-G8) — only used by the DLSS path, which compiles only under
+    /// all(feature, Windows) (src/gfx.rs dual gate), so the allow mirrors that full gate.
+    #[cfg_attr(not(all(feature = "dlss", target_os = "windows")), allow(dead_code))]
     pub fn make_tonemap_bg(&self, device: &wgpu::Device, hdr: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tonemap-bg-dlss"),
@@ -1621,7 +1655,9 @@ impl ChunkRenderer {
 
 
     /// Record the chunk pass into an existing encoder against arbitrary color/depth targets,
-    /// drawing every mesh in `meshes`. Shared by the present and screenshot paths.
+    /// drawing every mesh in `meshes`. Shared by the present and screenshot paths. `timer` is the
+    /// headless benchmark's per-pass timestamp hook (P21) — `None` (every non-bench path) records
+    /// `timestamp_writes: None` exactly as before.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1630,6 +1666,7 @@ impl ChunkRenderer {
         meshes: &[&GpuMesh],
         volume_bg: &wgpu::BindGroup,
         as_bg: Option<&wgpu::BindGroup>,
+        timer: Option<&crate::bench::GpuTimer>,
     ) {
         // Opaque pass: clears the HDR color + G-buffer (normal, motion) + depth, then draws.
         {
@@ -1705,7 +1742,7 @@ impl ChunkRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: timer.map(|t| t.render_writes(crate::bench::Pass::Opaque)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1740,7 +1777,7 @@ impl ChunkRenderer {
                 {
                     let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("gi-compute-pass"),
-                        timestamp_writes: None,
+                        timestamp_writes: timer.map(|t| t.compute_writes(crate::bench::Pass::GiCompute)),
                     });
                     cpass.set_pipeline(gi_pipeline);
                     cpass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -1750,8 +1787,8 @@ impl ChunkRenderer {
                         cpass.set_bind_group(3, b, &[]);
                     }
                     cpass.dispatch_workgroups(
-                        targets.width.div_ceil(8),
-                        targets.height.div_ceil(8),
+                        targets.width.div_ceil(self.gi_wg.0),
+                        targets.height.div_ceil(self.gi_wg.1),
                         1,
                     );
                 }
@@ -1767,13 +1804,14 @@ impl ChunkRenderer {
                     {
                         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("gi-temporal-pass"),
-                            timestamp_writes: None,
+                            timestamp_writes: timer
+                                .map(|t| t.compute_writes(crate::bench::Pass::GiTemporal)),
                         });
                         cpass.set_pipeline(tp);
                         cpass.set_bind_group(0, tbg, &[]);
                         cpass.dispatch_workgroups(
-                            targets.width.div_ceil(8),
-                            targets.height.div_ceil(8),
+                            targets.width.div_ceil(self.gi_wg.0),
+                            targets.height.div_ceil(self.gi_wg.1),
                             1,
                         );
                     }
@@ -1800,7 +1838,8 @@ impl ChunkRenderer {
                             },
                         })],
                         depth_stencil_attachment: None,
-                        timestamp_writes: None,
+                        timestamp_writes: timer
+                            .map(|t| t.render_writes(crate::bench::Pass::GiComposite)),
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
@@ -1834,7 +1873,7 @@ impl ChunkRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: timer.map(|t| t.render_writes(crate::bench::Pass::Glass)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1875,7 +1914,7 @@ impl ChunkRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: timer.map(|t| t.render_writes(crate::bench::Pass::Water)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2153,8 +2192,9 @@ impl ChunkRenderer {
         hudless_view: Option<&wgpu::TextureView>,
         ui_view: Option<&wgpu::TextureView>,
         viewmodel: Option<&ViewModelDraw>,
+        timer: Option<&crate::bench::GpuTimer>,
     ) {
-        self.record(encoder, targets, depth_view, meshes, volume_bg, as_bg);
+        self.record(encoder, targets, depth_view, meshes, volume_bg, as_bg, timer);
         self.record_highlight(gpu, encoder, &targets.hdr_view, depth_view, highlight);
         self.record_resolve(
             gpu, encoder, &targets.tonemap_bg, final_view, ui_verts, hudless_view, ui_view, viewmodel,
@@ -2241,7 +2281,7 @@ impl ChunkRenderer {
                 let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("dlss-scene-encoder"),
                 });
-                self.record(&mut enc, targets, dlss.depth_view(), meshes, volume_bg, as_bg);
+                self.record(&mut enc, targets, dlss.depth_view(), meshes, volume_bg, as_bg, None);
                 self.record_highlight(gpu, &mut enc, &targets.hdr_view, dlss.depth_view(), highlight);
                 gpu.queue.submit(Some(enc.finish()));
 
@@ -2304,7 +2344,7 @@ impl ChunkRenderer {
                 });
                 self.record_full(
                     gpu, &mut enc, targets, final_view, scene_depth, meshes, volume_bg, as_bg,
-                    highlight, ui_verts, hudless_view, ui_view, viewmodel,
+                    highlight, ui_verts, hudless_view, ui_view, viewmodel, None,
                 );
                 gpu.queue.submit(Some(enc.finish()));
             }
@@ -2327,7 +2367,7 @@ impl ChunkRenderer {
         viewmodel: Option<(&GpuPart, crate::viewmodel::ViewModelUniform)>,
         mut dlss: Option<&mut crate::dlss::DlssRender>,
         fg: Option<&mut crate::frame_gen::FrameGen>,
-    ) {
+    ) -> bool {
         let vmd = viewmodel.map(|(mesh, uniform)| ViewModelDraw {
             mesh,
             depth: &self.viewmodel_depth_view,
@@ -2361,7 +2401,7 @@ impl ChunkRenderer {
                 );
             });
             if presented {
-                return;
+                return true;
             }
             // FG did not present (begin_frame/set_constants/acquire/tag failure) — fall through to the
             // ordinary swapchain present below so the frame is still shown (RR still applies).
@@ -2369,11 +2409,21 @@ impl ChunkRenderer {
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.surface_errors.set(0);
+                t
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.surface_backoff();
+                return false;
+            }
             _ => {
+                // Lost/Outdated (or a future variant): reconfigure once and let the next frame
+                // retry — with backoff, so a surface that stays broken is not respun at full rate.
+                self.surface_backoff();
+                log::warn!("swapchain acquire failed (lost/outdated) — reconfiguring");
                 gpu.surface.configure(&gpu.device, &gpu.config);
-                return;
+                return false;
             }
         };
         let view = frame
@@ -2395,5 +2445,19 @@ impl ChunkRenderer {
             dlss,
         );
         frame.present();
+        true
+    }
+
+    /// Escalating sleep after repeated swapchain-acquire failures (2026-06-03 wedge hardening):
+    /// the first few failures retry immediately (a minimized/occluded window is normal), then each
+    /// further one sleeps a little longer (capped at 250ms) so `about_to_wait`'s unconditional
+    /// `request_redraw` cannot spin acquire/reconfigure against a wedged or occluded surface.
+    fn surface_backoff(&self) {
+        let n = self.surface_errors.get().saturating_add(1);
+        self.surface_errors.set(n);
+        if n > 3 {
+            let ms = (25 * u64::from(n - 3)).min(250);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
     }
 }

@@ -22,8 +22,8 @@ pub(crate) use gameplay::{
     container, crafting, entity, food, item, player, raycast, rules, smelting,
 };
 pub(crate) use gfx::{
-    camera, capture, device as gpu, dlss, environment, frame_gen, frustum, renderer, rt_probe,
-    rt_spike, texture, viewmodel, voxel_volume,
+    bench, camera, capture, device as gpu, dlss, environment, frame_gen, frustum, quality,
+    renderer, rt_probe, rt_spike, texture, viewmodel, voxel_volume,
 };
 pub(crate) use mesh::mesher;
 pub(crate) use ui::{font, overlay};

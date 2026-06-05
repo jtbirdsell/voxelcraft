@@ -27,8 +27,10 @@ pub const GDEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// Per-resolution render targets, owned by each render path (the live present loop and the offscreen
 /// screenshot) and rebuilt on resize. Built by `ChunkRenderer::make_targets`. When DLSS is active
 /// these are sized to the DLSS *render* resolution (below output); DLSS upscales to output res.
-// Some RR-guide texture handles (hdr_tex/gnormal_tex/galbedo_tex) are only read by the DLSS path.
-#[cfg_attr(not(feature = "dlss"), allow(dead_code))]
+// Some RR-guide texture handles (hdr_tex/gnormal_tex/galbedo_tex) are only read by the DLSS path,
+// which compiles only under all(feature, Windows) — the same dual gate as src/gfx.rs. The allow
+// must mirror that full gate: on macOS the `dlss` feature is on but the module is stubbed.
+#[cfg_attr(not(all(feature = "dlss", target_os = "windows")), allow(dead_code))]
 pub struct RenderTargets {
     /// HDR scene color the world renders into (then sampled by the tonemap pass / fed to DLSS).
     pub hdr_view: wgpu::TextureView,

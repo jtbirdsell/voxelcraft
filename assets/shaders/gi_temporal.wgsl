@@ -13,7 +13,8 @@
 const ALPHA: f32 = 0.1;      // EMA weight for the current (noisy) frame (~10-frame effective history)
 const DEPTH_REL: f32 = 0.05; // relative depth tolerance for the disocclusion test
 
-@compute @workgroup_size(8, 8, 1)
+// GI_WG_X/Y are injected by the renderer (P21), same values as gi_compute.wgsl and the dispatch.
+@compute @workgroup_size(GI_WG_X, GI_WG_Y, 1)
 fn gi_temporal_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dim = textureDimensions(gi_accum);
     if (gid.x >= dim.x || gid.y >= dim.y) {

@@ -26,16 +26,15 @@ use crate::player::{Input, Player};
 use crate::gfx::graph::RenderTargets;
 use crate::gfx::rt::RtScene;
 use crate::renderer::ChunkRenderer;
-use crate::{block, capture, crafting, item, overlay, persistence, raycast, smelting};
+use crate::{bench, block, capture, crafting, item, overlay, persistence, raycast, smelting};
 
 const SEED: u64 = 0x5EED_C0FFEE;
-const RENDER_DISTANCE: i32 = 12;
+// P21: render distance + fog are tier-driven now (`Quality::render_distance`, `fog_start/end()`;
+// maxed tier == the old RENDER_DISTANCE=12 / FOG formulas, anchored by quality.rs tests).
 const REACH: f32 = 6.0;
 const EAT_TIME: f32 = 1.6; // seconds to eat a food (hold right-click)
 const SHIELD_RAISE_DELAY: f32 = 0.25; // seconds a shield must be up before it blocks (MC ~5 ticks)
 const SENSITIVITY: f32 = 0.0022;
-const FOG_END: f32 = (RENDER_DISTANCE as f32 - 1.0) * 32.0;
-const FOG_START: f32 = FOG_END * 0.68;
 
 /// Active GUI screen. Gameplay input is suppressed while any screen is open (M15b; grows later).
 #[derive(PartialEq, Clone, Copy)]
@@ -78,6 +77,8 @@ enum Scene {
 /// and lives for both menus and gameplay; the world lives in `session`.
 struct State {
     gpu: Gpu,
+    /// Platform quality tier (P21), resolved once at startup from the backend + env overrides.
+    quality: crate::quality::Quality,
     renderer: ChunkRenderer,
     targets: RenderTargets,
     rt_scene: RtScene,
@@ -95,6 +96,9 @@ struct State {
     scene: Scene,
     /// M35: the loaded world, or `None` while in a menu.
     session: Option<Session>,
+    /// Fail-safe for GPU/driver wedges (P21, 2026-06-03 Metal incident): when submitted frames stop
+    /// completing, save the world and exit instead of piling more work on a dead queue.
+    gpu_watchdog: crate::gpu::GpuWatchdog,
 }
 
 /// Everything that exists only while a world is loaded — created on Play/Create, dropped on Quit to
@@ -1025,7 +1029,7 @@ impl App {
         session.camera_uniform.update(&session.camera, aspect);
         session
             .camera_uniform
-            .set_environment(&session.environment, FOG_START, FOG_END);
+            .set_environment(&session.environment, state.quality.fog_start(), state.quality.fog_end());
         session.camera_uniform.set_time(session.elapsed, session.environment.time);
         // M33-G8: jitter the projection to match the jitter handed to NGX (DLSS temporal sampling).
         if let Some(dr) = &state.dlss_render {
@@ -1214,7 +1218,7 @@ impl App {
             .and_then(|g| state.renderer.upload_viewmodel(&state.gpu.device, g));
         let vm_uniform = crate::viewmodel::ViewModelUniform::new(aspect, vm_light);
         let viewmodel = vm_part.as_ref().map(|p| (p, vm_uniform));
-        state.renderer.render_frame(
+        let frame_submitted = state.renderer.render_frame(
             &state.gpu,
             &state.targets,
             &visible,
@@ -1226,6 +1230,13 @@ impl App {
             state.dlss_render.as_mut(),
             state.frame_gen.as_mut(),
         );
+        // GPU wedge fail-safe (2026-06-03 Metal incident): track per-frame completion; if submitted
+        // work stops signaling, the end of this fn saves the world and exits without touching the
+        // GPU again (a wedged AGX driver took WindowServer — and the whole machine — down with it).
+        if frame_submitted {
+            state.gpu_watchdog.arm(&state.gpu.queue);
+        }
+        let gpu_stall = state.gpu_watchdog.check(&state.gpu.device);
 
         // FG self-test: after N frames, log the max generated-frame count and exit (DLSS-G generates
         // an interpolated frame between each rendered one => max presented == 2). Driven by a local
@@ -1267,6 +1278,19 @@ impl App {
             );
             state.fps_accum = 0.0;
             state.fps_frames = 0;
+        }
+
+        // GPU wedge fail-safe trigger (see gpu_watchdog above). `state`'s borrow has ended, so the
+        // world can be saved through `&self`; exit via process::exit — GPU teardown (surface/device
+        // drops) can block forever against a wedged driver, and skipping it loses nothing.
+        if let Some(stalled) = gpu_stall {
+            log::error!(
+                "GPU watchdog: submitted frames have not completed for {stalled:.1}s — the GPU/driver \
+                 appears wedged. Saving world and exiting before the stall takes the system down \
+                 (VOXELCRAFT_GPU_WATCHDOG=0 disables; default 5s)."
+            );
+            self.save_world();
+            std::process::exit(70);
         }
     }
 }
@@ -1490,19 +1514,28 @@ impl ApplicationHandler for App {
             gpu.backend,
             if gpu.rt_enabled { " · RT cores" } else { "" }
         ));
-        let renderer = ChunkRenderer::new(&gpu);
+        // P21: resolve the platform quality tier (maxed off-Metal == pre-P21 behavior; tuned-down
+        // on macOS/Metal) + its env overrides, then thread it through renderer/game construction.
+        let quality = crate::quality::Quality::resolve(gpu.backend);
+        let renderer = ChunkRenderer::new(&gpu, &quality);
 
         // M33-G8: bring up the DLSS SDK (Tensor-core denoise + upscale). `None` => native-resolution
         // rendering (off / non-DX12 / unsupported). Used by both the headless and interactive paths.
         let dlss = crate::dlss::Dlss::init(&gpu);
 
-        // Headless screenshot path: a fresh generated world with a few verification edits.
-        if let Ok(path) = std::env::var("VOXELCRAFT_SHOT") {
+        // Headless path: a fresh generated world with a few verification edits, rendered offscreen.
+        // VOXELCRAFT_SHOT=path.png saves one frame; VOXELCRAFT_BENCH=N times N frames (P21) — both
+        // may be set (bench, then save the PNG as the run's visual artifact).
+        let shot_path = std::env::var("VOXELCRAFT_SHOT").ok();
+        let bench_frames = std::env::var("VOXELCRAFT_BENCH")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok());
+        if shot_path.is_some() || bench_frames.is_some() {
             let mut game = Game::new(
                 &gpu,
                 renderer.volume_bgl(),
                 SEED,
-                RENDER_DISTANCE,
+                &quality,
                 FxHashMap::default(),
             );
             // Headless difficulty (P6): VOXELCRAFT_DIFFICULTY gates hostile spawning + the F3 line.
@@ -1511,13 +1544,22 @@ impl ApplicationHandler for App {
                 .and_then(|s| crate::rules::Difficulty::from_env(&s))
                 .unwrap_or_default();
             game.set_difficulty(headless_difficulty);
-            // Offscreen render is one-shot, so trace many more GI rays for a clean image.
-            // VOXELCRAFT_GI_RAYS overrides (e.g. to match an interactive setting for A/B).
+            // Offscreen screenshots are one-shot, so trace many more GI rays for a clean image; a
+            // bench run instead defaults to the tier's INTERACTIVE ray count so its numbers reflect
+            // gameplay cost. VOXELCRAFT_GI_RAYS overrides either (e.g. for A/B sweeps).
             let shot_rays = std::env::var("VOXELCRAFT_GI_RAYS")
                 .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok())
-                .unwrap_or(64);
+                .unwrap_or(if bench_frames.is_some() { quality.gi_rays } else { 64 });
             game.set_rtx_quality(shot_rays.max(1));
+            // P21: VOXELCRAFT_RTX=0|1|2 forces the lighting mode (off/shadows/shadows+GI) so bench
+            // runs can isolate the primary-shadow-ray and GI costs (interactively the R key cycles).
+            if let Some(mode) = std::env::var("VOXELCRAFT_RTX")
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                game.set_rtx_mode(mode);
+            }
             // Debug knob: VOXELCRAFT_WSMOOTH overrides the water depth-clarity smoothing radius
             // in blocks (0 = single-tap, the pre-fix stepped look) for ad-hoc tuning/verification.
             if let Ok(s) = std::env::var("VOXELCRAFT_WSMOOTH") {
@@ -1737,11 +1779,15 @@ impl ApplicationHandler for App {
                 log::info!("P16 after far tick (despawn): {}", game.mob_species_summary());
             }
 
+            // P21: scripted edits above queue boundary-neighbor remeshes on the worker pool —
+            // wait for them so the capture can't show a stale chunk seam.
+            game.flush_meshes(&gpu, &renderer);
+
             // Populate the voxel volume so shadows / GI / water depth trace across the full vista.
             game.prime_volume(&gpu, player.position);
 
             camera_uniform.update(&camera, gpu.aspect());
-            camera_uniform.set_environment(&environment, FOG_START, FOG_END);
+            camera_uniform.set_environment(&environment, quality.fog_start(), quality.fog_end());
             let shot_time = std::env::var("VOXELCRAFT_TIME")
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
@@ -1892,54 +1938,75 @@ impl ApplicationHandler for App {
             if let Some(em) = &entity_mesh {
                 all.push(em);
             }
-            // M34-VM: build the held-item view-model for the shot (forced via VOXELCRAFT_HELD).
-            // VOXELCRAFT_VM_POSE=swing|eat|draw|shield|equip|idle + VOXELCRAFT_VM_T=<0..1> force a pose.
-            let vm_light = game.held_item_light(
-                camera.position.floor().as_ivec3(),
-                environment.day_factor(),
-            );
-            let mut vm_state = crate::viewmodel::ViewModel::default();
-            let vm_pose = std::env::var("VOXELCRAFT_VM_POSE").unwrap_or_default();
-            let vm_t: f32 = std::env::var("VOXELCRAFT_VM_T")
-                .ok()
-                .and_then(|s| s.trim().parse::<f32>().ok())
-                .unwrap_or(0.5)
-                .clamp(0.0, 1.0);
-            match vm_pose.as_str() {
-                "swing" | "place" => {
-                    vm_state.swing = vm_t;
-                    vm_state.swinging = true;
+            // P21: timed multi-frame benchmark (native path only — DLSS does internal submits that
+            // would skew per-pass attribution; on the Mac dlss_render is None anyway).
+            if let Some(n) = bench_frames {
+                if dlss_render.is_some() {
+                    log::warn!("bench: DLSS is active but the bench loop times the native path");
                 }
-                "eat" => vm_state.use_pose.eat = vm_t,
-                "draw" => vm_state.use_pose.draw = vm_t,
-                "shield" => vm_state.use_pose.shield = vm_t,
-                "equip" => vm_state.equip = vm_t,
-                "idle" => {
-                    vm_state.bob_strength = 1.0;
-                    vm_state.bob_phase = vm_t * std::f32::consts::TAU;
-                }
-                _ => {}
+                bench::run(
+                    &gpu,
+                    &renderer,
+                    &all,
+                    volume_bg,
+                    highlight,
+                    &ui,
+                    gpu.config.width,
+                    gpu.config.height,
+                    &camera_uniform,
+                    n,
+                );
             }
-            let vm_geom = vm_state.build_geometry(shot_inv.selected_item(), vm_light);
-            let vm_part = vm_geom
-                .as_ref()
-                .and_then(|g| renderer.upload_viewmodel(&gpu.device, g));
-            let vm_uniform = crate::viewmodel::ViewModelUniform::new(gpu.aspect(), vm_light);
-            let viewmodel = vm_part.as_ref().map(|p| (p, vm_uniform));
-            capture::screenshot(
-                &gpu,
-                &renderer,
-                &all,
-                volume_bg,
-                highlight,
-                &ui,
-                gpu.config.width,
-                gpu.config.height,
-                &camera_uniform,
-                viewmodel,
-                dlss_render.as_mut(),
-                &path,
-            );
+            if let Some(path) = &shot_path {
+                // M34-VM: build the held-item view-model for the shot (forced via VOXELCRAFT_HELD).
+                // VOXELCRAFT_VM_POSE=swing|eat|draw|shield|equip|idle + VOXELCRAFT_VM_T=<0..1> force a pose.
+                let vm_light = game.held_item_light(
+                    camera.position.floor().as_ivec3(),
+                    environment.day_factor(),
+                );
+                let mut vm_state = crate::viewmodel::ViewModel::default();
+                let vm_pose = std::env::var("VOXELCRAFT_VM_POSE").unwrap_or_default();
+                let vm_t: f32 = std::env::var("VOXELCRAFT_VM_T")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<f32>().ok())
+                    .unwrap_or(0.5)
+                    .clamp(0.0, 1.0);
+                match vm_pose.as_str() {
+                    "swing" | "place" => {
+                        vm_state.swing = vm_t;
+                        vm_state.swinging = true;
+                    }
+                    "eat" => vm_state.use_pose.eat = vm_t,
+                    "draw" => vm_state.use_pose.draw = vm_t,
+                    "shield" => vm_state.use_pose.shield = vm_t,
+                    "equip" => vm_state.equip = vm_t,
+                    "idle" => {
+                        vm_state.bob_strength = 1.0;
+                        vm_state.bob_phase = vm_t * std::f32::consts::TAU;
+                    }
+                    _ => {}
+                }
+                let vm_geom = vm_state.build_geometry(shot_inv.selected_item(), vm_light);
+                let vm_part = vm_geom
+                    .as_ref()
+                    .and_then(|g| renderer.upload_viewmodel(&gpu.device, g));
+                let vm_uniform = crate::viewmodel::ViewModelUniform::new(gpu.aspect(), vm_light);
+                let viewmodel = vm_part.as_ref().map(|p| (p, vm_uniform));
+                capture::screenshot(
+                    &gpu,
+                    &renderer,
+                    &all,
+                    volume_bg,
+                    highlight,
+                    &ui,
+                    gpu.config.width,
+                    gpu.config.height,
+                    &camera_uniform,
+                    viewmodel,
+                    dlss_render.as_mut(),
+                    path,
+                );
+            }
             event_loop.exit();
             return;
         }
@@ -1960,7 +2027,7 @@ impl ApplicationHandler for App {
         };
         let saved = persistence::load_chunks(&dir);
         let (inventory, saved_furnaces, saved_chests) = persistence::load_state(&dir, flying);
-        let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, RENDER_DISTANCE, saved);
+        let mut game = Game::new(&gpu, renderer.volume_bgl(), seed, &quality, saved);
         game.restore_furnaces(saved_furnaces);
         game.restore_chests(saved_chests);
         // Fresh world: drop the spawn onto the deepened surface (saved worlds keep their stored spawn).
@@ -2007,7 +2074,7 @@ impl ApplicationHandler for App {
         let camera = Camera::new(player.eye(), yaw, pitch);
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update(&camera, gpu.aspect());
-        camera_uniform.set_environment(&environment, FOG_START, FOG_END);
+        camera_uniform.set_environment(&environment, quality.fog_start(), quality.fog_end());
         renderer.update_camera(&gpu, &camera_uniform);
         renderer.set_sky(environment.wgpu_clear());
 
@@ -2075,6 +2142,8 @@ impl ApplicationHandler for App {
             fps_smooth: 0.0,
             scene: Scene::InGame,
             session: Some(session),
+            quality,
+            gpu_watchdog: crate::gpu::GpuWatchdog::new(),
         });
         self.set_grab(true);
     }
@@ -2084,6 +2153,13 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 self.save_world();
                 event_loop.exit();
+            }
+            // Moving to a display with a different DPI scale re-resolves the render scale
+            // (Metal-only sub-native rendering); the Resized that follows applies it.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(state) = &mut self.state {
+                    state.gpu.rescale(scale_factor);
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(state) = &mut self.state {
@@ -2137,9 +2213,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
-                    if session.screen != Screen::None {
-                        session.cursor = (position.x as f32, position.y as f32);
+                if let Some(state) = &mut self.state {
+                    // `cursor` is swapchain (config) space — the UI rects in ui/overlay.rs are built
+                    // from gpu.config dims. With a sub-native render scale (Metal) the window is larger
+                    // than the drawable, so map the window-physical position per-axis (the floored
+                    // config dims can round the two ratios differently).
+                    let sx = state.gpu.config.width as f64 / state.gpu.size.width.max(1) as f64;
+                    let sy = state.gpu.config.height as f64 / state.gpu.size.height.max(1) as f64;
+                    if let Some(session) = state.session.as_mut() {
+                        if session.screen != Screen::None {
+                            session.cursor = ((position.x * sx) as f32, (position.y * sy) as f32);
+                        }
                     }
                 }
             }

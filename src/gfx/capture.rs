@@ -177,6 +177,11 @@ pub fn screenshot(
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(6)
+    } else if renderer.gi_accum() {
+        // P21: with GI temporal accumulation on (the mac tier), the first frame's irradiance is
+        // raw low-ray noise — run enough frames for the EMA to converge so the PNG shows the
+        // steady-state interactive look (the camera is static here, so frames are identical work).
+        16
     } else {
         1
     };
