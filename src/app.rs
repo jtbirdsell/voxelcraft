@@ -60,6 +60,22 @@ impl Screen {
     }
 }
 
+/// Top-level app/UI state machine (M35). The world-bearing `Session` exists only in InGame/Paused;
+/// menus run with `session == None`. N1 introduces the split but only `InGame` is reachable (the game
+/// still boots straight into a world); the menu scenes are wired in N3.
+#[derive(Clone)]
+#[allow(dead_code)] // menu scenes are constructed in N3; the enum lands now so the split is stable.
+enum Scene {
+    MainMenu,
+    WorldSelect,
+    CreateWorld,
+    Settings { return_to: Box<Scene> },
+    InGame,
+    Paused,
+}
+
+/// The always-present render stack + frame pacing + the top-level scene. Created once the GPU is up
+/// and lives for both menus and gameplay; the world lives in `session`.
 struct State {
     gpu: Gpu,
     renderer: ChunkRenderer,
@@ -71,6 +87,19 @@ struct State {
     dlss: Option<crate::dlss::Dlss>,
     /// DLSS Frame Generation (DLSS-G) context, driven in the present path. `None` => no FG. (M33-G8-FG)
     frame_gen: Option<crate::frame_gen::FrameGen>,
+    last_frame: Instant,
+    fps_accum: f32,
+    fps_frames: u32,
+    fps_smooth: f32,
+    /// M35: the active top-level scene.
+    scene: Scene,
+    /// M35: the loaded world, or `None` while in a menu.
+    session: Option<Session>,
+}
+
+/// Everything that exists only while a world is loaded — created on Play/Create, dropped on Quit to
+/// Menu. Accessed as `session.<field>` from the per-frame body (disjoint from `State`'s render stack).
+struct Session {
     game: Game,
     camera: Camera,
     player: Player,
@@ -78,10 +107,6 @@ struct State {
     inventory: Inventory,
     environment: Environment,
     camera_uniform: CameraUniform,
-    last_frame: Instant,
-    fps_accum: f32,
-    fps_frames: u32,
-    fps_smooth: f32,
     debug_f3: bool,
     elapsed: f32,
     screen: Screen,
@@ -152,56 +177,61 @@ impl App {
     }
 
     fn save_world(&self) {
-        if let Some(state) = &self.state {
-            let level = Level {
-                seed: state.game.seed(),
-                spawn: state.player.position.to_array(),
-                yaw: state.camera.yaw,
-                pitch: state.camera.pitch,
-                time: state.environment.time,
-                flying: state.player.flying,
-                health: state.player.health,
-                hunger: state.player.hunger,
-                air: state.player.air,
-                saturation: state.player.saturation(),
-                xp: state.player.xp,
-                level: state.player.level,
-                difficulty: state.difficulty.as_u8(),
-            };
-            state.game.save(&level);
-            let dir = persistence::save_dir();
-            // Fold any cursor-held stack back into slots so it isn't lost when saving mid-screen
-            // (P / window-close don't go through close_screen's return_held path).
-            let mut inv = state.inventory.clone();
-            if let Some(h) = inv.held.take() {
-                let _ = inv.insert(h);
-            }
-            if let Err(e) = persistence::save_state(
-                &dir,
-                &inv,
-                &state.game.furnaces_to_save(),
-                &state.game.chests_to_save(),
-            ) {
-                log::error!("failed to save state: {e}");
-            }
+        let Some(session) = self.state.as_ref().and_then(|s| s.session.as_ref()) else { return };
+        let level = Level {
+            seed: session.game.seed(),
+            spawn: session.player.position.to_array(),
+            yaw: session.camera.yaw,
+            pitch: session.camera.pitch,
+            time: session.environment.time,
+            flying: session.player.flying,
+            health: session.player.health,
+            hunger: session.player.hunger,
+            air: session.player.air,
+            saturation: session.player.saturation(),
+            xp: session.player.xp,
+            level: session.player.level,
+            difficulty: session.difficulty.as_u8(),
+        };
+        session.game.save(&level);
+        let dir = persistence::save_dir();
+        // Fold any cursor-held stack back into slots so it isn't lost when saving mid-screen
+        // (P / window-close don't go through close_screen's return_held path).
+        let mut inv = session.inventory.clone();
+        if let Some(h) = inv.held.take() {
+            let _ = inv.insert(h);
+        }
+        if let Err(e) = persistence::save_state(
+            &dir,
+            &inv,
+            &session.game.furnaces_to_save(),
+            &session.game.chests_to_save(),
+        ) {
+            log::error!("failed to save state: {e}");
+        }
+    }
+
+    /// Center of the window in pixels — for placing the cursor when a GUI screen opens.
+    fn screen_center(&self) -> (f32, f32) {
+        match &self.state {
+            Some(s) => (s.gpu.config.width as f32 * 0.5, s.gpu.config.height as f32 * 0.5),
+            None => (0.0, 0.0),
         }
     }
 
     fn toggle_inventory(&mut self) {
+        let center = self.screen_center();
         let open = {
-            let Some(state) = &mut self.state else { return };
-            if state.screen != Screen::None {
-                return_craft_to_inventory(state);
-                drop_leftover(&mut state.inventory, &mut state.game, state.player.position);
-                state.screen = Screen::None;
+            let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) else { return };
+            if session.screen != Screen::None {
+                return_craft_to_inventory(session);
+                drop_leftover(&mut session.inventory, &mut session.game, session.player.position);
+                session.screen = Screen::None;
                 false
             } else {
-                state.screen = Screen::Inventory;
-                state.input = Input::default();
-                state.cursor = (
-                    state.gpu.config.width as f32 * 0.5,
-                    state.gpu.config.height as f32 * 0.5,
-                );
+                session.screen = Screen::Inventory;
+                session.input = Input::default();
+                session.cursor = center;
                 true
             }
         };
@@ -209,49 +239,43 @@ impl App {
     }
 
     fn open_crafting(&mut self) {
-        if let Some(state) = &mut self.state {
-            state.screen = Screen::Crafting;
-            state.input = Input::default();
-            state.cursor = (
-                state.gpu.config.width as f32 * 0.5,
-                state.gpu.config.height as f32 * 0.5,
-            );
+        let center = self.screen_center();
+        if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+            session.screen = Screen::Crafting;
+            session.input = Input::default();
+            session.cursor = center;
         }
         self.set_grab(false);
     }
 
     fn open_furnace(&mut self, pos: IVec3) {
-        if let Some(state) = &mut self.state {
-            state.game.furnace_mut(pos); // ensure a state exists to render/tick
-            state.screen = Screen::Furnace(pos);
-            state.input = Input::default();
-            state.cursor = (
-                state.gpu.config.width as f32 * 0.5,
-                state.gpu.config.height as f32 * 0.5,
-            );
+        let center = self.screen_center();
+        if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+            session.game.furnace_mut(pos); // ensure a state exists to render/tick
+            session.screen = Screen::Furnace(pos);
+            session.input = Input::default();
+            session.cursor = center;
         }
         self.set_grab(false);
     }
 
     fn open_chest(&mut self, pos: IVec3) {
-        if let Some(state) = &mut self.state {
-            state.game.chest_mut(pos); // ensure a container exists to render
-            state.screen = Screen::Chest(pos);
-            state.input = Input::default();
-            state.cursor = (
-                state.gpu.config.width as f32 * 0.5,
-                state.gpu.config.height as f32 * 0.5,
-            );
+        let center = self.screen_center();
+        if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+            session.game.chest_mut(pos); // ensure a container exists to render
+            session.screen = Screen::Chest(pos);
+            session.input = Input::default();
+            session.cursor = center;
         }
         self.set_grab(false);
     }
 
     fn close_screen(&mut self) {
-        if let Some(state) = &mut self.state {
-            if state.screen != Screen::None {
-                return_craft_to_inventory(state);
-                drop_leftover(&mut state.inventory, &mut state.game, state.player.position);
-                state.screen = Screen::None;
+        if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+            if session.screen != Screen::None {
+                return_craft_to_inventory(session);
+                drop_leftover(&mut session.inventory, &mut session.game, session.player.position);
+                session.screen = Screen::None;
             }
         }
         self.set_grab(true);
@@ -265,38 +289,39 @@ impl App {
             _ => return,
         };
         let (w, h) = (state.gpu.config.width, state.gpu.config.height);
-        let (cx, cy) = state.cursor;
+        let Some(session) = state.session.as_mut() else { return };
+        let (cx, cy) = session.cursor;
         let hit = |x: f32, y: f32| {
             cx >= x && cx < x + overlay::INV_SLOT && cy >= y && cy < y + overlay::INV_SLOT
         };
         for (slot_i, x, y) in overlay::inventory_slot_rects(w, h) {
             if hit(x, y) {
-                state.inventory.click_slot(slot_i, right);
+                session.inventory.click_slot(slot_i, right);
                 return;
             }
         }
         // F1: clicking a creative-palette cell grabs a stack of that item onto the cursor (left = full
         // stack, right = one). The old held stack is simply discarded — creative items are infinite.
-        if state.screen == Screen::Inventory && state.inventory.creative {
+        if session.screen == Screen::Inventory && session.inventory.creative {
             for (i, x, y) in overlay::creative_palette_rects(w, h) {
                 if hit(x, y) {
-                    let idx = state.creative_page * overlay::PAL_PER_PAGE + i;
-                    if let Some(&it) = state.creative_palette.get(idx) {
+                    let idx = session.creative_page * overlay::PAL_PER_PAGE + i;
+                    if let Some(&it) = session.creative_palette.get(idx) {
                         let count = if right { 1 } else { item::max_stack(it) };
-                        state.inventory.held = Some(item::ItemStack::new(it, count));
+                        session.inventory.held = Some(item::ItemStack::new(it, count));
                     } else {
-                        state.inventory.held = None; // clicked an empty palette cell = trash the cursor
+                        session.inventory.held = None; // clicked an empty palette cell = trash the cursor
                     }
                     return;
                 }
             }
         }
         // Furnace screen: move items between held and the input/fuel slots; output is take-only.
-        if let Screen::Furnace(pos) = state.screen {
-            let f = state.game.furnace_mut(pos);
+        if let Screen::Furnace(pos) = session.screen {
+            let f = session.game.furnace_mut(pos);
             for (kind, x, y) in overlay::furnace_slot_rects(w, h) {
                 if hit(x, y) {
-                    let mut held = state.inventory.held;
+                    let mut held = session.inventory.held;
                     match kind {
                         overlay::FurnaceSlot::Input => {
                             let mut s = f.input;
@@ -310,20 +335,20 @@ impl App {
                         }
                         overlay::FurnaceSlot::Output => take_furnace_output(&mut held, &mut f.output),
                     }
-                    state.inventory.held = held;
+                    session.inventory.held = held;
                     return;
                 }
             }
             return;
         }
         // Chest screen: move items between the held cursor stack and the 27 container slots.
-        if let Screen::Chest(pos) = state.screen {
-            let mut held = state.inventory.held;
-            let c = state.game.chest_mut(pos);
+        if let Screen::Chest(pos) = session.screen {
+            let mut held = session.inventory.held;
+            let c = session.game.chest_mut(pos);
             for (i, x, y) in overlay::chest_slot_rects(w, h) {
                 if hit(x, y) {
                     c.click(i, &mut held, right);
-                    state.inventory.held = held;
+                    session.inventory.held = held;
                     return;
                 }
             }
@@ -332,40 +357,40 @@ impl App {
         // Equipped-armor slots: only the matching piece may be placed; taking a piece out is allowed.
         for (slot_i, x, y) in overlay::armor_slot_rects(w, h) {
             if hit(x, y) {
-                let allowed = match state.inventory.held {
+                let allowed = match session.inventory.held {
                     None => true,
                     Some(h) => item::is_armor(h.item) && item::armor_slot(h.item) == slot_i,
                 };
                 if allowed {
-                    let mut held = state.inventory.held;
-                    let mut s = state.inventory.slots[slot_i];
+                    let mut held = session.inventory.held;
+                    let mut s = session.inventory.slots[slot_i];
                     item::slot_click(&mut held, &mut s, right);
-                    state.inventory.held = held;
-                    state.inventory.slots[slot_i] = s;
+                    session.inventory.held = held;
+                    session.inventory.slots[slot_i] = s;
                 }
                 return;
             }
         }
-        let size = state.screen.craft_size();
+        let size = session.screen.craft_size();
         for (cell, x, y) in overlay::craft_cell_rects(w, h, size) {
             if hit(x, y) {
-                let mut held = state.inventory.held;
-                let mut c = state.craft[cell];
+                let mut held = session.inventory.held;
+                let mut c = session.craft[cell];
                 item::slot_click(&mut held, &mut c, right);
-                state.inventory.held = held;
-                state.craft[cell] = c;
+                session.inventory.held = held;
+                session.craft[cell] = c;
                 return;
             }
         }
         let (ox, oy) = overlay::craft_output_rect(w, h, size);
         if hit(ox, oy) {
-            craft_take_output(state);
+            craft_take_output(session);
         }
     }
 
     fn handle_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, event_loop: &ActiveEventLoop) {
         if code == KeyCode::Escape && pressed {
-            if self.state.as_ref().is_some_and(|s| s.screen != Screen::None) {
+            if self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None) {
                 self.close_screen();
                 return;
             }
@@ -382,155 +407,161 @@ impl App {
         }
         // While a GUI screen is open, swallow gameplay key PRESSES but let RELEASES through, so a
         // movement key held across the open/close edge can't get stuck on.
-        if pressed && self.state.as_ref().is_some_and(|s| s.screen != Screen::None) {
+        if pressed && self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None) {
             return;
         }
-        let Some(state) = &mut self.state else { return };
+        let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) else { return };
         match code {
-            KeyCode::KeyW => state.input.forward = pressed,
-            KeyCode::KeyS => state.input.back = pressed,
-            KeyCode::KeyA => state.input.left = pressed,
-            KeyCode::KeyD => state.input.right = pressed,
-            KeyCode::Space => state.input.up = pressed,
+            KeyCode::KeyW => session.input.forward = pressed,
+            KeyCode::KeyS => session.input.back = pressed,
+            KeyCode::KeyA => session.input.left = pressed,
+            KeyCode::KeyD => session.input.right = pressed,
+            KeyCode::Space => session.input.up = pressed,
             KeyCode::ShiftLeft => {
-                state.input.down = pressed; // fly: descend
-                state.input.sneak = pressed; // walk: sneak (ledge-stop)
+                session.input.down = pressed; // fly: descend
+                session.input.sneak = pressed; // walk: sneak (ledge-stop)
             }
-            KeyCode::ControlLeft => state.input.sprint = pressed,
+            KeyCode::ControlLeft => session.input.sprint = pressed,
             KeyCode::KeyF if pressed && !repeat => {
-                state.player.flying = !state.player.flying;
-                state.player.velocity = Vec3::ZERO;
+                session.player.flying = !session.player.flying;
+                session.player.velocity = Vec3::ZERO;
             }
             KeyCode::KeyR if pressed && !repeat => {
-                let mode = state.game.cycle_rtx();
+                let mode = session.game.cycle_rtx();
                 log::info!("RTX lighting: {mode}");
             }
             KeyCode::F3 if pressed && !repeat => {
-                state.debug_f3 = !state.debug_f3;
+                session.debug_f3 = !session.debug_f3;
             }
             KeyCode::KeyG if pressed && !repeat => {
                 // Cycle difficulty Peaceful→Easy→Normal→Hard→… (suppressed while a screen is open).
-                state.difficulty = state.difficulty.next();
-                state.player.difficulty = state.difficulty;
-                state.game.set_difficulty(state.difficulty);
-                if !state.difficulty.spawns_hostiles() {
-                    state.game.despawn_hostiles();
+                session.difficulty = session.difficulty.next();
+                session.player.difficulty = session.difficulty;
+                session.game.set_difficulty(session.difficulty);
+                if !session.difficulty.spawns_hostiles() {
+                    session.game.despawn_hostiles();
                 }
-                log::info!("Difficulty: {}", state.difficulty.name());
+                log::info!("Difficulty: {}", session.difficulty.name());
             }
-            KeyCode::KeyQ if pressed && !repeat => state.input.drop_pressed = true,
-            KeyCode::Digit1 => maybe_select(state, pressed, 0),
-            KeyCode::Digit2 => maybe_select(state, pressed, 1),
-            KeyCode::Digit3 => maybe_select(state, pressed, 2),
-            KeyCode::Digit4 => maybe_select(state, pressed, 3),
-            KeyCode::Digit5 => maybe_select(state, pressed, 4),
-            KeyCode::Digit6 => maybe_select(state, pressed, 5),
-            KeyCode::Digit7 => maybe_select(state, pressed, 6),
-            KeyCode::Digit8 => maybe_select(state, pressed, 7),
-            KeyCode::Digit9 => maybe_select(state, pressed, 8),
+            KeyCode::KeyQ if pressed && !repeat => session.input.drop_pressed = true,
+            KeyCode::Digit1 => maybe_select(session, pressed, 0),
+            KeyCode::Digit2 => maybe_select(session, pressed, 1),
+            KeyCode::Digit3 => maybe_select(session, pressed, 2),
+            KeyCode::Digit4 => maybe_select(session, pressed, 3),
+            KeyCode::Digit5 => maybe_select(session, pressed, 4),
+            KeyCode::Digit6 => maybe_select(session, pressed, 5),
+            KeyCode::Digit7 => maybe_select(session, pressed, 6),
+            KeyCode::Digit8 => maybe_select(session, pressed, 7),
+            KeyCode::Digit9 => maybe_select(session, pressed, 8),
             _ => {}
         }
     }
 
     fn frame(&mut self) {
         let Some(state) = &mut self.state else { return };
+        // N1: only the in-game scene ticks + renders the world. N3 adds menu/paused rendering here.
+        if !matches!(state.scene, Scene::InGame) {
+            return;
+        }
         let now = Instant::now();
         let dt = (now - state.last_frame).as_secs_f32().min(0.1);
         state.last_frame = now;
-        state.environment.update(dt);
-        state.elapsed += dt;
+        // The render stack stays `state.<field>`; the world is `session.<field>` (disjoint borrows).
+        let Some(session) = state.session.as_mut() else { return };
+        session.environment.update(dt);
+        session.elapsed += dt;
 
         // Apply mouse look.
-        let (yaw_d, pitch_d) = state.input.take_look();
-        state.camera.yaw += yaw_d * SENSITIVITY;
-        state.camera.pitch = (state.camera.pitch - pitch_d * SENSITIVITY).clamp(-1.5533, 1.5533);
+        let (yaw_d, pitch_d) = session.input.take_look();
+        session.camera.yaw += yaw_d * SENSITIVITY;
+        session.camera.pitch = (session.camera.pitch - pitch_d * SENSITIVITY).clamp(-1.5533, 1.5533);
 
         // Player physics (disjoint field borrows: player mut, game/input shared).
-        let yaw = state.camera.yaw;
-        let armor = state.inventory.equipped_armor();
-        let game_ref = &state.game;
-        state.player.update(
+        let yaw = session.camera.yaw;
+        let armor = session.inventory.equipped_armor();
+        let game_ref = &session.game;
+        session.player.update(
             dt,
             yaw,
-            &state.input,
+            &session.input,
             |p| game_ref.block_state_at(p),
             armor,
         );
-        state.camera.position = state.player.eye();
+        session.camera.position = session.player.eye();
         // M34-VM5: optional camera head-bob, folded into the real camera transform BEFORE the camera
         // uniform rolls prev_view_proj — so DLSS motion vectors include it and stay correct. Uses the
         // previous frame's smoothed walk-bob phase (a one-frame lag is imperceptible).
-        if state.viewbob {
-            let b = state.view_model.camera_bob();
-            let right = state.camera.forward().cross(Vec3::Y).normalize_or_zero();
-            state.camera.position += right * b.x + Vec3::Y * b.y;
+        if session.viewbob {
+            let b = session.view_model.camera_bob();
+            let right = session.camera.forward().cross(Vec3::Y).normalize_or_zero();
+            session.camera.position += right * b.x + Vec3::Y * b.y;
         }
 
         // Sprinting widens the FOV slightly (and swimming narrows it); ease toward the target.
-        let target_fov = if state.player.flying {
+        let target_fov = if session.player.flying {
             70_f32
-        } else if state.player.submerged {
+        } else if session.player.submerged {
             66.0
-        } else if state.input.sprint && (state.input.forward || state.input.back) {
+        } else if session.input.sprint && (session.input.forward || session.input.back) {
             78.0
         } else {
             70.0
         }
         .to_radians();
-        state.camera.fovy += (target_fov - state.camera.fovy) * (10.0 * dt).min(1.0);
+        session.camera.fovy += (target_fov - session.camera.fovy) * (10.0 * dt).min(1.0);
 
         // Survival: a hard fall or starvation can kill; respawn at spawn.
-        if !state.player.flying && state.player.is_dead() {
+        if !session.player.flying && session.player.is_dead() {
             log::info!("You died — respawning at spawn.");
             // Drop the whole inventory at the death site, then respawn empty.
-            let death_pos = state.player.position + Vec3::new(0.0, 1.0, 0.0);
+            let death_pos = session.player.position + Vec3::new(0.0, 1.0, 0.0);
             // One entity per stack (carries count + tool durability) — tools drop too, not vanish.
-            for stack in state.inventory.drain_all() {
-                state.game.spawn_item(death_pos, stack);
+            for stack in session.inventory.drain_all() {
+                session.game.spawn_item(death_pos, stack);
             }
-            state.player.respawn();
-            state.camera.position = state.player.eye();
+            session.player.respawn();
+            session.camera.position = session.player.eye();
         }
 
         // Stream chunks, advance fluids/entities; collect any picked-up item drops into inventory.
-        let mut collected = state.game.update(
+        let mut collected = session.game.update(
             &state.gpu,
             &state.renderer,
-            state.player.position,
+            session.player.position,
             dt,
-            state.environment.day_factor(),
+            session.environment.day_factor(),
         );
         // U11: a sculk shriek this frame pulses Darkness onto the player (render effect deferred).
-        let dark = state.game.take_pending_darkness();
+        let dark = session.game.take_pending_darkness();
         if dark > 0.0 {
-            state.player.apply_darkness(dark);
+            session.player.apply_darkness(dark);
         }
         for stack in collected.items {
-            if let Some(leftover) = state.inventory.insert(stack) {
+            if let Some(leftover) = session.inventory.insert(stack) {
                 // Inventory full — drop the remainder back so items aren't vacuum-deleted.
-                state
+                session
                     .game
-                    .spawn_item(state.player.position + Vec3::new(0.0, 1.0, 0.0), leftover);
+                    .spawn_item(session.player.position + Vec3::new(0.0, 1.0, 0.0), leftover);
             }
         }
         if collected.xp > 0 {
-            state.player.add_xp(collected.xp);
+            session.player.add_xp(collected.xp);
         }
 
         // P14 shield raise-timer: hold right-click with a SHIELD (no screen open) to raise it. Updated
         // HERE (above the damage loop) so shield_ready reflects this frame. Pre-empts eat/place below.
         // `sel_item` is computed once and reused by the bow/eat blocks (selection can't change mid-tick).
-        let sel_item = state.inventory.selected_item();
-        if state.screen == Screen::None && state.input.place_held && item::is_shield(sel_item) {
-            if state.shield_item != Some(sel_item) {
-                state.shield_item = Some(sel_item);
-                state.shield_progress = 0.0;
+        let sel_item = session.inventory.selected_item();
+        if session.screen == Screen::None && session.input.place_held && item::is_shield(sel_item) {
+            if session.shield_item != Some(sel_item) {
+                session.shield_item = Some(sel_item);
+                session.shield_progress = 0.0;
             }
-            state.shield_progress += dt;
+            session.shield_progress += dt;
         } else {
             // Released, swapped off the shield, or a screen opened → lower instantly.
-            state.shield_progress = 0.0;
-            state.shield_item = None;
+            session.shield_progress = 0.0;
+            session.shield_item = None;
         }
 
         // Combat damage from the entity tick. Each hit carries its source position; a RAISED, ready
@@ -538,58 +569,58 @@ impl App {
         // blocks the frontal source). Summed into ONE take_hit so the 0.5s i-frame applies as before
         // (a per-hit call would drop all but the first simultaneous source). Environmental damage
         // (fall/lava/drown/starve) bypasses Collected entirely, so a shield never blocks it.
-        let shield_up = state.shield_item.is_some() && state.shield_progress >= SHIELD_RAISE_DELAY;
-        let fwd = state.camera.forward();
+        let shield_up = session.shield_item.is_some() && session.shield_progress >= SHIELD_RAISE_DELAY;
+        let fwd = session.camera.forward();
         let mut incoming = 0.0;
         for (amount, src) in std::mem::take(&mut collected.player_damage) {
-            if shield_up && crate::player::shield_blocks(fwd, state.player.position, src) {
+            if shield_up && crate::player::shield_blocks(fwd, session.player.position, src) {
                 continue; // fully blocked
             }
             incoming += amount;
         }
         if incoming > 0.0 {
-            state.player.take_hit(incoming);
+            session.player.take_hit(incoming);
         }
 
         // Block targeting.
-        let eye = state.camera.position;
-        let fwd = state.camera.forward();
-        let mut target = raycast::cast(eye, fwd, REACH, |p| state.game.is_solid_at(p));
+        let eye = session.camera.position;
+        let fwd = session.camera.forward();
+        let mut target = raycast::cast(eye, fwd, REACH, |p| session.game.is_solid_at(p));
 
         // Melee: if a mob is nearer than the targeted block FACE, the left-click hits it (not the
         // block). Using the ray's face-hit distance (not the block center) means a mob standing
         // flush behind a block can't be struck through it.
         // P12 (1.9): the recharge is per-weapon (item::attack_speed). A swing always lands but is weak
         // until the meter refills — tap-spamming does ~20% damage, a charged hit does full.
-        state.melee_cd = (state.melee_cd - dt).max(0.0);
+        session.melee_cd = (session.melee_cd - dt).max(0.0);
         // Switching the held weapon resets the cooldown (vanilla gives a fresh full-power swing).
-        if state.inventory.selected != state.melee_prev_sel {
-            state.melee_prev_sel = state.inventory.selected;
-            state.melee_cd = 0.0;
+        if session.inventory.selected != session.melee_prev_sel {
+            session.melee_prev_sel = session.inventory.selected;
+            session.melee_cd = 0.0;
         }
         let block_dist = target.as_ref().map_or(REACH, |h| h.dist);
-        let mob_in_way = state.screen == Screen::None
-            && state.input.break_held
-            && state
+        let mob_in_way = session.screen == Screen::None
+            && session.input.break_held
+            && session
                 .game
                 .nearest_mob_hit(eye, fwd, REACH)
                 .is_some_and(|md| md <= block_dist);
         // A swing fires on the click EDGE (so spamming yields partial-charge hits) or as an auto-swing
         // when LMB is held and the meter is already full.
-        let pressed_now = state.input.break_held && !state.melee_was_held;
-        let auto_full = state.input.break_held && state.melee_cd <= 0.0;
+        let pressed_now = session.input.break_held && !session.melee_was_held;
+        let auto_full = session.input.break_held && session.melee_cd <= 0.0;
         if mob_in_way && (pressed_now || auto_full) {
-            let sel = state.inventory.selected_item();
+            let sel = session.inventory.selected_item();
             let cd_max = 1.0 / item::attack_speed(sel);
-            let charge = (1.0 - state.melee_cd / cd_max).clamp(0.0, 1.0);
+            let charge = (1.0 - session.melee_cd / cd_max).clamp(0.0, 1.0);
             let mut dmg = item::charged_damage(item::attack_damage(sel), charge);
             // Critical hit (+50%): a falling, non-sprinting, grounded-feet-off attack.
             let crit = crate::player::is_critical_hit(
-                state.player.on_ground,
-                state.player.velocity.y,
-                state.input.sprint,
-                state.player.submerged,
-                state.player.flying,
+                session.player.on_ground,
+                session.player.velocity.y,
+                session.input.sprint,
+                session.player.submerged,
+                session.player.flying,
             );
             if crit {
                 dmg *= 1.5;
@@ -597,40 +628,40 @@ impl App {
             // Sweep: a full-charge sword swing standing on the ground (un-enchanted sweep = 1).
             let sweep = if charge >= 0.999
                 && item::is_sword(sel)
-                && state.player.on_ground
-                && !state.input.sprint
+                && session.player.on_ground
+                && !session.input.sprint
             {
                 Some(1.0)
             } else {
                 None
             };
             // Sprint-attack: extra horizontal knockback (and it can't crit — see is_critical_hit).
-            let kb_mult = if state.input.sprint && state.player.on_ground { 1.5 } else { 1.0 };
-            state.game.attack_nearest(eye, fwd, REACH, dmg, crit, sweep, kb_mult);
-            state.melee_cd = cd_max;
-            if !state.inventory.creative {
-                state.inventory.damage_selected(1); // weapons wear from hitting
+            let kb_mult = if session.input.sprint && session.player.on_ground { 1.5 } else { 1.0 };
+            session.game.attack_nearest(eye, fwd, REACH, dmg, crit, sweep, kb_mult);
+            session.melee_cd = cd_max;
+            if !session.inventory.creative {
+                session.inventory.damage_selected(1); // weapons wear from hitting
             }
         }
         if mob_in_way {
-            state.mine_target = None;
-            state.mine_progress = 0.0;
+            session.mine_target = None;
+            session.mine_progress = 0.0;
             target = None; // swinging at a mob, not mining — no block highlight
         }
         // Edge tracker for the click-to-swing logic; MUST update every frame (not just when a mob is
         // in reach) so a fresh press is detected correctly even across screen opens / focus loss.
-        state.melee_was_held = state.input.break_held;
+        session.melee_was_held = session.input.break_held;
 
         // Mining: hold LMB to break the targeted block, timed by hardness (instant in creative).
-        if state.screen == Screen::None && state.input.break_held && !mob_in_way {
+        if session.screen == Screen::None && session.input.break_held && !mob_in_way {
             if let Some(hit) = target.as_ref().map(|h| h.block) {
-                let id = state.game.block_at(hit);
+                let id = session.game.block_at(hit);
                 if block::breakable(id) {
-                    if state.mine_target != Some(hit) {
-                        state.mine_target = Some(hit);
-                        state.mine_progress = 0.0;
+                    if session.mine_target != Some(hit) {
+                        session.mine_target = Some(hit);
+                        session.mine_progress = 0.0;
                     }
-                    let sel = state.inventory.selected_item();
+                    let sel = session.inventory.selected_item();
                     let block_tool = block::tool_class(id);
                     // A matching tool divides the break time by its tier speed.
                     let mut time = block::hardness(id);
@@ -640,16 +671,16 @@ impl App {
                     {
                         time /= item::tool_speed(item::tool_tier(sel));
                     }
-                    if state.inventory.creative {
+                    if session.inventory.creative {
                         time = 0.0;
                     }
-                    state.mine_progress += if time <= 0.0 { 1.0 } else { dt / time };
-                    if state.mine_progress >= 1.0 {
+                    session.mine_progress += if time <= 0.0 { 1.0 } else { dt / time };
+                    if session.mine_progress >= 1.0 {
                         // Capture the block state before clearing it (a double slab drops two).
-                        let bstate = state.game.block_state_at(hit).1;
+                        let bstate = session.game.block_state_at(hit).1;
                         let removed =
-                            state.game.set_block(&state.gpu, &state.renderer, hit, block::AIR);
-                        if removed && !state.inventory.creative {
+                            session.game.set_block(&state.gpu, &state.renderer, hit, block::AIR);
+                        if removed && !session.inventory.creative {
                             // Pickaxe blocks need a matching tool of sufficient harvest level to drop.
                             let harvest_ok = if block::requires_tool(id) {
                                 item::is_tool(sel)
@@ -663,166 +694,166 @@ impl App {
                                 let center = hit.as_vec3() + Vec3::splat(0.5);
                                 if let Some((drop_item, count)) = block::drops(id, bstate) {
                                     let stack = item::ItemStack::new(drop_item, count);
-                                    state.game.spawn_item(center, stack);
+                                    session.game.spawn_item(center, stack);
                                 }
                                 // Some ores release experience orbs when mined.
-                                state.game.spawn_xp(center, block::mining_xp(id));
+                                session.game.spawn_xp(center, block::mining_xp(id));
                             }
-                            state.inventory.damage_selected(1);
+                            session.inventory.damage_selected(1);
                         }
-                        state.mine_target = None;
-                        state.mine_progress = 0.0;
+                        session.mine_target = None;
+                        session.mine_progress = 0.0;
                         target = None; // don't flash a highlight on the now-air block this frame
                     }
                 } else {
-                    state.mine_target = None;
+                    session.mine_target = None;
                 }
             } else {
-                state.mine_target = None;
+                session.mine_target = None;
             }
         } else {
-            state.mine_target = None;
-            state.mine_progress = 0.0;
+            session.mine_target = None;
+            session.mine_progress = 0.0;
         }
 
         // Bow (P13): hold right-click with a bow + ammo to DRAW (charge over BOW_DRAW_TIME); release
         // looses a gravity-arced arrow whose speed/damage scale with the draw. This pre-empts eating
         // and block placement. Combined into one block so the RELEASE (place_held just went false) is
         // detected and fires BEFORE the draw state is reset.
-        let have_ammo = state.inventory.creative || state.inventory.has_item(item::ARROW);
-        let bow_drawing = state.screen == Screen::None
-            && state.input.place_held
+        let have_ammo = session.inventory.creative || session.inventory.has_item(item::ARROW);
+        let bow_drawing = session.screen == Screen::None
+            && session.input.place_held
             && item::is_bow(sel_item)
             && have_ammo;
-        if state.draw_item.is_some() && !bow_drawing {
+        if session.draw_item.is_some() && !bow_drawing {
             // We were drawing and now aren't: fire on a genuine in-world release past the min draw;
             // a screen-open or weapon-swap cancels (those leave place_held/screen != the fire case).
-            if state.screen == Screen::None
-                && !state.input.place_held
-                && state.draw_progress >= item::BOW_MIN_DRAW
+            if session.screen == Screen::None
+                && !session.input.place_held
+                && session.draw_progress >= item::BOW_MIN_DRAW
             {
-                let (speed, damage) = item::bow_shot(state.draw_progress / item::BOW_DRAW_TIME);
-                let dir = state.camera.forward();
-                let pos = state.camera.position + dir * 1.2; // muzzle clear of the player AABB
-                state.game.spawn_player_arrow(pos, dir * speed, damage);
-                if !state.inventory.creative {
-                    state.inventory.consume_item(item::ARROW);
+                let (speed, damage) = item::bow_shot(session.draw_progress / item::BOW_DRAW_TIME);
+                let dir = session.camera.forward();
+                let pos = session.camera.position + dir * 1.2; // muzzle clear of the player AABB
+                session.game.spawn_player_arrow(pos, dir * speed, damage);
+                if !session.inventory.creative {
+                    session.inventory.consume_item(item::ARROW);
                 }
             }
-            state.draw_progress = 0.0;
-            state.draw_item = None;
+            session.draw_progress = 0.0;
+            session.draw_item = None;
         } else if bow_drawing {
-            if state.draw_item != Some(sel_item) {
-                state.draw_item = Some(sel_item);
-                state.draw_progress = 0.0;
+            if session.draw_item != Some(sel_item) {
+                session.draw_item = Some(sel_item);
+                session.draw_progress = 0.0;
             }
-            state.draw_progress = (state.draw_progress + dt).min(item::BOW_DRAW_TIME);
+            session.draw_progress = (session.draw_progress + dt).min(item::BOW_DRAW_TIME);
         }
 
         // Eating: hold right-click while a food item is selected to eat it over EAT_TIME, then
         // restore hunger/saturation and consume one. (Foods place nothing, so the place edge below
         // is a no-op for them.) Gameplay-only — suppressed while any screen is open or drawing a bow.
-        let edible = state.screen == Screen::None
-            && state.input.place_held
+        let edible = session.screen == Screen::None
+            && session.input.place_held
             && !item::is_bow(sel_item)
             && !item::is_shield(sel_item)
-            && crate::food::food(sel_item).is_some_and(|f| state.player.can_eat(f.always_edible));
+            && crate::food::food(sel_item).is_some_and(|f| session.player.can_eat(f.always_edible));
         if edible {
-            if state.eat_item != Some(sel_item) {
-                state.eat_item = Some(sel_item);
-                state.eat_progress = 0.0;
+            if session.eat_item != Some(sel_item) {
+                session.eat_item = Some(sel_item);
+                session.eat_progress = 0.0;
             }
-            state.eat_progress += dt;
-            if state.eat_progress >= EAT_TIME {
+            session.eat_progress += dt;
+            if session.eat_progress >= EAT_TIME {
                 if let Some(f) = crate::food::food(sel_item) {
-                    state.player.eat(f.hunger, f.saturation);
-                    state.inventory.consume_selected();
+                    session.player.eat(f.hunger, f.saturation);
+                    session.inventory.consume_selected();
                 }
-                state.eat_progress = 0.0;
-                state.eat_item = None;
+                session.eat_progress = 0.0;
+                session.eat_item = None;
             }
         } else {
-            state.eat_progress = 0.0;
-            state.eat_item = None;
+            session.eat_progress = 0.0;
+            session.eat_item = None;
         }
 
         // M34-VM3: a use/place click pulses one view-model swing (captured before the flag is consumed).
         // Bow/shield/food are excluded — they have their own use poses (VM4), not a swing.
-        let vm_use_click = state.input.place_pressed
-            && state.screen == Screen::None
+        let vm_use_click = session.input.place_pressed
+            && session.screen == Screen::None
             && !item::is_bow(sel_item)
             && !item::is_shield(sel_item)
             && crate::food::food(sel_item).is_none();
-        if state.input.place_pressed {
-            state.input.place_pressed = false;
-            if item::is_bow(state.inventory.selected_item()) {
+        if session.input.place_pressed {
+            session.input.place_pressed = false;
+            if item::is_bow(session.inventory.selected_item()) {
                 // A bow press only starts the draw (handled above) — never place/interact.
-            } else if item::is_shield(state.inventory.selected_item()) {
+            } else if item::is_shield(session.inventory.selected_item()) {
                 // A shield press only starts the raise (handled above) — never place/interact.
-            } else if state.game.try_feed_mob(eye, fwd, REACH, state.inventory.selected_item()) {
+            } else if session.game.try_feed_mob(eye, fwd, REACH, session.inventory.selected_item()) {
                 // P17: fed a breedable animal its food → love-mode; consume one (takes priority over
                 // placing, like melee's mob-precedence).
-                state.inventory.consume_selected();
+                session.inventory.consume_selected();
             } else if let Some(hit) = &target {
-                let targeted = state.game.block_at(hit.block);
+                let targeted = session.game.block_at(hit.block);
                 if targeted == block::WOODEN_DOOR {
                     // Right-click toggles the door open/closed — both halves together.
-                    let (_, st) = state.game.block_state_at(hit.block);
+                    let (_, st) = session.game.block_state_at(hit.block);
                     let half = block::door_half(st);
                     let (f, h, no) = (block::door_facing(st), block::door_hinge(st), !block::door_open(st));
                     let partner = if half == block::DOOR_LOWER { hit.block + IVec3::Y } else { hit.block - IVec3::Y };
                     let p_half = if half == block::DOOR_LOWER { block::DOOR_UPPER } else { block::DOOR_LOWER };
-                    state.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_DOOR, block::door_state(f, no, h, half));
-                    state.game.set_block_state(&state.gpu, &state.renderer, partner, block::WOODEN_DOOR, block::door_state(f, no, h, p_half));
+                    session.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_DOOR, block::door_state(f, no, h, half));
+                    session.game.set_block_state(&state.gpu, &state.renderer, partner, block::WOODEN_DOOR, block::door_state(f, no, h, p_half));
                 } else if targeted == block::WOODEN_TRAPDOOR {
                     // Right-click toggles the trapdoor open/closed.
-                    let (_, st) = state.game.block_state_at(hit.block);
+                    let (_, st) = session.game.block_state_at(hit.block);
                     let ns = block::trapdoor_state(block::trapdoor_facing(st), block::trapdoor_half(st), !block::trapdoor_open(st));
-                    state.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_TRAPDOOR, ns);
+                    session.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_TRAPDOOR, ns);
                 } else if targeted == block::CRAFTING_TABLE {
                     // Right-clicking a crafting table opens the 3x3 crafting screen instead.
-                    state.pending_open = Some(Screen::Crafting);
+                    session.pending_open = Some(Screen::Crafting);
                 } else if targeted == block::FURNACE {
                     // Right-clicking a furnace opens its smelting screen.
-                    state.pending_open = Some(Screen::Furnace(hit.block));
+                    session.pending_open = Some(Screen::Furnace(hit.block));
                 } else if targeted == block::CHEST {
                     // Right-clicking a chest opens its 27-slot storage screen.
-                    state.pending_open = Some(Screen::Chest(hit.block));
+                    session.pending_open = Some(Screen::Chest(hit.block));
                 } else if targeted == block::LEVER || targeted == block::BUTTON {
                     // Right-click flips a lever / presses a button. Cosmetic in P11 (it re-meshes the
                     // on/pressed state); the bit drives redstone in P31. The attach face is preserved.
-                    let (_, st) = state.game.block_state_at(hit.block);
+                    let (_, st) = session.game.block_state_at(hit.block);
                     let ns = block::attach_state(block::attach_face(st), !block::attach_on(st));
-                    state.game.set_block_state(&state.gpu, &state.renderer, hit.block, targeted, ns);
-                } else if state.inventory.selected_item() == item::BONE
-                    && state.game.bonemeal(&state.gpu, &state.renderer, hit.block)
+                    session.game.set_block_state(&state.gpu, &state.renderer, hit.block, targeted, ns);
+                } else if session.inventory.selected_item() == item::BONE
+                    && session.game.bonemeal(&state.gpu, &state.renderer, hit.block)
                 {
                     // U9: bonemeal a growable block (budding amethyst / cave vine / moss); consume one.
-                    state.inventory.consume_selected();
-                } else if state.inventory.selected_item() == item::GLOW_BERRIES
-                    && state.game.block_at(hit.block + hit.normal) == block::AIR
-                    && block::is_opaque(state.game.block_at(hit.block + hit.normal + IVec3::Y))
+                    session.inventory.consume_selected();
+                } else if session.inventory.selected_item() == item::GLOW_BERRIES
+                    && session.game.block_at(hit.block + hit.normal) == block::AIR
+                    && block::is_opaque(session.game.block_at(hit.block + hit.normal + IVec3::Y))
                 {
                     // U9: place glow berries hanging under a block (a berried cave-vine tip).
                     let place = hit.block + hit.normal;
-                    state.game.set_block(&state.gpu, &state.renderer, place, block::CAVE_VINE_BERRIES);
-                    state.inventory.consume_selected();
+                    session.game.set_block(&state.gpu, &state.renderer, place, block::CAVE_VINE_BERRIES);
+                    session.inventory.consume_selected();
                 } else {
-                    let id = state.inventory.selected_block();
+                    let id = session.inventory.selected_block();
                     if id == block::WOODEN_DOOR {
                         // 2-tall door: needs a solid block below + air in both cells. Facing from the
                         // camera; hinge defaults left (double-door auto-pairing deferred).
                         let lower = hit.block + hit.normal;
                         let upper = lower + IVec3::Y;
-                        let support = block::is_solid(state.game.block_at(lower - IVec3::Y));
+                        let support = block::is_solid(session.game.block_at(lower - IVec3::Y));
                         // Both cells must be empty AND not overlap the player — a closed door is solid,
                         // so without this you could seal a door panel inside yourself (aim at your feet).
-                        let space = state.game.block_at(lower) == block::AIR
-                            && state.game.block_at(upper) == block::AIR
-                            && !state.player.intersects_block(lower)
-                            && !state.player.intersects_block(upper);
+                        let space = session.game.block_at(lower) == block::AIR
+                            && session.game.block_at(upper) == block::AIR
+                            && !session.player.intersects_block(lower)
+                            && !session.player.intersects_block(upper);
                         if support && space {
-                            let f = state.camera.forward();
+                            let f = session.camera.forward();
                             let facing = if f.x.abs() > f.z.abs() {
                                 if f.x > 0.0 { 1 } else { 3 }
                             } else if f.z > 0.0 {
@@ -830,9 +861,9 @@ impl App {
                             } else {
                                 2
                             };
-                            state.game.set_block_state(&state.gpu, &state.renderer, lower, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_LOWER));
-                            state.game.set_block_state(&state.gpu, &state.renderer, upper, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_UPPER));
-                            state.inventory.consume_selected();
+                            session.game.set_block_state(&state.gpu, &state.renderer, lower, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_LOWER));
+                            session.game.set_block_state(&state.gpu, &state.renderer, upper, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_UPPER));
+                            session.inventory.consume_selected();
                         }
                     } else if id == block::WOODEN_TRAPDOOR {
                         let place = hit.block + hit.normal;
@@ -846,7 +877,7 @@ impl App {
                         } else {
                             0
                         };
-                        let f = state.camera.forward();
+                        let f = session.camera.forward();
                         let facing = if f.x.abs() > f.z.abs() {
                             if f.x > 0.0 { 1 } else { 3 }
                         } else if f.z > 0.0 {
@@ -856,9 +887,9 @@ impl App {
                         };
                         // A closed trapdoor is solid — don't seal it inside the player (matches the
                         // generic placement guard).
-                        if !state.player.intersects_block(place)
-                            && state.game.set_block_state(&state.gpu, &state.renderer, place, block::WOODEN_TRAPDOOR, block::trapdoor_state(facing, half, false)) {
-                            state.inventory.consume_selected();
+                        if !session.player.intersects_block(place)
+                            && session.game.set_block_state(&state.gpu, &state.renderer, place, block::WOODEN_TRAPDOOR, block::trapdoor_state(facing, half, false)) {
+                            session.inventory.consume_selected();
                         }
                     } else {
                     let is_slab = matches!(id, block::STONE_SLAB | block::WOOD_SLAB);
@@ -866,27 +897,27 @@ impl App {
                     // the same slab item fills it into a full (double) block — no new neighbor block.
                     // hit.normal is the face normal pointing back at the camera: +Y = clicked the top
                     // face (merges a bottom slab), -Y = clicked the bottom face (merges a top slab).
-                    let (tgt_id, tgt_state) = state.game.block_state_at(hit.block);
+                    let (tgt_id, tgt_state) = session.game.block_state_at(hit.block);
                     let merge = is_slab
                         && tgt_id == id
                         && ((block::slab_half(tgt_state) == block::SLAB_BOTTOM && hit.normal.y == 1)
                             || (block::slab_half(tgt_state) == block::SLAB_TOP && hit.normal.y == -1));
                     if merge {
-                        if state.game.set_block_state(
+                        if session.game.set_block_state(
                             &state.gpu,
                             &state.renderer,
                             hit.block,
                             id,
                             block::slab_state(block::SLAB_DOUBLE),
                         ) {
-                            state.inventory.consume_selected();
+                            session.inventory.consume_selected();
                         }
                     } else {
                         let place = hit.block + hit.normal;
                         // Orientation/half state for the placed block.
                         let place_state = if id == block::STONE_STAIRS {
                             // Stairs orient by where the player faces (the high step rises away).
-                            let f = state.camera.forward();
+                            let f = session.camera.forward();
                             let facing = if f.x.abs() > f.z.abs() {
                                 if f.x > 0.0 { 1 } else { 3 }
                             } else if f.z > 0.0 {
@@ -944,14 +975,14 @@ impl App {
                         // placement for overlapping the player even though is_solid (targetable) is true.
                         let blocks_player = block::is_solid(id)
                             && !block::is_attach(id)
-                            && state.player.intersects_block(place);
+                            && session.player.intersects_block(place);
                         // Torches/levers/buttons can't mount on a ceiling (no ATTACH_CEILING variant) —
                         // reject an underside (bottom-face) click instead of spawning a floating fixture.
                         let attach_invalid = block::is_attach(id) && hit.normal.y == -1;
                         if id != block::AIR
                             && !blocks_player
                             && !attach_invalid
-                            && state.game.set_block_state(
+                            && session.game.set_block_state(
                                 &state.gpu,
                                 &state.renderer,
                                 place,
@@ -959,10 +990,10 @@ impl App {
                                 place_state,
                             )
                         {
-                            state.inventory.consume_selected();
+                            session.inventory.consume_selected();
                             if block::is_fluid(id) {
                                 // Placed water/lava becomes a flowing source.
-                                state.game.add_fluid_source(place, id);
+                                session.game.add_fluid_source(place, id);
                             }
                         }
                     }
@@ -972,11 +1003,11 @@ impl App {
         }
 
         // Q: drop one of the selected item ahead of the camera.
-        if state.input.drop_pressed {
-            state.input.drop_pressed = false;
-            if let Some(dropped) = state.inventory.drop_one_selected() {
-                let pos = state.camera.position + state.camera.forward() * 1.2;
-                state.game.spawn_item(pos, dropped);
+        if session.input.drop_pressed {
+            session.input.drop_pressed = false;
+            if let Some(dropped) = session.inventory.drop_one_selected() {
+                let pos = session.camera.position + session.camera.forward() * 1.2;
+                session.game.spawn_item(pos, dropped);
             }
         }
 
@@ -988,31 +1019,31 @@ impl App {
             .ok()
             .and_then(|s| s.parse().ok());
         if fg_test.is_some() {
-            state.camera.yaw += 0.012;
+            session.camera.yaw += 0.012;
         }
         let aspect = state.gpu.aspect();
-        state.camera_uniform.update(&state.camera, aspect);
-        state
+        session.camera_uniform.update(&session.camera, aspect);
+        session
             .camera_uniform
-            .set_environment(&state.environment, FOG_START, FOG_END);
-        state.camera_uniform.set_time(state.elapsed, state.environment.time);
+            .set_environment(&session.environment, FOG_START, FOG_END);
+        session.camera_uniform.set_time(session.elapsed, session.environment.time);
         // M33-G8: jitter the projection to match the jitter handed to NGX (DLSS temporal sampling).
         if let Some(dr) = &state.dlss_render {
             let (rw, rh) = dr.render_dims();
-            state.camera_uniform.apply_jitter(dr.jitter(), rw, rh);
+            session.camera_uniform.apply_jitter(dr.jitter(), rw, rh);
         }
-        state.renderer.update_camera(&state.gpu, &state.camera_uniform);
-        state.renderer.set_sky(state.environment.wgpu_clear());
+        state.renderer.update_camera(&state.gpu, &session.camera_uniform);
+        state.renderer.set_sky(session.environment.wgpu_clear());
 
-        let frustum = Frustum::from_view_proj(state.camera.view_proj(aspect));
-        let entity_mesh = state.game.build_entity_mesh(&state.gpu, &state.renderer);
-        let mut visible = state.game.visible_meshes(&frustum);
+        let frustum = Frustum::from_view_proj(session.camera.view_proj(aspect));
+        let entity_mesh = session.game.build_entity_mesh(&state.gpu, &state.renderer);
+        let mut visible = session.game.visible_meshes(&frustum);
         if let Some(em) = &entity_mesh {
             visible.push(em);
         }
         let highlight = target.as_ref().map(|h| {
-            let prog = if state.mine_target == Some(h.block) {
-                state.mine_progress
+            let prog = if session.mine_target == Some(h.block) {
+                session.mine_progress
             } else {
                 0.0
             };
@@ -1024,72 +1055,72 @@ impl App {
         } else {
             state.fps_smooth * 0.92 + inst_fps * 0.08
         };
-        let debug_lines = if state.debug_f3 {
-            let p = state.player.position;
+        let debug_lines = if session.debug_f3 {
+            let p = session.player.position;
             Some(build_debug_lines(
                 state.fps_smooth,
                 p,
-                state.camera.forward(),
-                state.camera.yaw,
-                state.camera.pitch,
-                state.game.biome_name_at(p.x.floor() as i32, p.z.floor() as i32),
-                state.game.loaded_chunk_count(),
-                state.game.mesh_count(),
-                state.game.entity_count(),
-                state.player.flying,
-                state.game.rtx_mode_name(),
-                state.difficulty.name(),
+                session.camera.forward(),
+                session.camera.yaw,
+                session.camera.pitch,
+                session.game.biome_name_at(p.x.floor() as i32, p.z.floor() as i32),
+                session.game.loaded_chunk_count(),
+                session.game.mesh_count(),
+                session.game.entity_count(),
+                session.player.flying,
+                session.game.rtx_mode_name(),
+                session.difficulty.name(),
             ))
         } else {
             None
         };
         let attack_charge = {
-            let cd_max = 1.0 / item::attack_speed(state.inventory.selected_item());
+            let cd_max = 1.0 / item::attack_speed(session.inventory.selected_item());
             if cd_max > 0.0 {
-                (1.0 - state.melee_cd / cd_max).clamp(0.0, 1.0)
+                (1.0 - session.melee_cd / cd_max).clamp(0.0, 1.0)
             } else {
                 1.0
             }
         };
-        let draw_charge = if item::is_bow(state.inventory.selected_item()) {
-            (state.draw_progress / item::BOW_DRAW_TIME).clamp(0.0, 1.0)
+        let draw_charge = if item::is_bow(session.inventory.selected_item()) {
+            (session.draw_progress / item::BOW_DRAW_TIME).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let shield_charge = if state.shield_item.is_some() {
-            (state.shield_progress / SHIELD_RAISE_DELAY).clamp(0.0, 1.0)
+        let shield_charge = if session.shield_item.is_some() {
+            (session.shield_progress / SHIELD_RAISE_DELAY).clamp(0.0, 1.0)
         } else {
             0.0
         };
         let mut ui = overlay::build_ui(
             state.gpu.config.width,
             state.gpu.config.height,
-            &state.inventory,
-            state.player.health,
-            state.player.hunger,
-            !state.player.flying,
-            state.inventory.equipped_armor(),
-            state.player.air_fraction(),
-            state.player.submerged,
-            state.player.level,
-            state.player.xp_fraction(),
+            &session.inventory,
+            session.player.health,
+            session.player.hunger,
+            !session.player.flying,
+            session.inventory.equipped_armor(),
+            session.player.air_fraction(),
+            session.player.submerged,
+            session.player.level,
+            session.player.xp_fraction(),
             attack_charge,
             draw_charge,
             shield_charge,
             {
                 // F3: a pulsing Darkness dim while the Warden's effect is on the player (eases out
                 // over the final second; throbs like Minecraft's Darkness).
-                let d = state.player.darkness;
+                let d = session.player.darkness;
                 if d > 0.0 {
-                    d.min(1.0) * (0.45 + 0.4 * (0.5 - 0.5 * (state.elapsed * 3.5).cos()))
+                    d.min(1.0) * (0.45 + 0.4 * (0.5 - 0.5 * (session.elapsed * 3.5).cos()))
                 } else {
                     0.0
                 }
             },
             debug_lines.as_deref(),
         );
-        if let Screen::Chest(pos) = state.screen {
-            let slots = state
+        if let Screen::Chest(pos) = session.screen {
+            let slots = session
                 .game
                 .chest(pos)
                 .map(|c| c.slots.clone())
@@ -1097,42 +1128,42 @@ impl App {
             ui.extend(overlay::build_chest_screen(
                 state.gpu.config.width,
                 state.gpu.config.height,
-                &state.inventory,
+                &session.inventory,
                 &slots,
-                state.cursor,
+                session.cursor,
             ));
-        } else if let Screen::Furnace(pos) = state.screen {
-            let f = state.game.furnace(pos);
+        } else if let Screen::Furnace(pos) = session.screen {
+            let f = session.game.furnace(pos);
             let burn_frac = f.map_or(0.0, |f| if f.burn_max > 0.0 { f.burn_remaining / f.burn_max } else { 0.0 });
             let cook_frac = f.map_or(0.0, |f| f.cook_progress / smelting::SMELT_TIME);
             ui.extend(overlay::build_furnace_screen(
                 state.gpu.config.width,
                 state.gpu.config.height,
-                &state.inventory,
+                &session.inventory,
                 f.and_then(|f| f.input),
                 f.and_then(|f| f.fuel),
                 f.and_then(|f| f.output),
                 burn_frac,
                 cook_frac,
-                state.cursor,
+                session.cursor,
             ));
-        } else if state.screen != Screen::None {
+        } else if session.screen != Screen::None {
             // F1: in the creative inventory screen, show the paged block/tool palette instead of craft.
-            let palette = (state.screen == Screen::Inventory && state.inventory.creative)
-                .then_some((state.creative_palette.as_slice(), state.creative_page));
+            let palette = (session.screen == Screen::Inventory && session.inventory.creative)
+                .then_some((session.creative_palette.as_slice(), session.creative_page));
             ui.extend(overlay::build_inventory_screen(
                 state.gpu.config.width,
                 state.gpu.config.height,
-                &state.inventory,
-                &state.craft,
-                state.screen.craft_size(),
-                state.cursor,
+                &session.inventory,
+                &session.craft,
+                session.screen.craft_size(),
+                session.cursor,
                 palette,
             ));
         }
-        let volume_bg = state.game.volume_bind_group();
+        let volume_bg = session.game.volume_bind_group();
         let as_bg = if state.renderer.use_hw_rt() {
-            let all = state.game.all_meshes();
+            let all = session.game.all_meshes();
             state
                 .rt_scene
                 .rebuild(&state.gpu, &all)
@@ -1142,27 +1173,27 @@ impl App {
         };
         // M34-VM3/VM4: advance the view-model — swing while mining/attacking/using, plus the active
         // eat/draw/shield use pose from the existing action timers.
-        let swing_loop = state.input.break_held && (state.mine_target.is_some() || mob_in_way);
+        let swing_loop = session.input.break_held && (session.mine_target.is_some() || mob_in_way);
         let use_pose = crate::viewmodel::UsePose {
-            eat: (state.eat_progress / EAT_TIME).clamp(0.0, 1.0),
-            draw: if item::is_bow(state.inventory.selected_item()) {
-                (state.draw_progress / item::BOW_DRAW_TIME).clamp(0.0, 1.0)
+            eat: (session.eat_progress / EAT_TIME).clamp(0.0, 1.0),
+            draw: if item::is_bow(session.inventory.selected_item()) {
+                (session.draw_progress / item::BOW_DRAW_TIME).clamp(0.0, 1.0)
             } else {
                 0.0
             },
-            shield: if state.shield_item.is_some() {
-                (state.shield_progress / SHIELD_RAISE_DELAY).clamp(0.0, 1.0)
+            shield: if session.shield_item.is_some() {
+                (session.shield_progress / SHIELD_RAISE_DELAY).clamp(0.0, 1.0)
             } else {
                 0.0
             },
         };
         let horiz_speed =
-            Vec3::new(state.player.velocity.x, 0.0, state.player.velocity.z).length();
-        state.view_model.update(
+            Vec3::new(session.player.velocity.x, 0.0, session.player.velocity.z).length();
+        session.view_model.update(
             dt,
-            state.inventory.selected_item(),
+            session.inventory.selected_item(),
             horiz_speed,
-            state.player.on_ground,
+            session.player.on_ground,
             yaw_d,
             pitch_d,
             vm_use_click,
@@ -1171,13 +1202,13 @@ impl App {
         );
         // M34-VM: build the first-person held-item geometry (view space) + its projection/brightness
         // uniform. Brightness samples the local block light so the item dims in caves.
-        let vm_light = state.game.held_item_light(
-            state.camera.position.floor().as_ivec3(),
-            state.environment.day_factor(),
+        let vm_light = session.game.held_item_light(
+            session.camera.position.floor().as_ivec3(),
+            session.environment.day_factor(),
         );
-        let vm_geom = state
+        let vm_geom = session
             .view_model
-            .build_geometry(state.inventory.selected_item(), vm_light);
+            .build_geometry(session.inventory.selected_item(), vm_light);
         let vm_part = vm_geom
             .as_ref()
             .and_then(|g| state.renderer.upload_viewmodel(&state.gpu.device, g));
@@ -1228,11 +1259,11 @@ impl App {
             log::info!(
                 "{:.0} fps | {} chunks | {} meshes | {} drawn | {} entities | {}",
                 state.fps_frames as f32 / state.fps_accum,
-                state.game.loaded_chunk_count(),
-                state.game.mesh_count(),
+                session.game.loaded_chunk_count(),
+                session.game.mesh_count(),
                 visible.len(),
-                state.game.entity_count(),
-                if state.player.flying { "fly" } else { "walk" }
+                session.game.entity_count(),
+                if session.player.flying { "fly" } else { "walk" }
             );
             state.fps_accum = 0.0;
             state.fps_frames = 0;
@@ -1240,9 +1271,9 @@ impl App {
     }
 }
 
-fn maybe_select(state: &mut State, pressed: bool, index: usize) {
+fn maybe_select(session: &mut Session, pressed: bool, index: usize) {
     if pressed {
-        state.inventory.select(index);
+        session.inventory.select(index);
     }
 }
 
@@ -1256,12 +1287,12 @@ fn drop_leftover(inventory: &mut Inventory, game: &mut Game, player_pos: Vec3) {
 
 /// Click the craft output: if the grid matches a recipe and the held stack can take the result,
 /// consume one of each ingredient and add the output to the cursor.
-fn craft_take_output(state: &mut State) {
-    let ids: [u16; 9] = std::array::from_fn(|i| state.craft[i].map(|s| s.item).unwrap_or(0));
+fn craft_take_output(session: &mut Session) {
+    let ids: [u16; 9] = std::array::from_fn(|i| session.craft[i].map(|s| s.item).unwrap_or(0));
     let Some((out_item, out_count)) = crafting::match_grid(&ids) else {
         return;
     };
-    let held_ok = match state.inventory.held {
+    let held_ok = match session.inventory.held {
         None => true,
         Some(h) => {
             h.item == out_item
@@ -1272,7 +1303,7 @@ fn craft_take_output(state: &mut State) {
     if !held_ok {
         return;
     }
-    for cell in state.craft.iter_mut() {
+    for cell in session.craft.iter_mut() {
         if let Some(s) = cell {
             s.count -= 1;
             if s.count == 0 {
@@ -1280,7 +1311,7 @@ fn craft_take_output(state: &mut State) {
             }
         }
     }
-    state.inventory.held = Some(match state.inventory.held {
+    session.inventory.held = Some(match session.inventory.held {
         Some(mut h) => {
             h.count += out_count;
             h
@@ -1383,12 +1414,12 @@ pub fn persist_selftest() {
 }
 
 /// On screen close, return any items left in the craft grid to the inventory (or drop them).
-fn return_craft_to_inventory(state: &mut State) {
-    let pos = state.player.position + Vec3::new(0.0, 1.0, 0.0);
-    for cell in state.craft.iter_mut() {
+fn return_craft_to_inventory(session: &mut Session) {
+    let pos = session.player.position + Vec3::new(0.0, 1.0, 0.0);
+    for cell in session.craft.iter_mut() {
         if let Some(stack) = cell.take() {
-            if let Some(left) = state.inventory.insert(stack) {
-                state.game.spawn_item(pos, left);
+            if let Some(left) = session.inventory.insert(stack) {
+                session.game.spawn_item(pos, left);
             }
         }
     }
@@ -1999,14 +2030,7 @@ impl ApplicationHandler for App {
             None => renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height),
         };
         let rt_scene = RtScene::new();
-        self.state = Some(State {
-            gpu,
-            renderer,
-            targets,
-            rt_scene,
-            dlss_render,
-            dlss,
-            frame_gen,
+        let session = Session {
             game,
             camera,
             player,
@@ -2014,10 +2038,6 @@ impl ApplicationHandler for App {
             inventory,
             environment,
             camera_uniform,
-            last_frame: Instant::now(),
-            fps_accum: 0.0,
-            fps_frames: 0,
-            fps_smooth: 0.0,
             debug_f3: false,
             elapsed: 0.0,
             screen: Screen::None,
@@ -2040,6 +2060,21 @@ impl ApplicationHandler for App {
             creative_page: 0,
             view_model: crate::viewmodel::ViewModel::default(),
             viewbob: std::env::var("VOXELCRAFT_VIEWBOB").map_or(true, |v| v != "0" && v != "off"),
+        };
+        self.state = Some(State {
+            gpu,
+            renderer,
+            targets,
+            rt_scene,
+            dlss_render,
+            dlss,
+            frame_gen,
+            last_frame: Instant::now(),
+            fps_accum: 0.0,
+            fps_frames: 0,
+            fps_smooth: 0.0,
+            scene: Scene::InGame,
+            session: Some(session),
         });
         self.set_grab(true);
     }
@@ -2083,18 +2118,18 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => self.set_grab(false),
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
                 let pressed = btn_state == ElementState::Pressed;
-                let screen_open = self.state.as_ref().is_some_and(|s| s.screen != Screen::None);
+                let screen_open = self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None);
                 if pressed && screen_open {
                     self.inventory_click(button);
                 } else if pressed && !self.grabbed {
                     self.set_grab(true);
-                } else if let Some(state) = &mut self.state {
+                } else if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
                     match button {
-                        MouseButton::Left => state.input.break_held = pressed, // hold to break
+                        MouseButton::Left => session.input.break_held = pressed, // hold to break
                         MouseButton::Right => {
-                            state.input.place_held = pressed; // hold to eat / use
+                            session.input.place_held = pressed; // hold to eat / use
                             if pressed {
-                                state.input.place_pressed = true;
+                                session.input.place_pressed = true;
                             }
                         }
                         _ => {}
@@ -2102,27 +2137,27 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if let Some(state) = &mut self.state {
-                    if state.screen != Screen::None {
-                        state.cursor = (position.x as f32, position.y as f32);
+                if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+                    if session.screen != Screen::None {
+                        session.cursor = (position.x as f32, position.y as f32);
                     }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if let Some(state) = &mut self.state {
+                if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
                     let dir = match delta {
                         MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
                         MouseScrollDelta::PixelDelta(p) => -(p.y.signum() as i32),
                     };
                     if dir != 0 {
-                        if state.screen == Screen::None {
-                            state.inventory.scroll(dir);
-                        } else if state.screen == Screen::Inventory && state.inventory.creative {
+                        if session.screen == Screen::None {
+                            session.inventory.scroll(dir);
+                        } else if session.screen == Screen::Inventory && session.inventory.creative {
                             // F1: scroll pages the creative palette.
                             let pages =
-                                state.creative_palette.len().div_ceil(overlay::PAL_PER_PAGE).max(1);
-                            let p = state.creative_page as i32 + dir;
-                            state.creative_page = p.clamp(0, pages as i32 - 1) as usize;
+                                session.creative_palette.len().div_ceil(overlay::PAL_PER_PAGE).max(1);
+                            let p = session.creative_page as i32 + dir;
+                            session.creative_page = p.clamp(0, pages as i32 - 1) as usize;
                         }
                     }
                 }
@@ -2136,7 +2171,12 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.frame();
                 // Process a screen-open requested during the frame (after the state borrow ends).
-                if let Some(sc) = self.state.as_mut().and_then(|s| s.pending_open.take()) {
+                if let Some(sc) = self
+                    .state
+                    .as_mut()
+                    .and_then(|s| s.session.as_mut())
+                    .and_then(|sess| sess.pending_open.take())
+                {
                     match sc {
                         Screen::Crafting => self.open_crafting(),
                         Screen::Furnace(pos) => self.open_furnace(pos),
@@ -2152,9 +2192,9 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.grabbed {
-                if let Some(state) = &mut self.state {
-                    state.input.yaw_delta += delta.0 as f32;
-                    state.input.pitch_delta += delta.1 as f32;
+                if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+                    session.input.yaw_delta += delta.0 as f32;
+                    session.input.pitch_delta += delta.1 as f32;
                 }
             }
         }
