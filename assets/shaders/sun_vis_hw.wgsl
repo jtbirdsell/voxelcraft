@@ -45,7 +45,14 @@ fn sun_visibility(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {
     if (sun.y <= 0.02) {
         return 1.0;
     }
-    let origin = world_pos + n * 0.06 + sun * 0.02;
+    // Slope-scaled origin bias: at grazing sun angles (small dot(n,sun)) a fixed normal offset can
+    // leave the ray origin sitting on/just inside the flat voxel face (the interpolated normal at a
+    // greedy-quad edge dips off-axis), so the shadow ray self-intersects the face it left in a grid-
+    // aligned pattern -> diagonal banding ("acne"). Scaling the offset by 1/dot pushes the origin
+    // clear of the surface for grazing rays; capped at dot>=0.1 (0.6 blocks) so steep rays keep the
+    // original 0.06 and contact shadows don't peter-pan. Must stay byte-identical to the DDA copy.
+    let bias_dot = max(dot(n, sun), 0.1);
+    let origin = world_pos + n * (0.06 / bias_dot) + sun * 0.01;
     var rq: ray_query;
     // flags = 0x4 (TERMINATE_ON_FIRST_HIT): any occluder shadows; cull_mask 0xFF.
     rayQueryInitialize(&rq, rt_acc, RayDesc(0x4u, 0xFFu, 0.0, max_dist, origin, sun));

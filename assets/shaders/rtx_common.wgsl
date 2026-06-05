@@ -282,7 +282,10 @@ fn sun_visibility_dda(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 
     if (sun.y <= 0.02) {
         return 1.0;
     }
-    let origin = world_pos + n * 0.06 + sun * 0.02;
+    // Slope-scaled origin bias — byte-identical to the HW-RT copy in sun_vis_hw.wgsl (kills grazing-
+    // angle self-intersection "acne" banding; capped at dot>=0.1 so steep shadows don't peter-pan).
+    let bias_dot = max(dot(n, sun), 0.1);
+    let origin = world_pos + n * (0.06 / bias_dot) + sun * 0.01;
     // ~2 voxel boundaries per block keeps diagonal rays from clipping short of max_dist.
     let h = trace(origin, sun, max_dist, i32(max_dist * 2.0) + 4);
     return select(1.0, 0.0, h.hit);
