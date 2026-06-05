@@ -55,8 +55,218 @@ pub struct FurnaceSave {
     pub cook_item: u16,
 }
 
+/// The legacy single-world directory. Post-N4 nothing in the normal play path writes here — it is only
+/// the *source* for the one-time `migrate_legacy_world()` step (and the read-only SKIPMENU fallback).
 pub fn save_dir() -> PathBuf {
     PathBuf::from("saves").join("world")
+}
+
+/// Root holding one subdirectory per world (N4 multi-world). A sibling of the legacy `save_dir()` and
+/// of `settings.cfg` — neither of which moves.
+pub fn worlds_root() -> PathBuf {
+    PathBuf::from("saves").join("worlds")
+}
+
+/// One world as shown in the world-select screen. `dir` (the slug directory) is the **sole on-disk
+/// identity**; `name` is the human-facing display name (the `name.txt` sidecar, falling back to the dir
+/// name); `seed` comes from `level.bin`. Nothing keys load/delete off the display name.
+#[derive(Clone, Debug)]
+pub struct WorldInfo {
+    pub dir: PathBuf,
+    pub name: String,
+    pub seed: u64,
+}
+
+/// Map a display name to a filesystem-safe slug: ASCII alphanumerics and '-' are kept (case preserved),
+/// every other char becomes '_', runs of '_' collapse, the result is trimmed of '_' and capped, with a
+/// non-empty fallback. The slug is identity only; the verbatim name lives in `name.txt`.
+pub fn slugify(name: &str) -> String {
+    let mut s = String::new();
+    let mut prev_us = false;
+    for ch in name.chars() {
+        let c = if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' };
+        if c == '_' {
+            if prev_us {
+                continue;
+            }
+            prev_us = true;
+        } else {
+            prev_us = false;
+        }
+        s.push(c);
+        if s.len() >= 32 {
+            break;
+        }
+    }
+    let s = s.trim_matches('_').to_string();
+    if s.is_empty() {
+        "world".to_string()
+    } else {
+        s
+    }
+}
+
+/// The display name for a world directory: the `name.txt` sidecar (trimmed), else the directory's own
+/// name. `name.txt` is display-only and may desync from the slug — the slug stays the identity.
+fn world_name(dir: &Path) -> String {
+    if let Ok(txt) = fs::read_to_string(dir.join("name.txt")) {
+        let t = txt.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    dir.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "world".to_string())
+}
+
+/// List the worlds under `root`, most-recently-played first (by `level.bin` mtime, with a stable
+/// slug-name tiebreak so equal mtimes — 2 s on some Windows filesystems — sort deterministically). Only
+/// directories with a readable `level.bin` count; a dir missing it (a create that crashed before
+/// writing the header) is silently skipped, never listed.
+pub fn list_worlds_in(root: &Path) -> Vec<WorldInfo> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(WorldInfo, std::time::SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(level) = load_level(&dir) else {
+            continue;
+        };
+        let mtime = fs::metadata(dir.join("level.bin"))
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let name = world_name(&dir);
+        out.push((WorldInfo { dir, name, seed: level.seed }, mtime));
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.dir.cmp(&b.0.dir)));
+    out.into_iter().map(|(w, _)| w).collect()
+}
+
+/// The user-facing world list (`saves/worlds/`). Migration runs once at startup, not here.
+pub fn list_worlds() -> Vec<WorldInfo> {
+    list_worlds_in(&worlds_root())
+}
+
+/// Create a fresh world under `root`, seeding its `level.bin` then its `name.txt`. The directory is a
+/// unique slug of `name` (collisions append `-2`, `-3`, …). Creation is **exclusive** (`fs::create_dir`,
+/// never `create_dir_all`) so it can never write into an existing world's directory — which also makes
+/// it correct on case-insensitive NTFS, where "World" and an existing "world" are the same path.
+/// `level.bin` is written first so a crash can't leave a named-but-unlistable dir.
+pub fn create_world_in(root: &Path, name: &str, seed: u64) -> std::io::Result<WorldInfo> {
+    fs::create_dir_all(root)?;
+    let base = slugify(name);
+    let mut dir = None;
+    for n in 1..=9999u32 {
+        let cand = if n == 1 {
+            root.join(&base)
+        } else {
+            root.join(format!("{base}-{n}"))
+        };
+        match fs::create_dir(&cand) {
+            Ok(()) => {
+                dir = Some(cand);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    let dir = dir.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free world directory slug")
+    })?;
+    // level.bin FIRST (this commits the dir as a listable world), then the display-name sidecar.
+    let level = Level {
+        seed,
+        spawn: [8.0, 96.0, 24.0],
+        yaw: -std::f32::consts::FRAC_PI_2,
+        pitch: -0.30,
+        time: 0.34,
+        flying: true,
+        health: 20.0,
+        hunger: 20.0,
+        air: 11.0,
+        saturation: 5.0,
+        xp: 0.0,
+        level: 0,
+        difficulty: 2, // Normal
+    };
+    save_level(&dir, &level)?;
+    let display = name.trim();
+    let _ = fs::write(dir.join("name.txt"), display);
+    Ok(WorldInfo { dir, name: display.to_string(), seed })
+}
+
+/// Create a world in the standard `saves/worlds/` root.
+pub fn create_world(name: &str, seed: u64) -> std::io::Result<WorldInfo> {
+    create_world_in(&worlds_root(), name, seed)
+}
+
+/// Delete a world directory. Refuses anything that is not a **direct child** of `root`, so a malformed
+/// `dir` can never reach `remove_dir_all` on the wrong path. Component-based (not literal-PathBuf)
+/// checks, so separators / case don't produce false negatives on Windows.
+pub fn delete_world_in(root: &Path, dir: &Path) -> std::io::Result<()> {
+    let rel = dir.strip_prefix(root).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "world dir is not under the worlds root")
+    })?;
+    let mut comps = rel.components();
+    match (comps.next(), comps.next()) {
+        (Some(std::path::Component::Normal(_)), None) => fs::remove_dir_all(dir),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "world dir must be a direct child of the worlds root",
+        )),
+    }
+}
+
+/// Delete a world from the standard `saves/worlds/` root.
+pub fn delete_world(dir: &Path) -> std::io::Result<()> {
+    delete_world_in(&worlds_root(), dir)
+}
+
+/// One-time migration of the legacy single-world `saves/world/` into `saves/worlds/world/` so an
+/// existing save appears in the multi-world list. Idempotent (a no-op once the target exists) and
+/// best-effort: a failed rename leaves the legacy world exactly where it is and never crashes the
+/// caller. **Call once at startup**, never lazily from a menu / screenshot path.
+pub fn migrate_legacy_world() {
+    migrate_legacy_world_in(&save_dir(), &worlds_root());
+}
+
+fn migrate_legacy_world_in(legacy: &Path, root: &Path) {
+    // Only a *real* legacy world (one with a level.bin) migrates — never an empty leftover dir.
+    if !legacy.join("level.bin").is_file() {
+        return;
+    }
+    let target = root.join("world");
+    if target.exists() {
+        // Already migrated (or a name clash). Never auto-delete a world; just note the stale legacy copy.
+        log::warn!(
+            "legacy world {} left in place: {} already exists",
+            legacy.display(),
+            target.display()
+        );
+        return;
+    }
+    if let Err(e) = fs::create_dir_all(root) {
+        log::error!("world migration: cannot create {}: {e}", root.display());
+        return;
+    }
+    // Same-volume rename is atomic and avoids double disk use; on failure (e.g. a briefly-locked file
+    // on Windows) leave the legacy world untouched rather than risk data loss or a menu crash.
+    match fs::rename(legacy, &target) {
+        Ok(()) => {
+            let _ = fs::write(target.join("name.txt"), "World");
+            log::info!("migrated legacy world {} -> {}", legacy.display(), target.display());
+        }
+        Err(e) => log::error!(
+            "world migration rename failed ({e}); legacy world left at {}",
+            legacy.display()
+        ),
+    }
 }
 
 fn rd_u32(d: &[u8], o: usize) -> u32 {
@@ -616,6 +826,129 @@ mod tests {
         assert!(lc.blocks.iter().all(|&b| b <= crate::block::MAX_BLOCK));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn stub_level(seed: u64) -> Level {
+        Level {
+            seed,
+            spawn: [0.0, 0.0, 0.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            time: 0.0,
+            flying: false,
+            health: 20.0,
+            hunger: 20.0,
+            air: 11.0,
+            saturation: 5.0,
+            xp: 0.0,
+            level: 0,
+            difficulty: 2,
+        }
+    }
+
+    #[test]
+    fn slugify_keeps_safe_chars_and_collapses() {
+        assert_eq!(slugify("My World!"), "My_World");
+        assert_eq!(slugify("  spaces  "), "spaces");
+        assert_eq!(slugify("a///b"), "a_b"); // runs of unsafe chars collapse to one '_'
+        assert_eq!(slugify("Home-2"), "Home-2"); // '-' is kept
+        assert_eq!(slugify(""), "world"); // empty → fallback
+        assert_eq!(slugify("***"), "world"); // all-unsafe trims to empty → fallback
+        assert!(slugify(&"x".repeat(100)).len() <= 32); // capped
+    }
+
+    #[test]
+    fn create_then_list_reports_name_and_seed() {
+        let root =
+            std::env::temp_dir().join(format!("voxelcraft_wlist_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let w = create_world_in(&root, "Caves", 0x00AB_CDEF).unwrap();
+        assert!(w.dir.join("level.bin").is_file());
+        assert!(w.dir.join("name.txt").is_file());
+        let list = list_worlds_in(&root);
+        let found = list.iter().find(|x| x.dir == w.dir).expect("world listed");
+        assert_eq!(found.name, "Caves");
+        assert_eq!(found.seed, 0x00AB_CDEF);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_world_suffixes_on_exact_collision() {
+        let root =
+            std::env::temp_dir().join(format!("voxelcraft_wcoll_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let a = create_world_in(&root, "Home", 1).unwrap();
+        let b = create_world_in(&root, "Home", 2).unwrap();
+        assert_eq!(a.dir.file_name().unwrap(), "Home");
+        assert_eq!(b.dir.file_name().unwrap(), "Home-2");
+        // Neither create clobbered the other's header.
+        assert_eq!(load_level(&a.dir).unwrap().seed, 1);
+        assert_eq!(load_level(&b.dir).unwrap().seed, 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_world_never_overwrites_an_existing_world() {
+        // On NTFS "World" and "world" are the same path; on a case-sensitive FS they differ. Either way,
+        // the exclusive create must never write a stub level.bin over an already-existing world.
+        let root =
+            std::env::temp_dir().join(format!("voxelcraft_wcase_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let a = create_world_in(&root, "world", 111).unwrap();
+        let b = create_world_in(&root, "World", 222).unwrap();
+        assert_ne!(a.dir, b.dir);
+        assert_eq!(load_level(&a.dir).unwrap().seed, 111); // untouched
+        assert_eq!(load_level(&b.dir).unwrap().seed, 222);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_world_only_inside_root() {
+        let root =
+            std::env::temp_dir().join(format!("voxelcraft_wdel_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let w = create_world_in(&root, "Doomed", 5).unwrap();
+        assert!(w.dir.is_dir());
+        // Refuse a sibling outside the root.
+        let outside = root.parent().unwrap().join(format!("voxelcraft_wdel_evil_{}", std::process::id()));
+        fs::create_dir_all(&outside).unwrap();
+        assert!(delete_world_in(&root, &outside).is_err());
+        assert!(outside.is_dir(), "an outside dir must be left untouched");
+        // Refuse the root itself (zero components beyond root).
+        assert!(delete_world_in(&root, &root).is_err());
+        // The real world deletes.
+        delete_world_in(&root, &w.dir).unwrap();
+        assert!(!w.dir.exists());
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_world_migrates_once_and_is_idempotent() {
+        let base =
+            std::env::temp_dir().join(format!("voxelcraft_wmig_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let legacy = base.join("world");
+        let root = base.join("worlds");
+        fs::create_dir_all(&legacy).unwrap();
+        save_level(&legacy, &stub_level(0x1234)).unwrap();
+        fs::write(legacy.join("chunks.bin"), b"chunkdata").unwrap();
+
+        migrate_legacy_world_in(&legacy, &root);
+        let target = root.join("world");
+        assert!(!legacy.exists(), "legacy dir is renamed away");
+        assert!(target.join("level.bin").is_file());
+        assert!(target.join("chunks.bin").is_file(), "edited chunks moved with the world");
+        assert_eq!(load_level(&target).unwrap().seed, 0x1234);
+
+        // A stray legacy reappearing (e.g. a throwaway run) must NOT clobber the migrated world, and the
+        // stray is left in place (never auto-deleted).
+        fs::create_dir_all(&legacy).unwrap();
+        save_level(&legacy, &stub_level(0x9999)).unwrap();
+        migrate_legacy_world_in(&legacy, &root);
+        assert_eq!(load_level(&target).unwrap().seed, 0x1234, "migrated world unchanged");
+        assert!(legacy.exists(), "stray legacy left in place");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

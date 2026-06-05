@@ -1,6 +1,7 @@
 //! Application layer: the winit `App`/`State`, event routing, per-frame update + render, and the
 //! headless screenshot path. `main.rs` is just the module tree + the event loop entry point.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -105,9 +106,12 @@ struct State {
     /// Persisted player settings (the source of truth; env vars override at startup).
     settings: crate::settings::Settings,
     /// The worlds list shown in WorldSelect (refreshed when the screen opens).
-    worlds: Vec<crate::menu::WorldEntry>,
-    /// Selected world row in WorldSelect.
+    worlds: Vec<crate::persistence::WorldInfo>,
+    /// Selected world row in WorldSelect (cosmetic highlight only — play/delete carry their own index).
     world_sel: usize,
+    /// Row whose delete control is "armed" (showing the red "Delete?" confirm); a second click on the
+    /// same row commits the `remove_dir_all`. Any other click / scene change disarms it.
+    world_pending_delete: Option<usize>,
     /// Create-world text-field buffers (name + seed).
     create_name: String,
     create_seed: String,
@@ -118,6 +122,8 @@ struct State {
 /// Everything that exists only while a world is loaded — created on Play/Create, dropped on Quit to
 /// Menu. Accessed as `session.<field>` from the per-frame body (disjoint from `State`'s render stack).
 struct Session {
+    /// The world's on-disk directory (`saves/worlds/<slug>/`) — where this session saves.
+    world_dir: PathBuf,
     game: Game,
     camera: Camera,
     player: Player,
@@ -211,8 +217,8 @@ impl App {
             level: session.player.level,
             difficulty: session.difficulty.as_u8(),
         };
-        session.game.save(&level);
-        let dir = persistence::save_dir();
+        let dir = &session.world_dir;
+        session.game.save(dir, &level);
         // Fold any cursor-held stack back into slots so it isn't lost when saving mid-screen
         // (P / window-close don't go through close_screen's return_held path).
         let mut inv = session.inventory.clone();
@@ -220,7 +226,7 @@ impl App {
             let _ = inv.insert(h);
         }
         if let Err(e) = persistence::save_state(
-            &dir,
+            dir,
             &inv,
             &session.game.furnaces_to_save(),
             &session.game.chests_to_save(),
@@ -498,7 +504,9 @@ impl App {
         let s = &state.settings;
         Some(match &state.scene {
             Scene::MainMenu => menu::build_main(w, h, ui),
-            Scene::WorldSelect => menu::build_world_select(w, h, &state.worlds, state.world_sel, ui),
+            Scene::WorldSelect => {
+                menu::build_world_select(w, h, &state.worlds, state.world_sel, state.world_pending_delete, ui)
+            }
             Scene::CreateWorld => menu::build_create(w, h, &state.create_name, &state.create_seed, ui),
             Scene::Settings { .. } => {
                 let diff = state
@@ -559,9 +567,15 @@ impl App {
     /// The single click-dispatch point for every menu widget.
     fn activate(&mut self, id: crate::menu::WidgetId, rect: crate::menu::Rect, event_loop: &ActiveEventLoop) {
         use crate::menu::WidgetId as W;
+        // Any click that isn't on a delete control disarms a pending-delete confirm (so it never lingers).
+        if !matches!(id, W::DeleteWorld(_)) {
+            if let Some(state) = self.state.as_mut() {
+                state.world_pending_delete = None;
+            }
+        }
         match id {
             // Main menu.
-            W::Singleplayer => self.enter_world(WorldSource::Load), // N3: the single world; N4 → WorldSelect
+            W::Singleplayer => self.open_world_select(),
             W::MainSettings => self.open_settings(Scene::MainMenu),
             W::Quit => {
                 self.save_world();
@@ -589,14 +603,94 @@ impl App {
             W::RenderDistSlider => self.slider_set(id, rect, 4.0, 24.0),
             W::SupersampleSlider => self.slider_set(id, rect, 1.0, 4.0),
             W::GiRaysSlider => self.slider_set(id, rect, 1.0, 16.0),
-            // World select / create — fully wired in N4; reachable from the menu only once N4 lands.
+            // World select / create.
             W::CreateNew => self.set_scene(Scene::CreateWorld),
             W::BackFromWorlds => self.set_scene(Scene::MainMenu),
             W::CreateCancel => self.set_scene(Scene::WorldSelect),
             W::NameField => self.focus_field(W::NameField),
             W::SeedField => self.focus_field(W::SeedField),
-            W::CreateConfirm | W::WorldRow(_) | W::DeleteWorld(_) => {} // N4
+            W::WorldRow(i) => self.play_world(i),
+            W::DeleteWorld(i) => self.delete_world(i),
+            W::CreateConfirm => self.create_world(),
         }
+    }
+
+    /// Open the world-select screen, refreshing the list from disk.
+    fn open_world_select(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.worlds = persistence::list_worlds();
+            state.world_sel = 0;
+            state.world_pending_delete = None;
+        }
+        self.set_scene(Scene::WorldSelect);
+    }
+
+    /// Click a world row → load and enter that world.
+    fn play_world(&mut self, i: usize) {
+        // Clone the dir out before the &mut borrow in enter_world (the index could be stale vs a
+        // refreshed-shorter list, so the bound check is load-bearing).
+        let dir = self
+            .state
+            .as_ref()
+            .and_then(|s| s.worlds.get(i))
+            .map(|w| w.dir.clone());
+        if let Some(dir) = dir {
+            if let Some(state) = self.state.as_mut() {
+                state.world_sel = i;
+            }
+            self.enter_world(dir, WorldSource::Load);
+        }
+    }
+
+    /// Click a row's delete control: first click arms the red "Delete?" confirm; a second click on the
+    /// same row commits the irreversible `remove_dir_all`.
+    fn delete_world(&mut self, i: usize) {
+        let Some(state) = self.state.as_mut() else { return };
+        if state.worlds.get(i).is_none() {
+            return;
+        }
+        if state.world_pending_delete != Some(i) {
+            state.world_pending_delete = Some(i); // arm (or re-arm onto a different row)
+            return;
+        }
+        // Confirmed. Never delete the world backing the (frozen) active session.
+        let dir = state.worlds[i].dir.clone();
+        let is_active = state.session.as_ref().is_some_and(|se| se.world_dir == dir);
+        state.world_pending_delete = None;
+        if is_active {
+            log::warn!("refusing to delete the currently-loaded world");
+            return;
+        }
+        if let Err(e) = persistence::delete_world(&dir) {
+            log::error!("failed to delete world {}: {e}", dir.display());
+        }
+        state.worlds = persistence::list_worlds();
+        state.world_sel = state.world_sel.min(state.worlds.len().saturating_sub(1));
+    }
+
+    /// Create World confirm: build a fresh world from the name + seed fields and enter it. The seed is
+    /// parsed exactly once and threaded to both the saved header and the session, so they can't diverge.
+    fn create_world(&mut self) {
+        let (name, seed_text) = {
+            let Some(state) = self.state.as_ref() else { return };
+            (state.create_name.trim().to_string(), state.create_seed.clone())
+        };
+        let name = if name.is_empty() { "New World".to_string() } else { name };
+        let seed = parse_seed(&seed_text);
+        let info = match persistence::create_world(&name, seed) {
+            Ok(info) => info,
+            Err(e) => {
+                log::error!("failed to create world {name:?}: {e}");
+                return; // stay on the Create screen
+            }
+        };
+        if let Some(state) = self.state.as_mut() {
+            state.create_name.clear();
+            state.create_seed.clear();
+            state.menu.focused = None;
+            state.menu.caret = 0;
+        }
+        self.enter_world(info.dir, WorldSource::New { seed: info.seed });
     }
 
     /// Replace the scene and re-evaluate cursor grab.
@@ -604,6 +698,7 @@ impl App {
         if let Some(state) = self.state.as_mut() {
             state.scene = scene;
             state.menu.focused = None;
+            state.world_pending_delete = None;
         }
         self.apply_grab_for_scene();
     }
@@ -644,11 +739,11 @@ impl App {
         self.apply_grab_for_scene();
     }
 
-    /// Build the world session and enter gameplay.
-    fn enter_world(&mut self, source: WorldSource) {
+    /// Build the world session in `dir` and enter gameplay.
+    fn enter_world(&mut self, dir: PathBuf, source: WorldSource) {
         let session = {
             let Some(state) = self.state.as_ref() else { return };
-            create_session(&state.gpu, &state.renderer, &state.quality, source)
+            create_session(&state.gpu, &state.renderer, &state.quality, &dir, source)
         };
         if let Some(state) = self.state.as_mut() {
             state.session = Some(session);
@@ -778,9 +873,11 @@ impl App {
         };
         for ch in txt.chars() {
             let ok = match field {
-                // Name: filename-safe; Seed: digits/sign now, any string hashed in N4.
-                W::NameField => buf.len() < 32 && (ch.is_alphanumeric() || " -_".contains(ch)),
-                W::SeedField => buf.len() < 20 && (ch.is_ascii_digit() || ch == '-'),
+                // ASCII only — the bitmap font renders 0x20..0x80 and would drop the rest while still
+                // advancing the caret. Name: filename-ish (slugified on create); Seed: any printable
+                // (parse_seed parses an int or hashes the bytes).
+                W::NameField => buf.len() < 32 && (ch.is_ascii_alphanumeric() || " -_".contains(ch)),
+                W::SeedField => buf.len() < 32 && ch.is_ascii_graphic(),
                 _ => false,
             };
             if ok {
@@ -1642,8 +1739,35 @@ impl App {
     }
 }
 
+/// Resolve the Create-World seed field to a `u64` — called exactly once per create so the saved header
+/// and the session seed can't diverge. Order: a signed integer (handles a leading `-`), then an
+/// unsigned integer (the `> i64::MAX` range), else a **stable inline FNV-1a** hash of the bytes (chosen
+/// over a dependency hasher so a crate bump can never silently change terrain from a typed text seed).
+/// An empty field yields a clock-derived nonzero seed; overlong digit strings (`> u64::MAX`) hash.
+fn parse_seed(s: &str) -> u64 {
+    let t = s.trim();
+    if t.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        return (nanos ^ (nanos >> 32)).wrapping_add(0x9E37_79B9_7F4A_7C15) | 1; // never 0
+    }
+    if let Ok(n) = t.parse::<i64>() {
+        return n as u64;
+    }
+    if let Ok(n) = t.parse::<u64>() {
+        return n;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in t.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// What world a `Session` is created from (M35).
-#[allow(dead_code)] // `New` is wired to Create World in N4.
 enum WorldSource {
     /// Load the saved world (or a fresh default world if there's no save yet).
     Load,
@@ -1657,16 +1781,16 @@ fn create_session(
     gpu: &Gpu,
     renderer: &ChunkRenderer,
     quality: &crate::quality::Quality,
+    dir: &Path,
     source: WorldSource,
 ) -> Session {
-    let dir = persistence::save_dir();
     let default_spawn = Vec3::new(8.0, 96.0, 24.0);
     let new_seed = match source {
         WorldSource::New { seed } => Some(seed),
         WorldSource::Load => None,
     };
     // A fresh world ignores any existing save; Load reads level.bin (or a fresh default if absent).
-    let level = if new_seed.is_some() { None } else { persistence::load_level(&dir) };
+    let level = if new_seed.is_some() { None } else { persistence::load_level(dir) };
     let (seed, mut spawn, yaw, pitch, time, flying) = match (new_seed, &level) {
         (Some(seed), _) => (seed, default_spawn, -std::f32::consts::FRAC_PI_2, -0.30, 0.34, true),
         (None, Some(l)) => (l.seed, Vec3::from(l.spawn), l.yaw, l.pitch, l.time, l.flying),
@@ -1675,12 +1799,12 @@ fn create_session(
     let saved = if new_seed.is_some() {
         FxHashMap::default()
     } else {
-        persistence::load_chunks(&dir)
+        persistence::load_chunks(dir)
     };
     let (inventory, furnaces, chests) = if new_seed.is_some() {
         (Inventory::new(true), Vec::new(), Vec::new())
     } else {
-        persistence::load_state(&dir, flying)
+        persistence::load_state(dir, flying)
     };
     let mut game = Game::new(gpu, renderer.volume_bgl(), seed, quality, saved);
     game.restore_furnaces(furnaces);
@@ -1731,6 +1855,7 @@ fn create_session(
     renderer.update_camera(gpu, &camera_uniform);
     renderer.set_sky(environment.wgpu_clear());
     Session {
+        world_dir: dir.to_path_buf(),
         game,
         camera,
         player,
@@ -1997,12 +2122,13 @@ impl ApplicationHandler for App {
             let (w, h) = (gpu.config.width as f32, gpu.config.height as f32);
             let ui = crate::menu::UiState { cursor: (-1.0, -1.0), ..Default::default() };
             let settings = crate::settings::Settings::default();
+            // Inline dummies (no disk I/O / no list_worlds → no migration side-effect during a screenshot).
             let worlds = vec![
-                crate::menu::WorldEntry { name: "My World".into(), seed: SEED },
-                crate::menu::WorldEntry { name: "Flatlands".into(), seed: 42 },
+                crate::persistence::WorldInfo { dir: "saves/worlds/demo".into(), name: "My World".into(), seed: SEED },
+                crate::persistence::WorldInfo { dir: "saves/worlds/flat".into(), name: "Flatlands".into(), seed: 42 },
             ];
             let (verts, _rects) = match which.as_str() {
-                "worlds" => crate::menu::build_world_select(w, h, &worlds, 0, &ui),
+                "worlds" => crate::menu::build_world_select(w, h, &worlds, 0, None, &ui),
                 "create" => crate::menu::build_create(w, h, "New World", "", &ui),
                 "settings" => crate::menu::build_settings(
                     w,
@@ -2526,9 +2652,20 @@ impl ApplicationHandler for App {
             None => renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height),
         };
         let rt_scene = RtScene::new();
+        // N4: one-time migration of the legacy single world into saves/worlds/ — done here (interactive
+        // entry only; the headless SHOT/BENCH/MENU paths returned above, so screenshots never trigger it).
+        persistence::migrate_legacy_world();
         let skip_menu = std::env::var("VOXELCRAFT_SKIPMENU").is_ok();
         let (scene, session) = if skip_menu {
-            (Scene::InGame, Some(create_session(&gpu, &renderer, &quality, WorldSource::Load)))
+            // Read-only resolution: load the most-recently-played world if any, else fall back to the
+            // legacy save_dir() WITHOUT creating one (create_session tolerates an absent level.bin →
+            // fresh default world). create_world only ever runs on an explicit user Create.
+            let dir = persistence::list_worlds()
+                .into_iter()
+                .next()
+                .map(|w| w.dir)
+                .unwrap_or_else(persistence::save_dir);
+            (Scene::InGame, Some(create_session(&gpu, &renderer, &quality, &dir, WorldSource::Load)))
         } else {
             (Scene::MainMenu, None)
         };
@@ -2552,6 +2689,7 @@ impl ApplicationHandler for App {
             settings: crate::settings::Settings::load(),
             worlds: Vec::new(),
             world_sel: 0,
+            world_pending_delete: None,
             create_name: String::new(),
             create_seed: String::new(),
             settings_tab: crate::menu::SettingsTab::General,
@@ -2724,5 +2862,28 @@ impl ApplicationHandler for App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_seed;
+
+    #[test]
+    fn parse_seed_numbers_then_hash() {
+        // Plain numbers map to themselves (Minecraft expectation).
+        assert_eq!(parse_seed("123"), 123);
+        assert_eq!(parse_seed(" 42 "), 42); // trimmed
+        assert_eq!(parse_seed("0"), 0); // '0' is a valid seed, not special-cased
+        // Signed wraps via `as u64`; the full u64 range parses too.
+        assert_eq!(parse_seed("-1"), u64::MAX);
+        assert_eq!(parse_seed("18446744073709551615"), u64::MAX);
+        // Overlong digit strings (> u64::MAX) fall through to the hash (deterministic, not the digits).
+        assert_eq!(parse_seed("99999999999999999999"), parse_seed("99999999999999999999"));
+        // Text hashes stably and is order-sensitive.
+        assert_eq!(parse_seed("hello"), parse_seed("hello"));
+        assert_ne!(parse_seed("hello"), parse_seed("olleh"));
+        // Empty → clock-derived, but never 0.
+        assert_ne!(parse_seed(""), 0);
     }
 }

@@ -30,19 +30,26 @@ compiles faster but runs the worldgen/mesher unoptimized, so use `--release` to 
 cargo test --release   # worldgen determinism, physics, inventory + save round-trips
 ```
 
-Launching drops you at the **main menu** — *Singleplayer* (loads/creates the world), *Settings*, *Quit*.
+Launching drops you at the **main menu** — *Singleplayer*, *Settings*, *Quit*. *Singleplayer* opens the
+**world-select** screen listing every saved world (name + seed, most-recently-played first); click a
+world to play it, the row's **X** to delete it (a second click on the red **Delete?** confirms — no
+one-misclick world loss), or **Create New World** to make one. The create screen takes a **name** and an
+optional **seed** (a number is used as-is; any other text is hashed; blank = random). Each world lives in
+its own `saves/worlds/<name>/` directory and saves there on quit / *Save & Quit*. A pre-N4 single world
+at `saves/world/` is migrated into the list automatically on first launch.
+
 In-game, **Esc** opens the **pause menu** (Resume / Settings / Save & Quit to Menu) and frees the cursor.
-`VOXELCRAFT_SKIPMENU=1` boots straight into the world (the pre-menu behaviour, for scripts/screenshots).
-The world auto-saves to `saves/world/` on quit and on *Save & Quit*.
+`VOXELCRAFT_SKIPMENU=1` boots straight into the most-recently-played world (the pre-menu behaviour, for
+scripts/screenshots).
 
 ### Settings
 
 A live **General** tab (FOV, mouse sensitivity, render distance, view-bob, difficulty) and a
 **Graphics** tab (DLSS mode/quality, supersampling, GI mode/rays, tracer, backend, frame generation —
 each tagged *(restart)* since they're baked at device/pipeline creation). Persisted to
-`saves/settings.cfg` as plain `key=value` text; the `VOXELCRAFT_*` env vars still override at startup.
-*(N3 wires the menu flow + persistence; the General-tab live-apply and the Graphics-tab restart hooks
-land in N5.)*
+`saves/settings.cfg` as plain `key=value` text (a sibling of the per-world dirs, world-independent); the
+`VOXELCRAFT_*` env vars still override at startup. *(The General-tab live-apply and the Graphics-tab
+restart hooks land in N5.)*
 
 ## GPU backend
 

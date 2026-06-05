@@ -2032,15 +2032,14 @@ impl Game {
         self.volume.set_water_smooth(r);
     }
 
-    /// Write the edited chunks and the level header to disk.
-    pub fn save(&self, level: &Level) {
-        let dir = persistence::save_dir();
+    /// Write the edited chunks and the level header to the given world directory.
+    pub fn save(&self, dir: &std::path::Path, level: &Level) {
         let chunks: Vec<(IVec3, &Chunk)> =
             self.saved.iter().map(|(p, c)| (*p, c.as_ref())).collect();
-        if let Err(e) = persistence::save_chunks(&dir, &chunks) {
+        if let Err(e) = persistence::save_chunks(dir, &chunks) {
             log::error!("failed to save chunks: {e}");
         }
-        if let Err(e) = persistence::save_level(&dir, level) {
+        if let Err(e) = persistence::save_level(dir, level) {
             log::error!("failed to save level: {e}");
         }
     }

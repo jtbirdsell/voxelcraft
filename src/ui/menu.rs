@@ -74,11 +74,7 @@ pub enum SettingsTab {
     Graphics,
 }
 
-/// A world row for the select screen (fed from `persistence::WorldInfo` in N4).
-pub struct WorldEntry {
-    pub name: String,
-    pub seed: u64,
-}
+pub use crate::persistence::WorldInfo;
 
 /// Transient interaction state owned by `App` (not by the pure builders): the pointer, the hovered
 /// widget (recomputed each frame from the rect list), and the focused text field + caret.
@@ -105,6 +101,8 @@ const ON: [f32; 4] = [0.27, 0.62, 0.40, 1.0];
 const OFF: [f32; 4] = [0.42, 0.30, 0.32, 1.0];
 const FIELD: [f32; 4] = [0.09, 0.10, 0.13, 1.0];
 const FIELD_FOCUS: [f32; 4] = [0.36, 0.52, 0.85, 1.0];
+const CONFIRM: [f32; 4] = [0.62, 0.22, 0.24, 1.0]; // armed-delete "Delete?" button
+const CONFIRM_HOVER: [f32; 4] = [0.74, 0.28, 0.30, 1.0];
 
 const BTN_W: f32 = 360.0;
 const ROW_H: f32 = 46.0;
@@ -278,7 +276,16 @@ pub fn build_pause(sw: f32, sh: f32, ui: &UiState) -> Built {
     (v, rects)
 }
 
-pub fn build_world_select(sw: f32, sh: f32, worlds: &[WorldEntry], selected: usize, ui: &UiState) -> Built {
+/// `pending_delete` arms one row's delete control into a red "Delete?" confirm (a second click on the
+/// same row commits) — the two-step guard against a one-misclick `remove_dir_all`.
+pub fn build_world_select(
+    sw: f32,
+    sh: f32,
+    worlds: &[WorldInfo],
+    selected: usize,
+    pending_delete: Option<usize>,
+    ui: &UiState,
+) -> Built {
     let (mut v, mut rects) = (Vec::new(), Vec::new());
     backdrop(&mut v, sw, sh);
     title(&mut v, sw, sh, sh * 0.10, 4.0, "Select World");
@@ -287,15 +294,30 @@ pub fn build_world_select(sw: f32, sh: f32, worlds: &[WorldEntry], selected: usi
     let max_rows = 6;
     for (i, w) in worlds.iter().take(max_rows).enumerate() {
         let r = col.row(i);
+        let armed = pending_delete == Some(i);
+        let del_hover = ui.hovered == Some(WidgetId::DeleteWorld(i));
+        // The delete control sits inside the full-width row rect; size it wider when armed for "Delete?".
+        let del = if armed {
+            Rect { x: r.x + r.w - 8.0 - 120.0, y: r.y + 8.0, w: 120.0, h: r.h - 16.0 }
+        } else {
+            Rect { x: r.x + r.w - 44.0, y: r.y + 8.0, w: 36.0, h: r.h - 16.0 }
+        };
+        // Row button (drawn first, visually behind the delete control).
         let hovered = ui.hovered == Some(WidgetId::WorldRow(i));
         button(&mut v, sw, sh, r, "", hovered, i == selected);
         label_left(&mut v, sw, sh, r.x + 16.0, r.y + r.h * 0.36, 1.8, &w.name, TEXT);
         label_left(&mut v, sw, sh, r.x + 16.0, r.y + r.h * 0.72, 1.2, &format!("Seed: {}", w.seed), DIM);
-        rects.push((WidgetId::WorldRow(i), r));
-        // A delete button on the right edge of the row.
-        let del = Rect { x: r.x + r.w - 44.0, y: r.y + 8.0, w: 36.0, h: r.h - 16.0 };
-        button(&mut v, sw, sh, del, "X", ui.hovered == Some(WidgetId::DeleteWorld(i)), false);
+        // Delete control drawn on top.
+        if armed {
+            push_px_rect(&mut v, sw, sh, del.x, del.y, del.w, del.h, if del_hover { CONFIRM_HOVER } else { CONFIRM });
+            label_centered(&mut v, sw, sh, del, 1.4, "Delete?", TEXT);
+        } else {
+            button(&mut v, sw, sh, del, "X", del_hover, false);
+        }
+        // Push the delete rect BEFORE the row rect: hit-testing is first-match, so a click on the (small,
+        // inset) delete control resolves to DeleteWorld, not the full-width WorldRow underneath it.
         rects.push((WidgetId::DeleteWorld(i), del));
+        rects.push((WidgetId::WorldRow(i), r));
     }
     if worlds.is_empty() {
         label_centered(&mut v, sw, sh, col.row(0), 1.8, "No worlds yet — create one.", DIM);
@@ -437,15 +459,43 @@ mod tests {
         assert!(cr.iter().any(|(id, _)| *id == WidgetId::SeedField));
     }
 
+    fn worlds() -> Vec<WorldInfo> {
+        vec![
+            WorldInfo { dir: "saves/worlds/alpha".into(), name: "Alpha".into(), seed: 1 },
+            WorldInfo { dir: "saves/worlds/beta".into(), name: "Beta".into(), seed: 2 },
+        ]
+    }
+
+    /// First-match hit-testing must resolve a click on the delete "X" to DeleteWorld (not the
+    /// full-width WorldRow it sits inside), and a click elsewhere on the row to WorldRow.
+    fn hit(rects: &[(WidgetId, Rect)], p: (f32, f32)) -> Option<WidgetId> {
+        rects.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id)
+    }
+
     #[test]
     fn world_select_lists_rows() {
-        let worlds = vec![
-            WorldEntry { name: "Alpha".into(), seed: 1 },
-            WorldEntry { name: "Beta".into(), seed: 2 },
-        ];
-        let (_, rects) = build_world_select(1600.0, 900.0, &worlds, 0, &ui());
+        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, None, &ui());
         assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(0)));
         assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(1)));
         assert!(rects.iter().any(|(id, _)| *id == WidgetId::CreateNew));
+    }
+
+    #[test]
+    fn delete_x_wins_over_row_then_row_elsewhere() {
+        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, None, &ui());
+        let row = rects.iter().find(|(id, _)| *id == WidgetId::WorldRow(0)).unwrap().1;
+        let del = rects.iter().find(|(id, _)| *id == WidgetId::DeleteWorld(0)).unwrap().1;
+        // Center of the X resolves to delete...
+        assert_eq!(hit(&rects, (del.x + del.w * 0.5, del.y + del.h * 0.5)), Some(WidgetId::DeleteWorld(0)));
+        // ...the left of the row (away from the X) resolves to the row.
+        assert_eq!(hit(&rects, (row.x + 20.0, row.y + row.h * 0.5)), Some(WidgetId::WorldRow(0)));
+    }
+
+    #[test]
+    fn armed_delete_renders_wider_and_still_hit_tests_to_delete() {
+        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, Some(1), &ui());
+        let del = rects.iter().find(|(id, _)| *id == WidgetId::DeleteWorld(1)).unwrap().1;
+        assert!(del.w > 100.0, "armed delete widens for the 'Delete?' label");
+        assert_eq!(hit(&rects, (del.x + del.w * 0.5, del.y + del.h * 0.5)), Some(WidgetId::DeleteWorld(1)));
     }
 }
