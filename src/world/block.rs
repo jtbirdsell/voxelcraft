@@ -916,7 +916,7 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
 pub fn emission(id: BlockId) -> f32 {
     match id {
         LAVA => 1.0,
-        TORCH => 0.9,
+        TORCH => 1.4, // M35-SL: brighter self-glow so a torch reads as a torch in daylight
         GLOWSTONE => 1.0,
         // U4: the sculk catalyst's soul-fire bloom is the only opaque cave-biome self-emitter (the
         // cross-billboard emitters — clusters/buds/glow lichen/berries — aren't in the voxel volume, so

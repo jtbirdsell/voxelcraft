@@ -162,7 +162,13 @@ inventory; the hotbar shows stack counts, durability bars, and the selected item
   glowstone / lava illuminate their surroundings. A small day/night-scaled **ambient floor** keeps
   fully sun-shadowed, sky-occluded surfaces (a pit bottom, an overhang, a deep concave corner) from
   collapsing to pure black — they read as a deep shadow rather than a black hole, without lifting the
-  open-sky terrain (the floor is weighted by `1 − skylight`, so lit surfaces stay byte-identical).
+  open-sky terrain (the floor is weighted by `1 − skylight`).
+- **Smooth lighting + ambient occlusion** (Minecraft-style): the greedy mesher samples skylight and
+  block-light **per vertex** — averaging the four cells touching each corner — and bakes a geometric
+  **AO** darkening into concave corners, so light gradients across a face are smooth (Gouraud-
+  interpolated) instead of flat-shaded with hard per-face steps. Uniform-lit runs still greedy-merge
+  into big quads; only light gradients (shadow edges, AO corners, a torch's falloff) split into the
+  per-cell quads that carry the gradient. Tracer- and GI-path-independent (baked into the vertex).
 
 **Ray-traced lighting** — traced on the RTX **hardware ray-tracing cores** (a per-chunk BLAS + a
 per-frame TLAS over the greedy-meshed geometry, inline `rayQuery`), with a software DDA march over a

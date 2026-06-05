@@ -68,7 +68,8 @@ fn fs_main(in: VsOut) -> FragOut {
     // block light (torch/glowstone/lava grid) adds warm local light that survives underground.
     let sky = in.light.x;
     let blockl = in.light.y;
-    let warm = blockl * vec3<f32>(1.15, 0.92, 0.55);
+    // M35-SL: a slightly brighter/warmer block-light tint so a torch's glow pool survives daylight.
+    let warm = blockl * vec3<f32>(1.45, 1.0, 0.55);
 
     // Indirect (AO + one-bounce GI). DEFER_GI=false (VOXELCRAFT_GI=fragment): gather inline, the
     // G5b parity oracle. DEFER_GI=true (default): the GI compute pass produces the irradiance and

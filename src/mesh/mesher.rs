@@ -64,11 +64,12 @@ impl MeshData {
     }
 }
 
-/// A merged face: which block, whether the face normal points toward +axis, the packed light
-/// (sky<<4|block) of the air voxel just outside the face, and the owner's log-axis (0 for every
-/// non-log block). Light + axis are part of the key so greedy merge only fuses faces with identical
-/// lighting AND orientation (so two logs of different axes never merge into one quad).
-type Mask = Option<(u16, bool, u8, u8)>;
+/// A merged face: which block, whether the face normal points toward +axis, the **per-corner** smooth
+/// light (M35-SL: 4 `(sky, block)` pairs from `light::corner_lights`), and the owner's log-axis (0 for
+/// every non-log block). All four are part of the key, so greedy merge only fuses faces with identical
+/// per-corner lighting AND orientation — uniform-lit runs still merge into big quads, while a light
+/// gradient (shadow edge, AO corner, torch falloff) splits into ~1×1 quads that interpolate smoothly.
+type Mask = Option<(u16, bool, [[f32; 2]; 4], u8)>;
 
 fn normal_vec(axis: usize, positive: bool) -> [f32; 3] {
     let s = if positive { 1.0 } else { -1.0 };
@@ -125,7 +126,10 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                         } else {
                             0
                         };
-                        Some((a, true, crate::light::at(&lightgrid, xb[0], xb[1], xb[2]), axis))
+                        // M35-SL: smooth per-corner light at the air voxel (xb). AO only on opaque
+                        // cubes — water/glass keep the smooth average but no corner darkening.
+                        let ao = !block::is_water(a) && !block::is_glass(a);
+                        Some((a, true, crate::light::corner_lights(&lightgrid, neigh, xb, u, v, ao), axis))
                     } else if block::renders(b) && !block::occludes(b, a) {
                         // b's -face: lit by the air voxel on a's side; axis read from the solid cell b.
                         let axis = if b == block::WOOD {
@@ -133,7 +137,8 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                         } else {
                             0
                         };
-                        Some((b, false, crate::light::at(&lightgrid, x[0], x[1], x[2]), axis))
+                        let ao = !block::is_water(b) && !block::is_glass(b);
+                        Some((b, false, crate::light::corner_lights(&lightgrid, neigh, x, u, v, ao), axis))
                     } else {
                         None
                     };
@@ -167,7 +172,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                         h += 1;
                     }
 
-                    let (blk, positive, face_light, axis) = cell.unwrap();
+                    let (blk, positive, corner_light, axis) = cell.unwrap();
                     let geom = if block::is_water(blk) {
                         &mut mesh.water
                     } else if block::is_glass(blk) {
@@ -175,7 +180,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                     } else {
                         &mut mesh.opaque
                     };
-                    emit_quad(geom, origin, d, u, v, i + 1, k, j, w, h, blk, positive, face_light, axis);
+                    emit_quad(geom, origin, d, u, v, i + 1, k, j, w, h, blk, positive, corner_light, axis);
 
                     // Clear the consumed region.
                     for jj in 0..h {
@@ -485,7 +490,7 @@ fn emit_quad(
     h: i32,
     block_id: u16,
     positive: bool,
-    face_light: u8,
+    corner_light: [[f32; 2]; 4],
     axis: u8,
 ) {
     let mut base = [0i32; 3];
@@ -530,18 +535,16 @@ fn emit_quad(
             [(c[horiz] - base[horiz]) as f32, (y_top - c[1]) as f32]
         }
     };
-    let light = [
-        (face_light >> 4) as f32 / 15.0,
-        (face_light & 0x0F) as f32 / 15.0,
-    ];
+    // M35-SL: per-corner smooth light. p0..p3 map to the corner order produced by `corner_lights`
+    // ((du,dv) = (0,0),(1,0),(1,1),(0,1) along u/v); the GPU Gouraud-interpolates between them.
     let v = geom.vertices.len() as u32;
-    for p in [p0, p1, p2, p3].iter() {
+    for (idx, p) in [p0, p1, p2, p3].iter().enumerate() {
         geom.vertices.push(Vertex {
             position: corner(*p),
             normal,
             uv: uv_for(*p),
             tile,
-            light,
+            light: corner_light[idx],
             shade,
         });
     }
