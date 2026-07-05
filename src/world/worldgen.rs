@@ -574,14 +574,16 @@ impl Worldgen {
         self.place_ore(chunk, origin, 0xD1A3, 16, 4, DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, |_x, ey, _z, h| {
             ore_gate(ey, 3, 7, 22, 42, h, 2)
         });
-        // Mountain-gated emerald (sparse) + a high iron band.
+        // Mountain-gated emerald (sparse) + a high iron band. (S4a: the biome() call had its wz and
+        // height arguments transposed, so the Mountains gate actually tested the world Z coordinate —
+        // emeralds generated only in the z>=136 half-plane and never in real mountains at z<136.)
         self.place_ore(chunk, origin, 0xE3E5, 20, 4, EMERALD_ORE, DEEPSLATE_EMERALD_ORE, |x, ey, z, h| {
             let r = ore_gate(ey, 96, 130, 170, 60, h, 1)?;
-            (self.biome(x, self.height(x, z), z) == Biome::Mountains).then_some(r)
+            (self.biome(x, z, self.height(x, z)) == Biome::Mountains).then_some(r)
         });
         self.place_ore(chunk, origin, 0x1207_AA, 12, 4, IRON_ORE, DEEPSLATE_IRON_ORE, |x, ey, z, h| {
             let r = ore_gate(ey, 96, 140, 170, 95, h, 2)?;
-            (self.biome(x, self.height(x, z), z) == Biome::Mountains).then_some(r)
+            (self.biome(x, z, self.height(x, z)) == Biome::Mountains).then_some(r)
         });
         // 1.18 large ore veins (rare, big).
         let (ox, oy, oz) = (origin.x, origin.y, origin.z);
@@ -1729,6 +1731,35 @@ mod tests {
         let a = wg.generate_chunk(IVec3::new(0, 0, 0));
         let b = wg.generate_chunk(IVec3::new(0, 0, 0));
         assert_eq!(a.blocks, b.blocks);
+    }
+
+    /// S4a regression: the emerald/high-iron gate called biome() with wz and height transposed,
+    /// so "Mountains" actually tested the world Z coordinate — emeralds sprayed into ORDINARY
+    /// terrain wherever z>=136 and could never generate in real mountains at z<136. With the fix,
+    /// non-mountain chunks in the z>=136 half-plane must contain zero emerald ore. (True mountains
+    /// are vanishingly rare at current terrain amplitude — max height ~134 vs MOUNTAIN_MIN_H 136 —
+    /// so the positive case rides on the biome-semantics assertion until the biome expansion.)
+    #[test]
+    fn emerald_gate_keys_on_terrain_not_z() {
+        let wg = Worldgen::new(0x0DE_5EED);
+        // biome() altitude tiers key on the height argument (the fixed call order)...
+        assert_eq!(wg.biome(10, -500, 140), Biome::Mountains);
+        assert_ne!(wg.biome(10, 500, 90), Biome::Mountains);
+        // ...and no stray emeralds in non-mountain terrain at z >= 136 (the old bug's half-plane).
+        let mut emeralds = 0usize;
+        for ccx in -3..=3 {
+            for ccz in 5..=8 {
+                for cy in 3..=4 {
+                    let c = wg.generate_chunk(IVec3::new(ccx, cy, ccz));
+                    emeralds += c
+                        .blocks
+                        .iter()
+                        .filter(|&&b| b == block::EMERALD_ORE || b == block::DEEPSLATE_EMERALD_ORE)
+                        .count();
+                }
+            }
+        }
+        assert_eq!(emeralds, 0, "stray emeralds in non-mountain terrain at z>=136 (the pre-S4a bug)");
     }
 
     /// U7 (cave carving + fluids): caves carve a sensible fraction, lava only near bedrock, aquifers

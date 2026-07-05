@@ -42,7 +42,10 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -> Hi
 
 fn sun_visibility(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {
     let sun = normalize(camera.sun_dir.xyz);
-    if (sun.y <= 0.02) {
+    // Horizon fade (S4a) — byte-identical band to sun_visibility_dda: shadows ease out across
+    // sun.y in [0.02, 0.10] instead of vanishing scene-wide in a single frame at ~37% sunlight.
+    let horizon = smoothstep(0.02, 0.10, sun.y);
+    if (horizon <= 0.0) {
         return 1.0;
     }
     // Slope-scaled origin bias: at grazing sun angles (small dot(n,sun)) a fixed normal offset can
@@ -58,5 +61,5 @@ fn sun_visibility(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {
     rayQueryInitialize(&rq, rt_acc, RayDesc(0x4u, 0xFFu, 0.0, max_dist, origin, sun));
     while (rayQueryProceed(&rq)) {}
     let hit = rayQueryGetCommittedIntersection(&rq);
-    return select(1.0, 0.0, hit.kind != RAY_QUERY_INTERSECTION_NONE);
+    return mix(1.0, select(1.0, 0.0, hit.kind != RAY_QUERY_INTERSECTION_NONE), horizon);
 }

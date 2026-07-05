@@ -1116,21 +1116,26 @@ impl Game {
             self.fluid.remove(&wp);
         }
 
-        // Edited chunk plus any neighbor sharing the touched boundary must re-mesh.
+        // Edited chunk plus any neighbor whose BAKED LIGHT this edit can reach must re-mesh (S4a).
+        // Light floods up to 15 blocks, so the old boundary-only rule (lx==0/31) left stale light
+        // on the neighbor's side of the seam for most cave torch placements. An edit at local
+        // coord e reaches the -X neighbor's cells when e+1 <= 15 (e <= 14) and the +X neighbor's
+        // when 32-e <= 15 (e >= 17); same on Z. The chunk BELOW is always included — opening or
+        // roofing a skylight shaft re-lights the column below with no 15-block bound (shafts
+        // deeper than one chunk stay approximate, matching the flood's own reach).
         let mut affected = vec![cpos];
-        if lx == 0 {
+        if lx <= 14 {
             affected.push(cpos - IVec3::X);
-        } else if lx == 31 {
+        } else if lx >= 17 {
             affected.push(cpos + IVec3::X);
         }
-        if ly == 0 {
-            affected.push(cpos - IVec3::Y);
-        } else if ly == 31 {
+        affected.push(cpos - IVec3::Y);
+        if ly >= 17 {
             affected.push(cpos + IVec3::Y);
         }
-        if lz == 0 {
+        if lz <= 14 {
             affected.push(cpos - IVec3::Z);
-        } else if lz == 31 {
+        } else if lz >= 17 {
             affected.push(cpos + IVec3::Z);
         }
 

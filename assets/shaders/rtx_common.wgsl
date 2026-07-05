@@ -279,7 +279,11 @@ fn trace_dda(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -
 // `sun_visibility()` (DDA wrapper or hardware ray query) is appended by the renderer per VOXELCRAFT_TRACER.
 fn sun_visibility_dda(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 {
     let sun = normalize(camera.sun_dir.xyz);
-    if (sun.y <= 0.02) {
+    // Fade shadows out across the horizon band instead of a scene-wide single-frame pop (S4a):
+    // at sun.y=0.02 the sun still lights at ~37% intensity (day_factor's smoothstep), so shadow
+    // must ease toward 1.0 as the sun sets, never snap. Byte-identical band in sun_vis_hw.wgsl.
+    let horizon = smoothstep(0.02, 0.10, sun.y);
+    if (horizon <= 0.0) {
         return 1.0;
     }
     // Slope-scaled origin bias — byte-identical to the HW-RT copy in sun_vis_hw.wgsl (kills grazing-
@@ -288,7 +292,7 @@ fn sun_visibility_dda(world_pos: vec3<f32>, n: vec3<f32>, max_dist: f32) -> f32 
     let origin = world_pos + n * (0.06 / bias_dot) + sun * 0.01;
     // ~2 voxel boundaries per block keeps diagonal rays from clipping short of max_dist.
     let h = trace(origin, sun, max_dist, i32(max_dist * 2.0) + 4);
-    return select(1.0, 0.0, h.hit);
+    return mix(1.0, select(1.0, 0.0, h.hit), horizon);
 }
 
 // ---- Ambient occlusion + one-bounce colored GI -------------------------------------------------
@@ -332,7 +336,12 @@ fn gather_gi(world_pos: vec3<f32>, n: vec3<f32>, px: vec2<f32>) -> vec3<f32> {
     let sky = camera.sky_color.rgb * sky_boost;
 
     let basis = onb(n);
-    let rnd = hash2(px);
+    // Per-frame seed jitter (S4a): a pixel-only seed froze the noise pattern across frames, so the
+    // temporal accumulator averaged identical samples (no convergence) and DLSS-RR was fed the
+    // same static grain every frame instead of fresh samples to integrate. The golden-ratio walk
+    // of elapsed time is wrapped small so the f32 sin() hash never sees large inputs.
+    let frame_jitter = fract(camera.time.x * 0.61803398875) * 64.0;
+    let rnd = hash2(px + vec2<f32>(frame_jitter, frame_jitter * 1.6180339887));
     let origin = world_pos + n * 0.06;
 
     var accum = vec3<f32>(0.0);
