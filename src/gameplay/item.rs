@@ -1091,9 +1091,10 @@ mod tests {
     #[test]
     fn u4_cave_biome_registry() {
         // Registry: a sample of the new blocks + materials are known and bound by MAX_BLOCK.
-        assert_eq!(block::MAX_BLOCK, block::POTATO_CROP); // S6: crops are the id-space tail
+        assert_eq!(block::MAX_BLOCK, block::SAPLING); // S7: the id-space tail
         assert_eq!(block::REINFORCED_DEEPSLATE, 110);
         assert_eq!(block::POTATO_CROP, 114);
+        assert_eq!(block::SAPLING, 115);
         assert!(is_known(block::AMETHYST_BLOCK) && is_known(block::SCULK_CATALYST));
         assert!(is_known(block::REINFORCED_DEEPSLATE) && is_known(block::SPORE_BLOSSOM));
         assert!(is_known(AMETHYST_SHARD) && is_known(GLOW_BERRIES));

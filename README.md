@@ -262,6 +262,10 @@ position, albedo + skylight) and an ACES tonemap.
   **Bonemeal** (bone) jumps stages. Mature wheat drops wheat + bonus seeds (→ **bread**); root crops
   yield 2-4. Crops pop off if their farmland is broken and only plant on farmland. This also makes
   **animal breeding fully survival-reachable** (wheat/seeds/carrots are all farmable).
+- **Renewable wood** (S7): leaves shed **oak saplings** (5%) and the odd **apple**; saplings plant
+  on grass/dirt and random-tick into full trees (bonemeal for an instant one). Orphaned leaves
+  **decay** once no log is within reach — felling a trunk dissolves the canopy into drops — while
+  player-placed leaves are persistent and never decay.
 - **Eating**: hold right-click on a food to eat it (~1.6 s), restoring hunger + saturation. Raw mob
   drops (beef/pork/chicken/mutton) are edible but weak; **cook them in a furnace** (→ steak, cooked
   porkchop/chicken/mutton) for far more, plus bread and apples.

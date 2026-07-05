@@ -152,6 +152,7 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::CROP_SPROUT => [0.36, 0.58, 0.26],
         T::CROP_CARROT_MATURE => [0.35, 0.55, 0.22],
         T::CROP_POTATO_MATURE => [0.38, 0.52, 0.26],
+        T::SAPLING => [0.30, 0.50, 0.20],
         T::FOOD_POTATO => [0.85, 0.70, 0.40],
         T::FOOD_BAKED_POTATO => [0.75, 0.55, 0.30],
         _ => [1.0, 0.0, 1.0],
@@ -216,6 +217,19 @@ fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
                 } else {
                     [to_u8(0.74), to_u8(0.62), to_u8(0.26), 255]
                 };
+            }
+            [0, 0, 0, 0]
+        }
+        T::SAPLING => {
+            // A tiny tree: a short trunk with a leafy diamond crown.
+            let trunk = (7..=8).contains(&x) && (10..=14).contains(&y);
+            let crown = (dx.abs() + (y as i32 - 6).abs()) <= 4 && y <= 10;
+            if trunk {
+                return [to_u8(0.36), to_u8(0.24), to_u8(0.12), 255];
+            }
+            if crown && hashf(x, y, 13) > 0.25 {
+                let g = hashf(x, y, 14);
+                return [to_u8(0.16), to_u8(0.40 + g * 0.18), to_u8(0.13), 255];
             }
             [0, 0, 0, 0]
         }
@@ -837,6 +851,7 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             | T::CROP_SPROUT
             | T::CROP_CARROT_MATURE
             | T::CROP_POTATO_MATURE
+            | T::SAPLING
     ) {
         return paint_plant(tile, x, y);
     }

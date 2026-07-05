@@ -1255,7 +1255,7 @@ impl App {
                         if removed {
                             let above = hit + IVec3::Y;
                             let (aid, ast) = session.game.block_state_at(above);
-                            if block::is_crop(aid) {
+                            if block::is_crop(aid) || aid == block::SAPLING {
                                 session.game.set_block(&state.gpu, &state.renderer, above, block::AIR);
                                 if !session.inventory.creative {
                                     if let Some((di, dc)) = block::drops(aid, ast) {
@@ -1560,6 +1560,8 @@ impl App {
                                 block::ATTACH_PZ
                             };
                             block::attach_state(face, false)
+                        } else if matches!(id, block::LEAVES | block::AZALEA_LEAVES) {
+                            1 // S7: player-placed leaves are persistent (never decay)
                         } else {
                             0
                         };
@@ -1571,9 +1573,14 @@ impl App {
                         // Torches/levers/buttons can't mount on a ceiling (no ATTACH_CEILING variant) —
                         // reject an underside (bottom-face) click instead of spawning a floating fixture.
                         let attach_invalid = block::is_attach(id) && hit.normal.y == -1;
-                        // S6: crops only sit on farmland, from any placement path.
-                        let crop_unsupported = block::is_crop(id)
-                            && session.game.block_at(place - IVec3::Y) != block::FARMLAND;
+                        // S6: crops only sit on farmland; S7: saplings only on grass/dirt.
+                        let below_id = session.game.block_at(place - IVec3::Y);
+                        let crop_unsupported = (block::is_crop(id) && below_id != block::FARMLAND)
+                            || (id == block::SAPLING
+                                && !matches!(
+                                    below_id,
+                                    block::GRASS | block::DIRT | block::ROOTED_DIRT
+                                ));
                         if id != block::AIR
                             && !blocks_player
                             && !attach_invalid

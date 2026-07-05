@@ -133,9 +133,11 @@ pub const FARMLAND: BlockId = 111;
 pub const WHEAT_CROP: BlockId = 112;
 pub const CARROT_CROP: BlockId = 113;
 pub const POTATO_CROP: BlockId = 114;
+// S7: oak sapling (random-ticks into a tree; leaves shed them).
+pub const SAPLING: BlockId = 115;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = POTATO_CROP;
+pub const MAX_BLOCK: BlockId = SAPLING;
 
 #[inline]
 pub fn is_fence(id: BlockId) -> bool {
@@ -339,7 +341,7 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         WOODEN_TRAPDOOR => RenderKind::Trapdoor,
         WOODEN_FENCE | COBBLESTONE_WALL | GLASS_PANE => RenderKind::Connect,
         TORCH | LEVER | BUTTON => RenderKind::Attach,
-        WHEAT_CROP | CARROT_CROP | POTATO_CROP => RenderKind::Cross, // S6 crops
+        WHEAT_CROP | CARROT_CROP | POTATO_CROP | SAPLING => RenderKind::Cross, // S6 crops + S7 sapling
         _ => RenderKind::Cube,
     }
 }
@@ -414,6 +416,16 @@ pub fn crop_mature(state: u8) -> bool {
     crop_stage(state) >= CROP_MAX_STAGE
 }
 
+/// The leaf sapling/apple roll (S7), shared by mining and natural decay: sapling 5%, apple 0.5%.
+pub fn leaf_drop(r: u64) -> Option<(crate::item::ItemId, u8)> {
+    match r % 1000 {
+        0..=4 => Some((APPLE_ITEM, 1)),
+        5..=54 => Some((SAPLING, 1)), // the block-item plants directly
+        _ => None,
+    }
+}
+const APPLE_ITEM: crate::item::ItemId = crate::item::APPLE;
+
 /// Stage-aware crop billboard tile (S6). Mesher-only: `face_tile` stays id+face keyed (the N2 GI
 /// lock) and reports the mature tile; crops never enter the voxel volume, so the stage-dependent
 /// visual can't diverge GI from raster.
@@ -451,6 +463,8 @@ pub fn crop_tile(id: BlockId, state: u8) -> u32 {
 pub fn bonus_drops(id: BlockId, state: u8, r: u64) -> Option<(crate::item::ItemId, u8)> {
     match id {
         TALL_GRASS if r % 10 < 3 => Some((crate::item::SEEDS, 1)),
+        // S7: leaves shed a sapling 5% / an apple 0.5% (same roll decayed leaves use).
+        LEAVES | AZALEA_LEAVES => leaf_drop(r),
         WHEAT_CROP if crop_mature(state) => {
             let n = (r % 4) as u8; // 0..=3 bonus seeds
             (n > 0).then_some((crate::item::SEEDS, n))
@@ -851,6 +865,7 @@ pub fn display_name(id: BlockId) -> &'static str {
         SCULK_CATALYST => "Sculk Catalyst",
         REINFORCED_DEEPSLATE => "Reinforced Deepslate",
         FARMLAND => "Farmland",
+        SAPLING => "Oak Sapling",
         WHEAT_CROP => "Wheat",
         CARROT_CROP => "Carrots",
         POTATO_CROP => "Potatoes",
@@ -983,6 +998,7 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         REINFORCED_DEEPSLATE => [0.20, 0.21, 0.24],
         // S6 farming (FARMLAND must match texture.rs base_color + rtx_common.wgsl voxel_color).
         FARMLAND => [0.35, 0.24, 0.15],
+        SAPLING => [0.30, 0.50, 0.20],
         WHEAT_CROP => [0.75, 0.65, 0.30],
         CARROT_CROP => [0.35, 0.55, 0.22],
         POTATO_CROP => [0.38, 0.52, 0.26],
@@ -1418,6 +1434,7 @@ pub mod tile {
     pub const CROP_SPROUT: u32 = 185; // shared young-stage sprout (carrots + potatoes)
     pub const CROP_CARROT_MATURE: u32 = 186;
     pub const CROP_POTATO_MATURE: u32 = 187;
+    pub const SAPLING: u32 = 188; // S7
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
@@ -1570,6 +1587,7 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
                 tile::DIRT
             }
         }
+        SAPLING => tile::SAPLING,
         WHEAT_CROP => tile::CROP_WHEAT_MATURE,
         CARROT_CROP => tile::CROP_CARROT_MATURE,
         POTATO_CROP => tile::CROP_POTATO_MATURE,

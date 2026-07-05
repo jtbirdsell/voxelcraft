@@ -55,6 +55,10 @@ fn random_tickable(id: BlockId) -> bool {
             | block::WHEAT_CROP
             | block::CARROT_CROP
             | block::POTATO_CROP
+            // S7: saplings grow; orphaned leaves decay.
+            | block::SAPLING
+            | block::LEAVES
+            | block::AZALEA_LEAVES
     )
 }
 
@@ -105,6 +109,65 @@ fn grow_decision(
         }
         _ => None,
     }
+}
+
+/// S7: the live-growth twin of worldgen's `stamp_tree` — the same trunk + crown shape, emitted as
+/// batched world edits. Leaves go only into air; the trunk overwrites the sapling column.
+fn tree_changes(
+    base: IVec3,
+    trunk: i32,
+    block_at: &impl Fn(IVec3) -> BlockId,
+) -> Vec<(IVec3, BlockId, u8)> {
+    let mut ch = Vec::new();
+    let crown = base.y + trunk;
+    for dy in -2i32..=1 {
+        let ly = crown + dy;
+        let r: i32 = if dy >= 1 { 1 } else { 2 };
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if r == 2 && dx.abs() == 2 && dz.abs() == 2 && dy == -2 {
+                    continue; // trim the lowest layer's corners (matches worldgen)
+                }
+                let p = IVec3::new(base.x + dx, ly, base.z + dz);
+                if block_at(p) == block::AIR {
+                    ch.push((p, block::LEAVES, 0));
+                }
+            }
+        }
+    }
+    for wy in base.y..(base.y + trunk) {
+        ch.push((IVec3::new(base.x, wy, base.z), block::WOOD, 0));
+    }
+    ch
+}
+
+/// S7 leaf decay: is a log within `range` steps of `start`, walking only THROUGH leaf cells
+/// (vanilla's persistence rule)? Face-adjacent quick-accept, then a small bounded BFS.
+fn log_within(start: IVec3, range: i32, block_at: &impl Fn(IVec3) -> BlockId) -> bool {
+    const DIRS: [IVec3; 6] = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+    let is_leaf = |id: BlockId| id == block::LEAVES || id == block::AZALEA_LEAVES;
+    // FIFO is load-bearing: first visit = shortest leaf-path, so a long detour can't mark a cell
+    // seen at the depth limit and starve the short route to a log.
+    let mut queue: std::collections::VecDeque<(IVec3, i32)> = std::collections::VecDeque::new();
+    queue.push_back((start, 0));
+    let mut seen: FxHashSet<IVec3> = FxHashSet::default();
+    seen.insert(start);
+    while let Some((p, d)) = queue.pop_front() {
+        for dir in DIRS {
+            let np = p + dir;
+            if !seen.insert(np) {
+                continue;
+            }
+            let id = block_at(np);
+            if id == block::WOOD {
+                return true;
+            }
+            if d + 1 < range && is_leaf(id) {
+                queue.push_back((np, d + 1));
+            }
+        }
+    }
+    false
 }
 
 /// U10 sculk-spread tuning: conversions per tick, the catalyst detection radius from a mob death.
@@ -1446,15 +1509,23 @@ impl Game {
         }
         // Phase 2: dispatch growth into a batch.
         let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
+        let mut drops: Vec<(IVec3, crate::item::ItemId, u8)> = Vec::new();
         for (wp, id) in candidates {
             rng ^= rng << 13;
             rng ^= rng >> 7;
             rng ^= rng << 17;
-            self.random_tick_block(wp, id, rng as u32, &mut changes);
+            self.random_tick_block(wp, id, rng as u32, &mut changes, &mut drops);
         }
         self.tick_rng = rng;
         if !changes.is_empty() {
             self.apply_block_changes(gpu, renderer, &changes);
+        }
+        // S7: decayed leaves shed their roll as world items.
+        for (wp, di, dc) in drops {
+            self.entities.spawn_item(
+                wp.as_vec3() + Vec3::splat(0.5),
+                crate::item::ItemStack::new(di, dc),
+            );
         }
     }
 
@@ -1466,7 +1537,31 @@ impl Game {
         id: BlockId,
         rnd: u32,
         changes: &mut Vec<(IVec3, BlockId, u8)>,
+        drops: &mut Vec<(IVec3, crate::item::ItemId, u8)>,
     ) {
+        // S7: a sapling grows into a tree (~1/2 per tick) when its trunk column is clear.
+        if id == block::SAPLING {
+            if rnd % 2 == 0 {
+                let trunk = 4 + ((rnd >> 8) % 3) as i32; // 4-6 logs, like worldgen
+                let clear =
+                    (1..trunk).all(|dy| self.block_at(wp + IVec3::Y * dy) == block::AIR);
+                if clear {
+                    changes.extend(tree_changes(wp, trunk, &|p| self.block_at(p)));
+                }
+            }
+            return;
+        }
+        // S7: leaves with no log within reach decay (and can shed a sapling/apple). Player-placed
+        // leaves carry state 1 (persistent) and never decay, like vanilla.
+        if matches!(id, block::LEAVES | block::AZALEA_LEAVES) {
+            if self.block_state_at(wp).1 == 0 && !log_within(wp, 4, &|p| self.block_at(p)) {
+                changes.push((wp, block::AIR, 0));
+                if let Some((di, dc)) = block::leaf_drop(rnd as u64) {
+                    drops.push((wp, di, dc));
+                }
+            }
+            return;
+        }
         if id == block::BUDDING_AMETHYST {
             // Sprout a small bud on a random air-adjacent face (~18% per tick).
             if rnd % 100 < 18 {
@@ -1566,6 +1661,16 @@ impl Game {
                     changes.push((p, block::CAVE_VINE_BERRIES, 0));
                     p -= IVec3::Y;
                 }
+            }
+            // S7: bonemeal a sapling — instant tree if the trunk column is clear.
+            block::SAPLING => {
+                let r = self.next_rand();
+                let trunk = 4 + ((r >> 8) % 3) as i32;
+                let clear = (1..trunk).all(|dy| self.block_at(wp + IVec3::Y * dy) == block::AIR);
+                if !clear {
+                    return false;
+                }
+                changes.extend(tree_changes(wp, trunk, &|p| self.block_at(p)));
             }
             // S6 crops: jump 2-4 stages (capped at mature).
             id2 if block::is_crop(id2) => {
@@ -2335,6 +2440,39 @@ mod furnace_tests {
         assert_eq!(grow_decision(block::POTATO_CROP, 0, block::FARMLAND, block::AIR, 0, 7, true), None); // mature
         assert!(random_tickable(block::BUDDING_AMETHYST) && !random_tickable(block::STONE));
         assert!(random_tickable(block::WHEAT_CROP)); // S6
+    }
+
+    #[test]
+    fn s7_tree_growth_and_leaf_decay() {
+        // tree_changes: a 5-log trunk + a crown of leaves, none placed into solid cells.
+        let air = |_: IVec3| block::AIR;
+        let ch = tree_changes(IVec3::new(0, 100, 0), 5, &air);
+        let logs = ch.iter().filter(|(_, id, _)| *id == block::WOOD).count();
+        let leaves = ch.iter().filter(|(_, id, _)| *id == block::LEAVES).count();
+        assert_eq!(logs, 5);
+        assert!(leaves > 20, "a real crown ({leaves} leaves)");
+        // Leaves only into air: a world of stone admits the trunk but no leaves.
+        let stone = |_: IVec3| block::STONE;
+        let ch2 = tree_changes(IVec3::new(0, 100, 0), 5, &stone);
+        assert!(ch2.iter().all(|(_, id, _)| *id == block::WOOD));
+        // log_within: a log 3 leaf-steps away is found; 5 away is not (range 4).
+        let world = |log_at: IVec3| move |p: IVec3| {
+            if p == log_at {
+                block::WOOD
+            } else if p.y == 100 {
+                block::LEAVES // an infinite leaf plane to walk through
+            } else {
+                block::AIR
+            }
+        };
+        let start = IVec3::new(0, 100, 0);
+        assert!(log_within(start, 4, &world(IVec3::new(3, 100, 0))));
+        assert!(!log_within(start, 4, &world(IVec3::new(6, 100, 0))));
+        // The leaf roll: sapling band, apple band, nothing band.
+        assert_eq!(block::leaf_drop(2), Some((crate::item::APPLE, 1)));
+        assert_eq!(block::leaf_drop(10), Some((block::SAPLING, 1)));
+        assert_eq!(block::leaf_drop(500), None);
+        assert!(random_tickable(block::SAPLING) && random_tickable(block::LEAVES));
     }
 
     #[test]
