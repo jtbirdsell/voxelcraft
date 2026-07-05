@@ -1,5 +1,50 @@
 //! Game rules (P6): difficulty. Peaceful / Easy / Normal / Hard, affecting hostile spawning, the
 //! damage hostile mobs deal, and starvation. A world property (persisted in `level.bin`).
+//! Plus the game mode (S1): Survival / Creative, chosen at world creation.
+
+/// Game mode (S1): a world property chosen on the Create World screen. Survival is the default —
+/// no flying, full damage/hunger, finite items. Creative keeps the pre-S1 behavior: the infinite
+/// palette, F-toggled flight, and no damage of any kind. Persisted as a byte in `level.bin`
+/// (offset 58) and mirrored at runtime by `Inventory.creative` (which `save_state.bin` carries).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum GameMode {
+    #[default]
+    Survival,
+    Creative,
+}
+
+impl GameMode {
+    pub fn is_creative(self) -> bool {
+        self == Self::Creative
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Survival => "Survival",
+            Self::Creative => "Creative",
+        }
+    }
+
+    /// Cycle for the Create World screen's mode control.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Survival => Self::Creative,
+            Self::Creative => Self::Survival,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Survival => 0,
+            Self::Creative => 1,
+        }
+    }
+
+    /// Level-header byte → mode. 1 = creative; anything else (including future values) is survival.
+    pub fn from_u8(v: u8) -> Self {
+        if v == 1 { Self::Creative } else { Self::Survival }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Difficulty {
@@ -92,6 +137,19 @@ impl Difficulty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gamemode_default_roundtrip_and_cycle() {
+        assert_eq!(GameMode::default(), GameMode::Survival);
+        assert!(!GameMode::Survival.is_creative());
+        assert!(GameMode::Creative.is_creative());
+        for m in [GameMode::Survival, GameMode::Creative] {
+            assert_eq!(GameMode::from_u8(m.as_u8()), m);
+            assert_eq!(m.next().next(), m);
+        }
+        // Unknown / future header bytes resolve to Survival (the safe mode).
+        assert_eq!(GameMode::from_u8(7), GameMode::Survival);
+    }
 
     #[test]
     fn values_and_roundtrip() {

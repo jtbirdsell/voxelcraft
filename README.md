@@ -33,10 +33,12 @@ cargo test --release   # worldgen determinism, physics, inventory + save round-t
 Launching drops you at the **main menu** — *Singleplayer*, *Settings*, *Quit*. *Singleplayer* opens the
 **world-select** screen listing every saved world (name + seed, most-recently-played first); click a
 world to play it, the row's **X** to delete it (a second click on the red **Delete?** confirms — no
-one-misclick world loss), or **Create New World** to make one. The create screen takes a **name** and an
-optional **seed** (a number is used as-is; any other text is hashed; blank = random). Each world lives in
+one-misclick world loss), or **Create New World** to make one. The create screen takes a **name**, an
+optional **seed** (a number is used as-is; any other text is hashed; blank = random), and a **game
+mode** — **Survival** (the default: no flying, real damage and hunger, finite items; spawns on dry
+land) or **Creative** (the infinite block palette, F-toggled flight, no damage). Each world lives in
 its own `saves/worlds/<name>/` directory and saves there on quit / *Save & Quit*. A pre-N4 single world
-at `saves/world/` is migrated into the list automatically on first launch.
+at `saves/world/` is migrated into the list automatically on first launch (legacy worlds stay creative).
 
 In-game, **Esc** opens the **pause menu** (Resume / Settings / Save & Quit to Menu) and frees the cursor.
 `VOXELCRAFT_SKIPMENU=1` boots straight into the most-recently-played world (the pre-menu behaviour, for
@@ -106,7 +108,7 @@ here so it's the default. GL has no hardware RT (software DDA tracer only).
 | **Space** | Jump (walk) / swim up / ascend (fly) |
 | **Left-Shift** | Sneak (walk — won't walk off ledges) / descend (fly) |
 | **Left-Ctrl** | Sprint (widens FOV) / fly boost |
-| **F** | Toggle fly / walk |
+| **F** | Toggle fly / walk (**Creative worlds only**) |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
 | **Right-click** | Place block; open a crafting table / furnace / chest; **open/close a door or trapdoor**; **hold to eat** the selected food |
 | **Q** | Drop one of the selected item |
@@ -237,6 +239,10 @@ position, albedo + skylight) and an ACES tonemap.
   armor + tool durability, **furnace + chest contents**, and **player survival**
   (health/hunger/air/saturation/XP/level) all round-trip across save/reload; older saves load
   forward-compatibly.
+- **Game modes** (chosen at world creation, persisted per world): **Survival** — no flying, full
+  damage/hunger/air simulation, finite items, death drops your inventory at the death site; **Creative**
+  — the paged infinite palette, F-toggled flight, and total invulnerability (no hunger, fall, lava,
+  drowning, or mob damage), on foot or airborne.
 - **Survival depth**: health + hunger with saturation-fueled regen and starvation; fall damage;
   **swimming** (buoyancy + paddle up) with an **air/drowning** bubble meter; **lava contact damage**;
   **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.

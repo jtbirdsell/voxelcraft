@@ -112,9 +112,10 @@ struct State {
     /// Row whose delete control is "armed" (showing the red "Delete?" confirm); a second click on the
     /// same row commits the `remove_dir_all`. Any other click / scene change disarms it.
     world_pending_delete: Option<usize>,
-    /// Create-world text-field buffers (name + seed).
+    /// Create-world text-field buffers (name + seed) + the chosen game mode (S1).
     create_name: String,
     create_seed: String,
+    create_mode: crate::rules::GameMode,
     /// Active settings tab (the "Back" target rides in `Scene::Settings { return_to }`).
     settings_tab: crate::menu::SettingsTab,
 }
@@ -216,6 +217,8 @@ impl App {
             xp: session.player.xp,
             level: session.player.level,
             difficulty: session.difficulty.as_u8(),
+            // Runtime source of truth for mode is the inventory's creative flag (S1).
+            mode: session.inventory.creative as u8,
         };
         let dir = &session.world_dir;
         session.game.save(dir, &level);
@@ -448,8 +451,13 @@ impl App {
             }
             KeyCode::ControlLeft => session.input.sprint = pressed,
             KeyCode::KeyF if pressed && !repeat => {
-                session.player.flying = !session.player.flying;
-                session.player.velocity = Vec3::ZERO;
+                // Flying is a creative-mode ability (S1); survival worlds always walk.
+                if session.inventory.creative {
+                    session.player.flying = !session.player.flying;
+                    session.player.velocity = Vec3::ZERO;
+                } else {
+                    log::info!("Flying requires a Creative world.");
+                }
             }
             KeyCode::KeyR if pressed && !repeat => {
                 let mode = session.game.cycle_rtx();
@@ -507,7 +515,9 @@ impl App {
             Scene::WorldSelect => {
                 menu::build_world_select(w, h, &state.worlds, state.world_sel, state.world_pending_delete, ui)
             }
-            Scene::CreateWorld => menu::build_create(w, h, &state.create_name, &state.create_seed, ui),
+            Scene::CreateWorld => {
+                menu::build_create(w, h, &state.create_name, &state.create_seed, state.create_mode, ui)
+            }
             Scene::Settings { .. } => {
                 let diff = state
                     .session
@@ -609,6 +619,11 @@ impl App {
             W::CreateCancel => self.set_scene(Scene::WorldSelect),
             W::NameField => self.focus_field(W::NameField),
             W::SeedField => self.focus_field(W::SeedField),
+            W::GameModeCycle => {
+                if let Some(state) = self.state.as_mut() {
+                    state.create_mode = state.create_mode.next();
+                }
+            }
             W::WorldRow(i) => self.play_world(i),
             W::DeleteWorld(i) => self.delete_world(i),
             W::CreateConfirm => self.create_world(),
@@ -677,7 +692,8 @@ impl App {
         };
         let name = if name.is_empty() { "New World".to_string() } else { name };
         let seed = parse_seed(&seed_text);
-        let info = match persistence::create_world(&name, seed) {
+        let mode = self.state.as_ref().map(|s| s.create_mode).unwrap_or_default();
+        let info = match persistence::create_world(&name, seed, mode) {
             Ok(info) => info,
             Err(e) => {
                 log::error!("failed to create world {name:?}: {e}");
@@ -687,10 +703,11 @@ impl App {
         if let Some(state) = self.state.as_mut() {
             state.create_name.clear();
             state.create_seed.clear();
+            state.create_mode = crate::rules::GameMode::default();
             state.menu.focused = None;
             state.menu.caret = 0;
         }
-        self.enter_world(info.dir, WorldSource::New { seed: info.seed });
+        self.enter_world(info.dir, WorldSource::New { seed: info.seed, mode });
     }
 
     /// Replace the scene and re-evaluate cursor grab.
@@ -958,8 +975,8 @@ impl App {
         .to_radians();
         session.camera.fovy += (target_fov - session.camera.fovy) * (10.0 * dt).min(1.0);
 
-        // Survival: a hard fall or starvation can kill; respawn at spawn.
-        if !session.player.flying && session.player.is_dead() {
+        // Survival: a hard fall or starvation can kill; respawn at spawn. Creative is immortal (S1).
+        if !session.player.creative && session.player.is_dead() {
             log::info!("You died — respawning at spawn.");
             // Drop the whole inventory at the death site, then respawn empty.
             let death_pos = session.player.position + Vec3::new(0.0, 1.0, 0.0);
@@ -1546,7 +1563,7 @@ impl App {
             &session.inventory,
             session.player.health,
             session.player.hunger,
-            !session.player.flying,
+            !session.player.creative,
             session.inventory.equipped_armor(),
             session.player.air_fraction(),
             session.player.submerged,
@@ -1771,8 +1788,8 @@ fn parse_seed(s: &str) -> u64 {
 enum WorldSource {
     /// Load the saved world (or a fresh default world if there's no save yet).
     Load,
-    /// A brand-new world with this seed — a fresh inventory, ignoring any existing save's blocks.
-    New { seed: u64 },
+    /// A brand-new world with this seed + game mode — a fresh inventory, ignoring any existing save.
+    New { seed: u64, mode: crate::rules::GameMode },
 }
 
 /// Build the in-game `Session` (world + player + camera + everything that exists only while playing).
@@ -1785,14 +1802,21 @@ fn create_session(
     source: WorldSource,
 ) -> Session {
     let default_spawn = Vec3::new(8.0, 96.0, 24.0);
+    let new_mode = match source {
+        WorldSource::New { mode, .. } => Some(mode),
+        WorldSource::Load => None,
+    };
     let new_seed = match source {
-        WorldSource::New { seed } => Some(seed),
+        WorldSource::New { seed, .. } => Some(seed),
         WorldSource::Load => None,
     };
     // A fresh world ignores any existing save; Load reads level.bin (or a fresh default if absent).
     let level = if new_seed.is_some() { None } else { persistence::load_level(dir) };
     let (seed, mut spawn, yaw, pitch, time, flying) = match (new_seed, &level) {
-        (Some(seed), _) => (seed, default_spawn, -std::f32::consts::FRAC_PI_2, -0.30, 0.34, true),
+        (Some(seed), _) => {
+            let fly = new_mode.is_some_and(|m| m.is_creative());
+            (seed, default_spawn, -std::f32::consts::FRAC_PI_2, -0.30, 0.34, fly)
+        }
         (None, Some(l)) => (l.seed, Vec3::from(l.spawn), l.yaw, l.pitch, l.time, l.flying),
         (None, None) => (SEED, default_spawn, -std::f32::consts::FRAC_PI_2, -0.30, 0.34, true),
     };
@@ -1801,10 +1825,17 @@ fn create_session(
     } else {
         persistence::load_chunks(dir)
     };
-    let (inventory, furnaces, chests) = if new_seed.is_some() {
-        (Inventory::new(true), Vec::new(), Vec::new())
+    let (inventory, furnaces, chests) = if let Some(mode) = new_mode {
+        (Inventory::new(mode.is_creative()), Vec::new(), Vec::new())
     } else {
-        persistence::load_state(dir, flying)
+        // Pre-first-save worlds have no save_state.bin: seed the creative flag from the level
+        // header's mode byte (S1; legacy headers default to creative). save_state's own byte wins
+        // once it exists.
+        let creative_default = level
+            .as_ref()
+            .map(|l| crate::rules::GameMode::from_u8(l.mode).is_creative())
+            .unwrap_or(flying);
+        persistence::load_state(dir, creative_default)
     };
     let mut game = Game::new(gpu, renderer.volume_bgl(), seed, quality, saved);
     game.restore_furnaces(furnaces);
@@ -1814,7 +1845,10 @@ fn create_session(
     let below_world = !spawn.y.is_finite() || spawn.y < 2.0;
     let buried = !flying && spawn.y < surf;
     if level.is_none() {
-        spawn.y = surf;
+        // Fresh world: spawn on dry land (S1 — a non-flying spawn on an ocean column would start
+        // the game on the seabed with a drowning timer).
+        let (sx, sz) = game.find_dry_spawn(spawn.x as i32, spawn.z as i32);
+        spawn = Vec3::new(sx as f32 + 0.5, game.spawn_surface_y(sx, sz), sz as f32 + 0.5);
     } else if below_world || buried {
         log::warn!(
             "loaded spawn y={:.1} at ({:.0},{:.0}) is buried/out-of-bounds — lifting to the surface ({surf:.1})",
@@ -1828,22 +1862,32 @@ fn create_session(
         .or_else(|| level.as_ref().map(|l| crate::rules::Difficulty::from_u8(l.difficulty)))
         .unwrap_or_default();
     game.set_difficulty(difficulty);
+    if level.is_none() {
+        // Commit the validated spawn (+ mode) immediately, so a crash before the first manual save
+        // reloads exactly here instead of at the canned header position (mid-air or underwater).
+        let _ = persistence::save_level(dir, &Level {
+            seed,
+            spawn: spawn.to_array(),
+            yaw,
+            pitch,
+            time,
+            flying,
+            health: 20.0,
+            hunger: 20.0,
+            air: 11.0,
+            saturation: 5.0,
+            xp: 0.0,
+            level: 0,
+            difficulty: difficulty.as_u8(),
+            mode: inventory.creative as u8,
+        });
+    }
     if let Ok(Ok(rays)) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
         game.set_rtx_quality(rays.max(1));
     }
-    // One of each species near spawn (12 ring slots for the P18 species too).
-    let ring = [
-        (-4, -6), (4, -6), (7, 0), (4, 6), (-4, 6), (-7, 0), (0, 8), (0, -8),
-        (8, 8), (-8, 8), (8, -8), (-8, -8),
-    ];
-    for (species, &(dx, dz)) in crate::entity::Species::ALL.iter().zip(ring.iter()) {
-        game.spawn_mob(Vec3::new(spawn.x + dx as f32, spawn.y, spawn.z + dz as f32), *species);
-    }
-    if !difficulty.spawns_hostiles() {
-        game.despawn_hostiles();
-    }
     let environment = Environment::new(time);
     let mut player = Player::new(spawn, flying);
+    player.creative = inventory.creative;
     player.difficulty = difficulty;
     if let Some(l) = &level {
         player.restore_state(l.health, l.hunger, l.air, l.saturation, l.xp, l.level);
@@ -1997,6 +2041,7 @@ pub fn persist_selftest() {
         xp: 7.0,
         level: 3,
         difficulty: 3, // Hard
+        mode: 0,       // Survival
     };
     let mut chest_slots = vec![None; crate::container::CHEST_SLOTS];
     chest_slots[2] = Some(item::ItemStack::new(block::DIAMOND_ORE, 9));
@@ -2129,7 +2174,9 @@ impl ApplicationHandler for App {
             ];
             let (verts, _rects) = match which.as_str() {
                 "worlds" => crate::menu::build_world_select(w, h, &worlds, 0, None, &ui),
-                "create" => crate::menu::build_create(w, h, "New World", "", &ui),
+                "create" => {
+                    crate::menu::build_create(w, h, "New World", "", crate::rules::GameMode::default(), &ui)
+                }
                 "settings" => crate::menu::build_settings(
                     w,
                     h,
@@ -2692,6 +2739,7 @@ impl ApplicationHandler for App {
             world_pending_delete: None,
             create_name: String::new(),
             create_seed: String::new(),
+            create_mode: crate::rules::GameMode::default(),
             settings_tab: crate::menu::SettingsTab::General,
         });
         self.set_grab(skip_menu);

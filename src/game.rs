@@ -1683,6 +1683,31 @@ impl Game {
         self.worldgen.height(wx, wz) as f32 + 2.0
     }
 
+    /// Nearest dry-land spawn column to (wx,wz): the column itself when its terrain clears sea level,
+    /// else an outward ring scan in 8-block steps (deterministic — pure worldgen height queries). A
+    /// non-flying spawn on an ocean column would otherwise put the player on the seabed with a
+    /// drowning timer (S1). Falls back to the original column after ~24 rings (all-ocean region);
+    /// the caller's surface Y then sits at the seabed, but that pathological seed keeps working.
+    pub fn find_dry_spawn(&self, wx: i32, wz: i32) -> (i32, i32) {
+        let dry = |x: i32, z: i32| self.worldgen.height(x, z) > crate::worldgen::SEA_LEVEL;
+        if dry(wx, wz) {
+            return (wx, wz);
+        }
+        const STEP: i32 = 8;
+        for ring in 1..=24 {
+            let r = ring * STEP;
+            // Walk the ring's perimeter cells (corners visited once via the range splits).
+            for d in (-r..=r).step_by(STEP as usize) {
+                for (x, z) in [(wx + d, wz - r), (wx + d, wz + r), (wx - r, wz + d), (wx + r, wz + d)] {
+                    if dry(x, z) {
+                        return (x, z);
+                    }
+                }
+            }
+        }
+        (wx, wz)
+    }
+
     /// Topmost walkable ground surface at (wx,wz) with 2 air blocks above (room for a mob), else
     /// None. Only real ground counts (grass/dirt/stone/sand/snow/gravel) — never a leaf canopy or a
     /// tree trunk, so mobs don't spawn perched in the air on trees.

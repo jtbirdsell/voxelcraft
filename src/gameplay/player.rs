@@ -84,6 +84,10 @@ pub struct Player {
     pub velocity: Vec3,
     pub on_ground: bool,
     pub flying: bool,
+    /// Creative-mode invulnerability (S1): mirrors `Inventory.creative`, set once at session build
+    /// (nothing toggles mode mid-game yet). Creative takes no damage and runs no hunger/air drain
+    /// even on foot; survival can never fly, so the old flying-implies-creative shortcut is gone.
+    pub creative: bool,
     pub health: f32,
     pub hunger: f32,
     /// Breath remaining underwater (0..MAX_AIR); drives the bubble bar + drowning.
@@ -163,6 +167,7 @@ impl Player {
             velocity: Vec3::ZERO,
             on_ground: false,
             flying,
+            creative: false,
             health: MAX_HEALTH,
             hunger: MAX_HUNGER,
             air: MAX_AIR,
@@ -190,6 +195,10 @@ impl Player {
     /// External combat hit (mob contact / arrow), reduced by armor. A short post-hit invulnerability
     /// window drops further hits so a swarm can't stack a frame of damage into an instant kill.
     pub fn take_hit(&mut self, raw: f32) {
+        // Creative mode is invulnerable to combat damage (S1), like Minecraft.
+        if self.creative {
+            return;
+        }
         // All hostile-sourced damage (mob melee, arrows, creeper blasts) scales with difficulty
         // (Peaceful = 0). Environmental damage bypasses take_hit — it calls apply_damage directly —
         // so fall/lava/drowning/starvation are never difficulty-scaled.
@@ -524,7 +533,7 @@ impl Player {
         } else {
             // Water cushions the fall — no landing damage accrues while submerged.
             let landed = hit_y && delta.y < 0.0;
-            if landed && !self.on_ground && !in_water {
+            if landed && !self.on_ground && !in_water && !self.creative {
                 let fall = (self.air_max_y - self.position.y).max(0.0);
                 let dmg = (fall - SAFE_FALL).max(0.0);
                 self.apply_damage(dmg, 0); // base armor doesn't soften fall damage (matches Minecraft)
@@ -535,8 +544,14 @@ impl Player {
             } else {
                 self.air_max_y = self.air_max_y.max(self.position.y);
             }
-            let env_damage = self.update_environment_damage(dt, head_submerged, in_lava);
-            self.update_survival(dt, input, env_damage);
+            if self.creative {
+                // Creative on foot (S1): submerged still drives the HUD/FOV cue, but air never
+                // drains and no environmental or hunger mechanics run — creative is immortal.
+                self.submerged = head_submerged;
+            } else {
+                let env_damage = self.update_environment_damage(dt, head_submerged, in_lava);
+                self.update_survival(dt, input, env_damage);
+            }
         }
     }
 

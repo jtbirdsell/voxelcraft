@@ -34,6 +34,9 @@ pub struct Level {
     /// World difficulty (P6) as a u8 (0 Peaceful … 3 Hard). Appended after the survival block;
     /// absent in older saves → defaults to Normal (2).
     pub difficulty: u8,
+    /// Game mode (S1) as a u8 (0 Survival, 1 Creative), at offset 58. Absent in pre-S1 saves →
+    /// defaults to 1: every pre-S1 world was created creative+flying, so legacy stays creative.
+    pub mode: u8,
 }
 
 /// One chest's persisted contents (P3), saved in the chest section of `save_state.bin` (v4+).
@@ -157,7 +160,12 @@ pub fn list_worlds() -> Vec<WorldInfo> {
 /// never `create_dir_all`) so it can never write into an existing world's directory — which also makes
 /// it correct on case-insensitive NTFS, where "World" and an existing "world" are the same path.
 /// `level.bin` is written first so a crash can't leave a named-but-unlistable dir.
-pub fn create_world_in(root: &Path, name: &str, seed: u64) -> std::io::Result<WorldInfo> {
+pub fn create_world_in(
+    root: &Path,
+    name: &str,
+    seed: u64,
+    mode: crate::rules::GameMode,
+) -> std::io::Result<WorldInfo> {
     fs::create_dir_all(root)?;
     let base = slugify(name);
     let mut dir = None;
@@ -186,7 +194,7 @@ pub fn create_world_in(root: &Path, name: &str, seed: u64) -> std::io::Result<Wo
         yaw: -std::f32::consts::FRAC_PI_2,
         pitch: -0.30,
         time: 0.34,
-        flying: true,
+        flying: mode.is_creative(),
         health: 20.0,
         hunger: 20.0,
         air: 11.0,
@@ -194,6 +202,7 @@ pub fn create_world_in(root: &Path, name: &str, seed: u64) -> std::io::Result<Wo
         xp: 0.0,
         level: 0,
         difficulty: 2, // Normal
+        mode: mode.as_u8(),
     };
     save_level(&dir, &level)?;
     let display = name.trim();
@@ -202,8 +211,8 @@ pub fn create_world_in(root: &Path, name: &str, seed: u64) -> std::io::Result<Wo
 }
 
 /// Create a world in the standard `saves/worlds/` root.
-pub fn create_world(name: &str, seed: u64) -> std::io::Result<WorldInfo> {
-    create_world_in(&worlds_root(), name, seed)
+pub fn create_world(name: &str, seed: u64, mode: crate::rules::GameMode) -> std::io::Result<WorldInfo> {
+    create_world_in(&worlds_root(), name, seed, mode)
 }
 
 /// Delete a world directory. Refuses anything that is not a **direct child** of `root`, so a malformed
@@ -304,6 +313,8 @@ pub fn load_level(dir: &Path) -> Option<Level> {
         level: if has_survival { rd_u32(&d, 53) } else { 0 },
         // Difficulty byte at offset 57 (after the 24-byte survival block); default Normal (2).
         difficulty: if d.len() >= 58 { d[57] } else { 2 },
+        // Game-mode byte at offset 58 (S1); pre-S1 worlds were all creative (1).
+        mode: if d.len() >= 59 { d[58] } else { 1 },
     })
 }
 
@@ -326,6 +337,7 @@ pub fn save_level(dir: &Path, level: &Level) -> std::io::Result<()> {
     b.extend_from_slice(&level.xp.to_le_bytes());
     b.extend_from_slice(&level.level.to_le_bytes());
     b.push(level.difficulty); // P6: difficulty byte, after the survival block
+    b.push(level.mode); // S1: game-mode byte (0 survival / 1 creative)
     fs::write(dir.join("level.bin"), b)
 }
 
@@ -682,6 +694,7 @@ mod tests {
             xp: 3.0,
             level: 4,
             difficulty: 3, // Hard
+            mode: 0,       // Survival
         };
         save_level(&dir, &level).unwrap();
         let ll = load_level(&dir).unwrap();
@@ -694,6 +707,12 @@ mod tests {
         assert!((ll.air - 4.0).abs() < 1e-6);
         assert_eq!(ll.level, 4);
         assert_eq!(ll.difficulty, 3); // P6 difficulty round-trips
+        assert_eq!(ll.mode, 0); // S1 game mode round-trips
+
+        // A pre-S1 level.bin (no mode byte) loads as creative — every legacy world was creative.
+        let legacy = fs::read(dir.join("level.bin")).unwrap();
+        fs::write(dir.join("level.bin"), &legacy[..58]).unwrap();
+        assert_eq!(load_level(&dir).unwrap().mode, 1);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -843,6 +862,7 @@ mod tests {
             xp: 0.0,
             level: 0,
             difficulty: 2,
+            mode: 0,
         }
     }
 
@@ -862,7 +882,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("voxelcraft_wlist_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let w = create_world_in(&root, "Caves", 0x00AB_CDEF).unwrap();
+        let w = create_world_in(&root, "Caves", 0x00AB_CDEF, crate::rules::GameMode::Survival).unwrap();
         assert!(w.dir.join("level.bin").is_file());
         assert!(w.dir.join("name.txt").is_file());
         let list = list_worlds_in(&root);
@@ -873,12 +893,28 @@ mod tests {
     }
 
     #[test]
+    fn create_world_mode_round_trips() {
+        let root =
+            std::env::temp_dir().join(format!("voxelcraft_wmode_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let s = create_world_in(&root, "Hard Life", 7, crate::rules::GameMode::Survival).unwrap();
+        let c = create_world_in(&root, "Sandbox", 8, crate::rules::GameMode::Creative).unwrap();
+        let sl = load_level(&s.dir).unwrap();
+        let cl = load_level(&c.dir).unwrap();
+        assert_eq!(sl.mode, 0);
+        assert!(!sl.flying, "survival worlds start on foot");
+        assert_eq!(cl.mode, 1);
+        assert!(cl.flying, "creative worlds keep the flying start");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn create_world_suffixes_on_exact_collision() {
         let root =
             std::env::temp_dir().join(format!("voxelcraft_wcoll_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let a = create_world_in(&root, "Home", 1).unwrap();
-        let b = create_world_in(&root, "Home", 2).unwrap();
+        let a = create_world_in(&root, "Home", 1, crate::rules::GameMode::Survival).unwrap();
+        let b = create_world_in(&root, "Home", 2, crate::rules::GameMode::Survival).unwrap();
         assert_eq!(a.dir.file_name().unwrap(), "Home");
         assert_eq!(b.dir.file_name().unwrap(), "Home-2");
         // Neither create clobbered the other's header.
@@ -894,8 +930,8 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("voxelcraft_wcase_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let a = create_world_in(&root, "world", 111).unwrap();
-        let b = create_world_in(&root, "World", 222).unwrap();
+        let a = create_world_in(&root, "world", 111, crate::rules::GameMode::Survival).unwrap();
+        let b = create_world_in(&root, "World", 222, crate::rules::GameMode::Survival).unwrap();
         assert_ne!(a.dir, b.dir);
         assert_eq!(load_level(&a.dir).unwrap().seed, 111); // untouched
         assert_eq!(load_level(&b.dir).unwrap().seed, 222);
@@ -907,7 +943,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("voxelcraft_wdel_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let w = create_world_in(&root, "Doomed", 5).unwrap();
+        let w = create_world_in(&root, "Doomed", 5, crate::rules::GameMode::Survival).unwrap();
         assert!(w.dir.is_dir());
         // Refuse a sibling outside the root.
         let outside = root.parent().unwrap().join(format!("voxelcraft_wdel_evil_{}", std::process::id()));

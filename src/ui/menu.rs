@@ -6,7 +6,7 @@
 #![allow(dead_code)] // widget layer + builders — wired into the scene flow / input in N3–N5.
 
 use crate::overlay::{push_px_rect, push_text, text_width, UiVertex};
-use crate::rules::Difficulty;
+use crate::rules::{Difficulty, GameMode};
 use crate::settings::Settings;
 
 /// A pixel-space rectangle (top-left origin), for layout + hit-testing.
@@ -40,6 +40,7 @@ pub enum WidgetId {
     // Create world
     NameField,
     SeedField,
+    GameModeCycle,
     CreateConfirm,
     CreateCancel,
     // Settings — general tab
@@ -331,7 +332,7 @@ pub fn build_world_select(
     (v, rects)
 }
 
-pub fn build_create(sw: f32, sh: f32, name: &str, seed: &str, ui: &UiState) -> Built {
+pub fn build_create(sw: f32, sh: f32, name: &str, seed: &str, mode: GameMode, ui: &UiState) -> Built {
     let (mut v, mut rects) = (Vec::new(), Vec::new());
     backdrop(&mut v, sw, sh);
     title(&mut v, sw, sh, sh * 0.18, 4.0, "Create World");
@@ -342,8 +343,12 @@ pub fn build_create(sw: f32, sh: f32, name: &str, seed: &str, ui: &UiState) -> B
     let sr = col.row(1);
     text_field(&mut v, sw, sh, sr, "Seed", seed, "(random)", ui.focused == Some(WidgetId::SeedField), ui.caret);
     rects.push((WidgetId::SeedField, sr));
+    // Game mode (S1): Survival (default) <-> Creative.
+    let mr = col.row(2);
+    cycler(&mut v, sw, sh, mr, "Game Mode", mode.name(), ui.hovered == Some(WidgetId::GameModeCycle), false);
+    rects.push((WidgetId::GameModeCycle, mr));
     // Buttons.
-    let br = col.row(3);
+    let br = col.row(4);
     let confirm = Rect { x: br.x, y: br.y, w: 250.0, h: ROW_H };
     let cancel = Rect { x: br.x + 270.0, y: br.y, w: 250.0, h: ROW_H };
     emit(&mut v, &mut rects, WidgetId::CreateConfirm, confirm, sw, sh, "Create", ui);
@@ -454,9 +459,10 @@ mod tests {
             assert!(set.iter().any(|(id, _)| *id == WidgetId::SettingsBack));
             assert!(set.iter().any(|(id, _)| *id == WidgetId::GraphicsTab));
         }
-        let (_, cr) = build_create(1600.0, 900.0, "", "", &ui());
+        let (_, cr) = build_create(1600.0, 900.0, "", "", GameMode::Survival, &ui());
         assert!(cr.iter().any(|(id, _)| *id == WidgetId::NameField));
         assert!(cr.iter().any(|(id, _)| *id == WidgetId::SeedField));
+        assert!(cr.iter().any(|(id, _)| *id == WidgetId::GameModeCycle));
     }
 
     fn worlds() -> Vec<WorldInfo> {
