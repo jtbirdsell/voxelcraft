@@ -161,15 +161,18 @@ fn sculk_convertible(b: BlockId) -> bool {
         )
 }
 
-/// Natural-spawn tuning (P16: light + biome-gated, per-category caps, packs).
-const SPAWN_INTERVAL: f32 = 2.0; // seconds between spawn attempts
-const HOSTILE_CAP: usize = 12; // max live hostile mobs (continuous night spawning is MC-faithful)
+/// Natural-spawn tuning (P16 light/biome gates + S5 3D underground sampling).
+const SPAWN_INTERVAL: f32 = 1.0; // seconds between spawn ticks
+const HOSTILE_ATTEMPTS: usize = 6; // S5: hostile sample attempts per tick (most miss — 3D sampling)
+const LIGHT_FLOOD_BUDGET: u32 = 2; // S5: max block-light floods per tick (each can cost ~1 ms near emitters)
+pub(crate) const HOSTILE_CAP: usize = 40; // max live hostiles (S5: was 12; vanilla ~70, sized to the despawn shell)
 const PASSIVE_CAP: usize = 8; // max live passive animals NEAR the spawn site (S3: local, not global)
 const PASSIVE_NEAR_RADIUS: f32 = 64.0; // the "near" radius for that local cap
 const PASSIVE_MIN: f32 = 8.0; // animals may spawn close (8..24 ring)
 const PASSIVE_MAX: f32 = 24.0;
-const HOSTILE_MIN: f32 = 16.0; // a no-spawn bubble so hostiles don't appear point-blank (MC ~24)
-const HOSTILE_MAX: f32 = 32.0; // ...but inside DESPAWN_RADIUS(48) so they don't instantly vanish
+const HOSTILE_MIN: f32 = 16.0; // a no-spawn bubble (3D since S5) so hostiles don't appear point-blank
+const HOSTILE_MAX: f32 = 44.0; // ...inside DESPAWN_RADIUS(64): max 3D spawn dist √(44²+24²) ≈ 50
+const HOSTILE_Y_RANGE: i32 = 24; // S5: vertical sample half-range around the player's feet
 const PACK_SIZE: usize = 4; // animals spawn in clusters of this size
 const PACK_RADIUS: i32 = 3; // pack scatter radius (blocks)
 
@@ -1830,10 +1833,30 @@ impl Game {
         spawned
     }
 
-    /// One natural-spawn attempt around the player (P16): at night, a HOSTILE on any solid surface in
-    /// the dark (block-light 0, MC 1.18+); by day, a biome-appropriate PASSIVE PACK on lit grass. Each
-    /// category has its own ring + cap. `day` is the day factor (0 = night, 1 = full day).
+    /// One natural-spawn tick (S5). HOSTILES sample light-0 standable cells in a 3D shell around
+    /// the player — caves qualify at any hour, the surface only at night — replacing the old
+    /// topmost-surface-at-night-only rule that left caves permanently safe. PASSIVE packs keep
+    /// their daytime lit-grass path. `day` is the day factor (0 = night, 1 = full day).
     pub fn try_spawn(&mut self, day: f32, player_pos: Vec3) -> bool {
+        let mut any = false;
+        if self.difficulty.spawns_hostiles() {
+            // The block-light gate can flood-fill near underground emitters (~1 ms worst case),
+            // so it is budgeted per tick; attempts that exhaust the budget simply fail.
+            let mut light_budget = LIGHT_FLOOD_BUDGET;
+            for _ in 0..HOSTILE_ATTEMPTS {
+                any |= self.try_spawn_hostile(day, player_pos, &mut light_budget);
+            }
+        }
+        if day > 0.6 {
+            any |= self.try_spawn_passive(player_pos);
+        }
+        any
+    }
+
+    /// One hostile spawn attempt (S5): a random cell in a ring 16..44 out and ±24 vertically.
+    /// Gate order is cost-ordered — free structural checks, the sky column, then the budgeted
+    /// block-light flood LAST.
+    fn try_spawn_hostile(&mut self, day: f32, player_pos: Vec3, light_budget: &mut u32) -> bool {
         use crate::entity::Species;
         const HOSTILE: [Species; 6] = [
             Species::Zombie,
@@ -1843,34 +1866,72 @@ impl Game {
             Species::Slime, // P18 (spawn_mob makes a LARGE slime by default)
             Species::Enderman,
         ];
-        let night = day < 0.35 && self.difficulty.spawns_hostiles();
-        let daytime = day > 0.6;
-        if !night && !daytime {
-            return false; // dawn/dusk: no spawns
+        if self.entities.hostile_count() >= HOSTILE_CAP {
+            return false;
         }
         let r = self.spawn_rand();
-        let (rmin, rmax) = if night { (HOSTILE_MIN, HOSTILE_MAX) } else { (PASSIVE_MIN, PASSIVE_MAX) };
         let angle = (r & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
-        let dist = rmin + ((r >> 16) & 0xffff) as f32 / 65535.0 * (rmax - rmin);
+        let dist = HOSTILE_MIN + ((r >> 16) & 0xffff) as f32 / 65535.0 * (HOSTILE_MAX - HOSTILE_MIN);
+        let wx = (player_pos.x + angle.cos() * dist).floor() as i32;
+        let wz = (player_pos.z + angle.sin() * dist).floor() as i32;
+        let wy = (player_pos.y as i32 + ((r >> 40) % (2 * HOSTILE_Y_RANGE as u64 + 1)) as i32
+            - HOSTILE_Y_RANGE)
+            .clamp(1, WORLD_HEIGHT_CHUNKS * CHUNK_SIZE_I - 2);
+        let feet = IVec3::new(wx, wy, wz);
+        // Standable: solid (non-leaf) footing + 2 air. Unloaded chunks read AIR → footing fails.
+        let below = self.block_at(feet - IVec3::Y);
+        if !block::is_solid(below)
+            || below == block::LEAVES
+            || below == block::AZALEA_LEAVES
+            || self.block_at(feet) != block::AIR
+            || self.block_at(feet + IVec3::Y) != block::AIR
+        {
+            return false;
+        }
+        let fc = feet.as_vec3() + Vec3::new(0.5, 0.0, 0.5);
+        // 3D no-spawn bubble: a cave cell 20 blocks out horizontally can sit right under the
+        // player's feet — the spherical distance is what "point-blank" means.
+        if (fc - player_pos).length() < HOSTILE_MIN {
+            return false;
+        }
+        let night = day < 0.35;
+        if !night && self.sky_light_at(feet) > 0 {
+            return false; // sky-exposed by day — hostiles need darkness (caves qualify any hour)
+        }
+        if *light_budget == 0 {
+            return false;
+        }
+        *light_budget -= 1;
+        if self.block_light_at(feet) > 0 {
+            return false; // torch/glowstone/lava-lit — the player's light management works
+        }
+        let mut species = HOSTILE[((r >> 32) as usize) % HOSTILE.len()];
+        // The spider's 1.1-wide AABB overhangs its column; centered in a 1-wide noodle tunnel it
+        // would wedge into both walls permanently. Require one open side column, else a zombie.
+        if species == Species::Spider {
+            let open = [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z].iter().any(|&d| {
+                self.block_at(feet + d) == block::AIR
+                    && self.block_at(feet + d + IVec3::Y) == block::AIR
+            });
+            if !open {
+                species = Species::Zombie;
+            }
+        }
+        self.entities.spawn_mob(fc, species);
+        true
+    }
+
+    /// One daytime passive-pack attempt: biome-pool species on lit grass (unchanged from P16).
+    fn try_spawn_passive(&mut self, player_pos: Vec3) -> bool {
+        let r = self.spawn_rand();
+        let angle = (r & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+        let dist = PASSIVE_MIN + ((r >> 16) & 0xffff) as f32 / 65535.0 * (PASSIVE_MAX - PASSIVE_MIN);
         let wx = (player_pos.x + angle.cos() * dist).floor() as i32;
         let wz = (player_pos.z + angle.sin() * dist).floor() as i32;
         let Some((sy, surf)) = self.surface_at(wx, wz) else {
             return false;
         };
         let feet = IVec3::new(wx, sy + 1, wz);
-
-        if night {
-            // Hostiles on any solid surface, only where it's genuinely dark (no nearby torch/glowstone).
-            if self.entities.hostile_count() >= HOSTILE_CAP || self.block_light_at(feet) > 0 {
-                return false;
-            }
-            let pick = ((r >> 32) as usize) % HOSTILE.len();
-            self.entities
-                .spawn_mob(Vec3::new(wx as f32 + 0.5, (sy + 1) as f32, wz as f32 + 0.5), HOSTILE[pick]);
-            return true;
-        }
-
-        // Daytime passive pack on lit grass, species drawn from the biome's pool.
         if surf != block::GRASS
             || self.entities.passive_count_near_xz(
                 Vec3::new(wx as f32, 0.0, wz as f32),
@@ -1888,6 +1949,16 @@ impl Game {
         }
         let species = pool[((r >> 32) as usize) % pool.len()];
         self.spawn_passive_pack(species, wx, wz) > 0
+    }
+
+    /// S5 selftest: hostiles whose feet sit at/above their column's worldgen surface (sky-side).
+    /// Daytime spawning must keep this at zero — underground spawns only.
+    pub fn hostiles_at_surface(&self) -> usize {
+        self.entities
+            .hostile_positions()
+            .into_iter()
+            .filter(|p| p.y >= self.worldgen.height(p.x.floor() as i32, p.z.floor() as i32) as f32)
+            .count()
     }
 
     /// Furnace state at `pos`, creating an empty one (the player just opened it).

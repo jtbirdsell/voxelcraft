@@ -2532,30 +2532,38 @@ impl ApplicationHandler for App {
                 log::info!("M30 explosion: radial player damage {dmg:.1}");
             }
 
-            // Debug: VOXELCRAFT_SPAWN=1 exercises P16 light/biome-gated spawning + per-category caps.
+            // Debug: VOXELCRAFT_SPAWN=1 exercises the spawn rules (P16 light/biome gates + S5
+            // underground sampling): daytime hostiles must ALL be underground; caps hold.
             if std::env::var("VOXELCRAFT_SPAWN").is_ok() {
                 for _ in 0..160 {
-                    game.try_spawn(1.0, player.position); // day → passive packs on lit grass
+                    game.try_spawn(1.0, player.position); // day → passive packs + CAVE hostiles only
                 }
+                let underground = game.hostile_count() - game.hostiles_at_surface();
                 log::info!(
-                    "P16 day spawns: {} (passive_count={})",
+                    "S5 day spawns: {} (passive_count={}, cave hostiles={underground})",
                     game.mob_species_summary(),
                     game.passive_count()
                 );
                 assert!(game.passive_count() <= 8, "passive cap holds");
+                assert_eq!(
+                    game.hostiles_at_surface(),
+                    0,
+                    "daytime hostiles must spawn underground only (S5)"
+                );
                 game.despawn_all_mobs();
                 for _ in 0..160 {
-                    game.try_spawn(0.0, player.position); // night → hostiles in the dark
+                    game.try_spawn(0.0, player.position); // night → surface AND cave hostiles
                 }
                 log::info!(
-                    "P16 night spawns: {} (hostile_count={})",
+                    "S5 night spawns: {} (hostile_count={}, at surface={})",
                     game.mob_species_summary(),
-                    game.hostile_count()
+                    game.hostile_count(),
+                    game.hostiles_at_surface()
                 );
-                assert!(game.hostile_count() <= 12, "hostile cap holds");
+                assert!(game.hostile_count() <= crate::game::HOSTILE_CAP, "hostile cap holds");
                 // Despawn-radius: a tick with the player teleported far culls the distant mobs.
                 let _ = game.update(&gpu, &renderer, Vec3::splat(5000.0), 0.1, 0.0);
-                log::info!("P16 after far tick (despawn): {}", game.mob_species_summary());
+                log::info!("S5 after far tick (despawn): {}", game.mob_species_summary());
             }
 
             // P21: scripted edits above queue boundary-neighbor remeshes on the worker pool —

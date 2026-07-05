@@ -25,7 +25,10 @@ const XP_HOMING_SPEED: f32 = 9.0;
 // Mob AI (M28) tuning.
 const DETECT_RADIUS: f32 = 14.0; // hostile mobs notice the player within this (needs line-of-sight)
 const CALM_RADIUS: f32 = 22.0; // ...and give up the chase beyond this
-const DESPAWN_RADIUS: f32 = 48.0; // mobs further than this from the player vanish (M31)
+// S5: hostile despawn shell (was 48). Must exceed the max 3D spawn distance
+// √(HOSTILE_MAX² + Y_RANGE²) ≈ 50, or fresh cave spawns would be culled the same frame.
+// Hostile-only since S3 (passives persist).
+const DESPAWN_RADIUS: f32 = 64.0;
 const FLEE_RADIUS: f32 = 5.0; // passive mobs bolt when the player gets this close (or after a hit)
 const ATTACK_RADIUS: f32 = 1.6; // hostile mobs lunge/attack when this close
 const CHASE_SPEED: f32 = 3.2;
@@ -542,6 +545,15 @@ impl Entities {
     }
     pub fn passive_count(&self) -> usize {
         self.list.iter().filter(|e| matches!(e.kind, Kind::Mob(m) if !m.species.hostile())).count()
+    }
+
+    /// Feet positions of all live hostiles (S5 spawn selftest: surface-vs-underground tally).
+    pub fn hostile_positions(&self) -> Vec<Vec3> {
+        self.list
+            .iter()
+            .filter(|e| !e.dead && matches!(e.kind, Kind::Mob(m) if m.species.hostile()))
+            .map(|e| e.pos)
+            .collect()
     }
 
     /// Passive/neutral mobs within a horizontal `radius` of `pos` (S3): the natural-spawn cap
@@ -1065,7 +1077,15 @@ impl Entities {
             .collect();
         for (self_idx, e) in self.list.iter_mut().enumerate() {
             if !chunk_loaded(e.pos.floor().as_ivec3()) {
-                continue; // S3: frozen until its chunk streams in
+                // S3: frozen until its chunk streams in — but a frozen HOSTILE beyond the despawn
+                // shell still despawns (S5): the player outrunning the streaming radius must not
+                // leave far frozen hostiles pinning the population cap (no physics needed to die).
+                if let Kind::Mob(m) = e.kind {
+                    if m.species.hostile() && (e.pos - player_pos).length() > DESPAWN_RADIUS {
+                        e.dead = true;
+                    }
+                }
+                continue;
             }
             e.age += dt;
             match e.kind {

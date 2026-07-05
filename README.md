@@ -281,10 +281,13 @@ position, albedo + skylight) and an ACES tonemap.
   **local navigation** — mobs **step up** one-block ledges, **avoid walking off cliffs** (passives) and
   **into lava**, and **deflect around walls** rather than stuttering into them (a chaser pursues
   relentlessly, dropping off ledges to follow you but still routing around lava). They **spawn
-  naturally** by Minecraft-style rules: hostiles appear only in the **dark** (block-light 0) at night,
-  on any solid surface a short distance out; passive animals appear in **packs** on **sunlit grass**,
-  drawn from a **biome-appropriate** pool. Hostiles and animals have **separate population caps** and
-  despawn once you roam far away. Dropped items + XP orbs share the same entity physics.
+  naturally** by Minecraft 1.18+ rules: hostiles appear wherever it is **genuinely dark**
+  (block-light 0), sampled through a 3D shell around you (±24 vertically) — so **caves spawn
+  hostiles at any hour** while the **surface** spawns them **only at night**, and torches/lava
+  genuinely keep an area mob-free (light management matters underground). Passive animals appear in
+  **packs** on **sunlit grass**, drawn from a **biome-appropriate** pool. Hostiles cap at ~40 and
+  despawn beyond a 64-block shell; passives never distance-despawn (pens and pets are permanent).
+  Dropped items + XP orbs share the same entity physics.
 - **Life cycle**: **feed** an animal its food (wheat → cows/sheep, seeds → chickens, carrots → pigs) to
   put it in love-mode; two in-love animals nearby breed a **baby** (a half-size juvenile that grows up
   after a while). **Zombies and skeletons burn** in direct daylight when they're out in the open sun.
