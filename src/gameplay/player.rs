@@ -555,10 +555,32 @@ impl Player {
         }
     }
 
-    /// Move along one axis, then resolve overlap by clamping the player AABB to the nearest face of
-    /// any block sub-box it penetrates (full cubes, but also slab/stair half-boxes). Returns true if
-    /// a collision was resolved.
+    /// Move along one axis with substepping (S2): a 0.1 s frame at terminal velocity spans ~6
+    /// blocks, so the motion is cut into steps small enough that any crossed face still overlaps
+    /// the stepped AABB — high-speed frames can't tunnel. Returns true if a collision clamped the
+    /// motion (the remaining distance is discarded — the axis is blocked).
     fn move_axis(&mut self, axis: usize, amount: f32, block_at: &impl Fn(IVec3) -> (BlockId, u8)) -> bool {
+        // Safe bound: a crossed obstacle stays inside the stepped AABB while the step is below the
+        // smallest body extent (width 0.6); 0.45 leaves margin, and covers the thin sub-boxes too
+        // (a crossed door/pane panel ~0.1 thick still sits inside the 0.6-deep trailing AABB).
+        const MAX_STEP: f32 = 0.45;
+        let mut remaining = amount;
+        while remaining != 0.0 {
+            let step = remaining.clamp(-MAX_STEP, MAX_STEP);
+            remaining -= step;
+            if self.move_axis_step(axis, step, block_at) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// One bounded step: advance, then clamp the AABB back to the near face of any block sub-box
+    /// it actually penetrates (full cubes, slab/stair halves, thin door/pane panels). The box must
+    /// truly overlap on ALL three axes — a sub-box that shares the scanned cell but sits outside
+    /// the AABB on the moving axis (a fence post behind the player) must not clamp, or walking
+    /// away from a fence teleports the player through it to its far face.
+    fn move_axis_step(&mut self, axis: usize, amount: f32, block_at: &impl Fn(IVec3) -> (BlockId, u8)) -> bool {
         if amount == 0.0 {
             return false;
         }
@@ -586,11 +608,11 @@ impl Player {
                         // World-space sub-box.
                         let bmin = [base[0] + b[0], base[1] + b[1], base[2] + b[2]];
                         let bmax = [base[0] + b[3], base[1] + b[4], base[2] + b[5]];
-                        // Only blocks the player overlaps on the two perpendicular axes can stop it.
-                        let perp = (0..3).filter(|&a| a != axis).all(|a| {
+                        // A genuine penetration overlaps on every axis (including the moving one).
+                        let overlap = (0..3).all(|a| {
                             cmin[a] < bmax[a] - 1e-4 && cmax[a] > bmin[a] + 1e-4
                         });
-                        if !perp {
+                        if !overlap {
                             continue;
                         }
                         if amount > 0.0 {
@@ -612,6 +634,30 @@ impl Player {
         } else {
             false
         }
+    }
+
+    /// True if any solid collision box strictly overlaps the player AABB (shrunk by 1e-3): the
+    /// saved position is genuinely inside blocks (a corrupt/stale save). Standing ON a surface is
+    /// contact, not overlap, so a survival save on a slab or inside a dug-out cave room is fine (S2).
+    pub fn is_inside_solid(&self, block_at: &impl Fn(IVec3) -> (BlockId, u8)) -> bool {
+        let (pmin, pmax) = self.aabb();
+        let smin = [pmin.x + 1e-3, pmin.y + 1e-3, pmin.z + 1e-3];
+        let smax = [pmax.x - 1e-3, pmax.y - 1e-3, pmax.z - 1e-3];
+        for vx in (smin[0].floor() as i32)..=(smax[0].floor() as i32) {
+            for vy in (smin[1].floor() as i32)..=(smax[1].floor() as i32) {
+                for vz in (smin[2].floor() as i32)..=(smax[2].floor() as i32) {
+                    let (id, st) = block_at(IVec3::new(vx, vy, vz));
+                    for b in block::solid_boxes(id, st) {
+                        let bmin = [vx as f32 + b[0], vy as f32 + b[1], vz as f32 + b[2]];
+                        let bmax = [vx as f32 + b[3], vy as f32 + b[4], vz as f32 + b[5]];
+                        if (0..3).all(|a| smin[a] < bmax[a] && smax[a] > bmin[a]) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -670,6 +716,85 @@ mod tests {
         // AABB half-width is 0.3, wall face at x = 5, so max feet x = 4.7.
         assert!(player.position.x <= 4.71, "x = {}", player.position.x);
         assert!(player.position.x > 0.5, "player did not move toward the wall");
+    }
+
+    /// S2: a terminal-velocity fall through 0.1 s frames (6 blocks/frame) must land on a
+    /// 1-block-thick floor, not pass through it (the pre-S2 teleport-then-resolve tunneled here).
+    #[test]
+    fn terminal_fall_lands_on_thin_floor() {
+        let blocks = |p: IVec3| if p.y == 10 { (block::STONE, 0) } else { (block::AIR, 0) };
+        let mut p = Player::new(Vec3::new(0.5, 200.0, 0.5), false);
+        let input = Input::default();
+        for _ in 0..100 {
+            p.update(0.1, 0.0, &input, blocks, 0); // the app's max frame dt
+        }
+        assert!(p.on_ground, "player should land, not tunnel (y = {})", p.position.y);
+        assert!((p.position.y - 11.0).abs() < 0.05, "rest y = {}", p.position.y);
+    }
+
+    /// S2: a fly-sprint dash (80 blocks/s -> 8 blocks per 0.1 s frame) stops at a 1-block wall.
+    #[test]
+    fn dash_cannot_tunnel_through_wall() {
+        let blocks = |p: IVec3| if p.x == 20 { (block::STONE, 0) } else { (block::AIR, 0) };
+        let mut p = Player::new(Vec3::new(0.5, 50.0, 0.5), true); // fly
+        let mut input = Input::default();
+        input.forward = true; // yaw 0 -> +x
+        input.sprint = true; // FLY_SPRINT_SPEED = 80
+        for _ in 0..40 {
+            p.update(0.1, 0.0, &input, blocks, 0);
+        }
+        assert!(p.position.x <= 19.71, "dash tunneled the wall: x = {}", p.position.x);
+        assert!(p.position.x > 10.0, "player did not move toward the wall");
+    }
+
+    /// S2 regression (found in review): walking AWAY from a fence must not clamp the player to the
+    /// fence's far face — a sub-box outside the AABB on the moving axis is not a penetration. The
+    /// pre-S2 clamp teleported the player THROUGH the fence here.
+    #[test]
+    fn backing_away_from_fence_does_not_teleport() {
+        // Fence in cell x=0 (post box ~x in 0.375..0.625), ground below.
+        let blocks = |p: IVec3| {
+            if p.y < 0 {
+                (block::STONE, 0)
+            } else if p.x == 0 && p.y < 2 && p.z == 0 {
+                (block::WOODEN_FENCE, 0)
+            } else {
+                (block::AIR, 0)
+            }
+        };
+        // Player just west of the fence post, walking further west (-x = backward at yaw 0).
+        let mut p = Player::new(Vec3::new(-0.05, 0.0, 0.5), false);
+        let mut input = Input::default();
+        input.back = true;
+        for _ in 0..30 {
+            p.update(1.0 / 60.0, 0.0, &input, blocks, 0);
+        }
+        assert!(
+            p.position.x < -0.05,
+            "player should walk away freely, not clamp to the fence: x = {}",
+            p.position.x
+        );
+    }
+
+    /// S2: the buried-save oracle. Standing ON a floor is contact, not overlap; a head inside
+    /// stone is genuinely buried; a dug-out 2-high air pocket underground is a valid position.
+    #[test]
+    fn is_inside_solid_oracle() {
+        let floor = |p: IVec3| if p.y < 10 { (block::STONE, 0) } else { (block::AIR, 0) };
+        let p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
+        assert!(!p.is_inside_solid(&floor), "standing on a floor is not buried");
+        let p2 = Player::new(Vec3::new(0.5, 9.0, 0.5), false);
+        assert!(p2.is_inside_solid(&floor), "feet embedded in the floor is buried");
+        // A 2-high air pocket at y 10/11 inside solid rock (a player-dug cave room).
+        let pocket = |p: IVec3| {
+            if p.x == 0 && p.z == 0 && (p.y == 10 || p.y == 11) {
+                (block::AIR, 0)
+            } else {
+                (block::STONE, 0)
+            }
+        };
+        let p3 = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
+        assert!(!p3.is_inside_solid(&pocket), "a dug-out cave room is a valid resume spot");
     }
 
     #[test]

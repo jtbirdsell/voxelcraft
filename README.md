@@ -208,8 +208,12 @@ position, albedo + skylight) and an ACES tonemap.
 - **Emissive blocks** (lava, glowstone, torches) that cast colored light into the scene and reflect.
 
 **Gameplay & UI**
-- Swept-AABB **player physics** (walk/fly, gravity, jump, sprint), 3D-DDA block targeting, break/place
-  with incremental re-meshing, and a block highlight.
+- Substepped swept-AABB **player physics** (walk/fly, gravity, jump, sprint) — tunnel-proof at any
+  frame rate (terminal-velocity falls land on 1-block floors; entities are speed-capped the same way)
+  with frame-rate-independent jump/fall integration (fixed ~120 Hz substeps), 3D-DDA block targeting,
+  break/place with incremental re-meshing, and a block highlight. Physics pauses until the chunks
+  around the player stream in, so an unloaded chunk never collides as air; a save made underground
+  (a cave home) resumes in place — only a position genuinely inside solid blocks lifts to the surface.
 - **Progressive mining**: hold to break, timed by per-block hardness, with a crack overlay; bedrock is
   unbreakable. **Tools** (5 tiers × pickaxe/axe/shovel/sword/hoe) speed up mining, gate ore drops by
   harvest level, and wear down with **durability**.

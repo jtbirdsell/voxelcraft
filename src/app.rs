@@ -140,6 +140,9 @@ struct Session {
     craft: [Option<item::ItemStack>; 9],
     /// A screen the frame asked to open (processed after the frame's state borrow ends).
     pending_open: Option<Screen>,
+    /// S2: whether the loaded position has been occupancy-validated against real chunks (the
+    /// deferred buried check). Physics stays paused until it passes.
+    spawn_checked: bool,
     /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
     mine_target: Option<IVec3>,
     mine_progress: f32,
@@ -945,13 +948,59 @@ impl App {
         let yaw = session.camera.yaw;
         let armor = session.inventory.equipped_armor();
         let game_ref = &session.game;
-        session.player.update(
-            dt,
-            yaw,
-            &session.input,
-            |p| game_ref.block_state_at(p),
-            armor,
-        );
+        // S2: deferred spawn validation. The eager on-load "buried" lift teleported every
+        // underground survival save to the surface; the real test needs actual blocks (including
+        // player edits), so it waits until every chunk the player AABB touches is resident, then
+        // lifts only if the player is genuinely inside solid.
+        if !session.spawn_checked {
+            let p = session.player.position;
+            let corners_loaded = [-0.3f32, 0.3].iter().all(|&dx| {
+                [-0.3f32, 0.3].iter().all(|&dz| {
+                    [0.0f32, 1.8].iter().all(|&dy| {
+                        game_ref.chunk_loaded_at(
+                            Vec3::new(p.x + dx, p.y + dy, p.z + dz).floor().as_ivec3(),
+                        )
+                    })
+                })
+            });
+            if corners_loaded {
+                if session.player.is_inside_solid(&|p| game_ref.block_state_at(p)) {
+                    let surf = game_ref.spawn_surface_y(p.x as i32, p.z as i32);
+                    log::warn!(
+                        "loaded position ({:.0},{:.1},{:.0}) is inside solid blocks — lifting to the surface ({surf:.1})",
+                        p.x, p.y, p.z
+                    );
+                    session.player.position.y = surf;
+                    session.player.velocity = Vec3::ZERO;
+                }
+                session.spawn_checked = true;
+            }
+        }
+        // S2: physics runs only once the chunks the player occupies AND will reach this frame are
+        // resident — an unloaded chunk must not collide as air (fall-through-terrain). Flying
+        // (creative) is exempt: it can outrun generation and has no fall-through consequence.
+        let phys_ready = session.spawn_checked && {
+            let feet = session.player.position;
+            let dest = feet + session.player.velocity * dt;
+            game_ref.chunk_loaded_at(feet.floor().as_ivec3())
+                && game_ref.chunk_loaded_at(Vec3::new(feet.x, feet.y - 1.0, feet.z).floor().as_ivec3())
+                && game_ref.chunk_loaded_at(dest.floor().as_ivec3())
+        };
+        if session.player.flying || phys_ready {
+            // S2: substep the integration (max ~1/120 s per step) so jump/fall arcs are
+            // frame-rate-independent; collision itself is swept inside move_axis regardless.
+            let n = (dt * 120.0).ceil().max(1.0) as u32;
+            let sub = dt / n as f32;
+            for _ in 0..n {
+                session.player.update(
+                    sub,
+                    yaw,
+                    &session.input,
+                    |p| game_ref.block_state_at(p),
+                    armor,
+                );
+            }
+        }
         session.camera.position = session.player.eye();
         // M34-VM5: optional camera head-bob, folded into the real camera transform BEFORE the camera
         // uniform rolls prev_view_proj — so DLSS motion vectors include it and stay correct. Uses the
@@ -1840,18 +1889,20 @@ fn create_session(
     let mut game = Game::new(gpu, renderer.volume_bgl(), seed, quality, saved);
     game.restore_furnaces(furnaces);
     game.restore_chests(chests);
-    // Spawn validation (see resumed's note): lift a buried / below-world player onto the surface.
+    // Spawn validation: only a below-world / non-finite position lifts eagerly. "Below the
+    // worldgen surface" is NOT buried — an underground save (a cave home) is legitimate; the S2
+    // deferred occupancy check in frame_ingame judges against real loaded blocks and lifts only
+    // if the player is genuinely inside solid.
     let surf = game.spawn_surface_y(spawn.x as i32, spawn.z as i32);
     let below_world = !spawn.y.is_finite() || spawn.y < 2.0;
-    let buried = !flying && spawn.y < surf;
     if level.is_none() {
         // Fresh world: spawn on dry land (S1 — a non-flying spawn on an ocean column would start
         // the game on the seabed with a drowning timer).
         let (sx, sz) = game.find_dry_spawn(spawn.x as i32, spawn.z as i32);
         spawn = Vec3::new(sx as f32 + 0.5, game.spawn_surface_y(sx, sz), sz as f32 + 0.5);
-    } else if below_world || buried {
+    } else if below_world {
         log::warn!(
-            "loaded spawn y={:.1} at ({:.0},{:.0}) is buried/out-of-bounds — lifting to the surface ({surf:.1})",
+            "loaded spawn y={:.1} at ({:.0},{:.0}) is out-of-bounds — lifting to the surface ({surf:.1})",
             spawn.y, spawn.x, spawn.z
         );
         spawn.y = surf;
@@ -1915,6 +1966,7 @@ fn create_session(
         pending_open: None,
         mine_target: None,
         mine_progress: 0.0,
+        spawn_checked: false,
         melee_cd: 0.0,
         melee_was_held: false,
         melee_prev_sel: 0,

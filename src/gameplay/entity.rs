@@ -1654,52 +1654,62 @@ fn collide_move(
     dt: f32,
     is_solid: &impl Fn(IVec3) -> bool,
 ) -> bool {
+    // S2: terminal velocity for everything that falls (mobs, items, XP orbs) — an uncapped fall
+    // integrated over a 0.1 s frame used to cross many blocks and tunnel thin floors.
+    const TERMINAL: f32 = 60.0;
+    // S2: substep each axis. Cells are 1.0 thick, so any step below 1.0 keeps a crossed cell
+    // overlapping the stepped AABB regardless of body size (the smallest is the 0.18 XP orb —
+    // body extent only adds margin on top of the cell-thickness bound); 0.2 is comfortable.
+    const MAX_STEP: f32 = 0.2;
+    vel.y = vel.y.max(-TERMINAL);
     let half = w * 0.5;
     let delta = *vel * dt;
     let mut on_ground = false;
     for &axis in &[0usize, 2, 1] {
-        let amount = comp(delta, axis);
-        if amount == 0.0 {
-            continue;
-        }
-        set_comp(pos, axis, comp(*pos, axis) + amount);
+        let mut remaining = comp(delta, axis);
+        while remaining != 0.0 {
+            let amount = remaining.clamp(-MAX_STEP, MAX_STEP);
+            remaining -= amount;
+            set_comp(pos, axis, comp(*pos, axis) + amount);
 
-        let min = Vec3::new(pos.x - half, pos.y, pos.z - half);
-        let max = Vec3::new(pos.x + half, pos.y + h, pos.z + half);
-        let x0 = min.x.floor() as i32;
-        let x1 = (max.x - 1e-4).floor() as i32;
-        let y0 = min.y.floor() as i32;
-        let y1 = (max.y - 1e-4).floor() as i32;
-        let z0 = min.z.floor() as i32;
-        let z1 = (max.z - 1e-4).floor() as i32;
+            let min = Vec3::new(pos.x - half, pos.y, pos.z - half);
+            let max = Vec3::new(pos.x + half, pos.y + h, pos.z + half);
+            let x0 = min.x.floor() as i32;
+            let x1 = (max.x - 1e-4).floor() as i32;
+            let y0 = min.y.floor() as i32;
+            let y1 = (max.y - 1e-4).floor() as i32;
+            let z0 = min.z.floor() as i32;
+            let z1 = (max.z - 1e-4).floor() as i32;
 
-        let (lo, hi) = if axis == 1 { (0.0, h) } else { (-half, half) };
-        let mut clamp: Option<f32> = None;
-        for vx in x0..=x1 {
-            for vy in y0..=y1 {
-                for vz in z0..=z1 {
-                    if is_solid(IVec3::new(vx, vy, vz)) {
-                        let coord = match axis {
-                            0 => vx,
-                            1 => vy,
-                            _ => vz,
-                        } as f32;
-                        if amount > 0.0 {
-                            let p = coord - hi;
-                            clamp = Some(clamp.map_or(p, |c| c.min(p)));
-                        } else {
-                            let p = (coord + 1.0) - lo;
-                            clamp = Some(clamp.map_or(p, |c| c.max(p)));
+            let (lo, hi) = if axis == 1 { (0.0, h) } else { (-half, half) };
+            let mut clamp: Option<f32> = None;
+            for vx in x0..=x1 {
+                for vy in y0..=y1 {
+                    for vz in z0..=z1 {
+                        if is_solid(IVec3::new(vx, vy, vz)) {
+                            let coord = match axis {
+                                0 => vx,
+                                1 => vy,
+                                _ => vz,
+                            } as f32;
+                            if amount > 0.0 {
+                                let p = coord - hi;
+                                clamp = Some(clamp.map_or(p, |c| c.min(p)));
+                            } else {
+                                let p = (coord + 1.0) - lo;
+                                clamp = Some(clamp.map_or(p, |c| c.max(p)));
+                            }
                         }
                     }
                 }
             }
-        }
-        if let Some(p) = clamp {
-            set_comp(pos, axis, p);
-            set_comp(vel, axis, 0.0);
-            if axis == 1 && amount < 0.0 {
-                on_ground = true;
+            if let Some(p) = clamp {
+                set_comp(pos, axis, p);
+                set_comp(vel, axis, 0.0);
+                if axis == 1 && amount < 0.0 {
+                    on_ground = true;
+                }
+                break; // the axis is blocked; discard the remaining distance
             }
         }
     }
@@ -1815,6 +1825,26 @@ fn push_box(geom: &mut Geometry, min: Vec3, max: Vec3, yaw: f32, tile: u32, emis
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S2: entity falls are terminal-velocity-capped and substepped — a long uncapped fall used
+    /// to cross several blocks per frame and tunnel straight through a 1-block floor.
+    #[test]
+    fn entity_fall_is_capped_and_lands_on_thin_floor() {
+        let floor = |p: IVec3| p.y == 10; // a single 1-block-thick floor
+        let mut pos = Vec3::new(0.5, 400.0, 0.5);
+        let mut vel = Vec3::ZERO;
+        let mut grounded = false;
+        for _ in 0..200 {
+            vel.y -= GRAVITY * 0.1;
+            grounded = collide_move(&mut pos, &mut vel, 0.6, 0.9, 0.1, &floor);
+            assert!(vel.y >= -60.0 - 1e-3, "terminal velocity must cap the fall: {}", vel.y);
+            if grounded {
+                break;
+            }
+        }
+        assert!(grounded, "entity should land, not tunnel (y = {})", pos.y);
+        assert!((pos.y - 11.0).abs() < 0.05, "rest y = {}", pos.y);
+    }
 
     #[test]
     fn los_blocked_by_wall() {

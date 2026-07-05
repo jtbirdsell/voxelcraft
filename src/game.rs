@@ -1012,6 +1012,16 @@ impl Game {
         }
     }
 
+    /// Is the chunk containing this world position resident? Positions outside the vertical world
+    /// range are vacuously "loaded" (known empty — nothing there to collide with), so a player at
+    /// the build ceiling is never physics-frozen by the S2 unloaded-chunk guard.
+    pub fn chunk_loaded_at(&self, wp: IVec3) -> bool {
+        if wp.y < 0 || wp.y >= WORLD_HEIGHT_CHUNKS * CHUNK_SIZE_I {
+            return true;
+        }
+        self.world.get(world::chunk_of(wp)).is_some()
+    }
+
     /// Set a block with its default state (0). Delegates to `set_block_state`.
     pub fn set_block(
         &mut self,
