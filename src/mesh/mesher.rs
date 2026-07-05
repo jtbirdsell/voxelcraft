@@ -49,18 +49,24 @@ impl Geometry {
     }
 }
 
-/// Per-chunk mesh split by render layer: opaque (solids + foliage + partials), translucent water,
-/// and translucent glass (its own alpha-blended pass, drawn over opaque, with depth write).
+/// Per-chunk mesh split by render layer: opaque (solids + partials that occlude light), `detail`
+/// (opaque-drawn geometry the DDA voxel volume does NOT treat as an occluder -- plants, doors,
+/// fences, torches -- excluded from the hardware-RT BLAS so both tracers shadow the same occluder
+/// set, S4b), translucent water, and translucent glass (its own alpha-blended pass).
 #[derive(Default)]
 pub struct MeshData {
     pub opaque: Geometry,
+    pub detail: Geometry,
     pub water: Geometry,
     pub translucent: Geometry,
 }
 
 impl MeshData {
     pub fn is_empty(&self) -> bool {
-        self.opaque.is_empty() && self.water.is_empty() && self.translucent.is_empty()
+        self.opaque.is_empty()
+            && self.detail.is_empty()
+            && self.water.is_empty()
+            && self.translucent.is_empty()
     }
 }
 
@@ -209,8 +215,17 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
         let z = (i as i32 / S) % S;
         let y = i as i32 / (S * S);
         let l = crate::light::at(&lightgrid, x, y, z);
+        // S4b: route by the DDA volume's own occluder criterion. Blocks the volume stores as 0
+        // (is_volume_solid = false: plants, doors/trapdoors, fences/walls, torches, dripleaf)
+        // render with the opaque pipeline but go into `detail`, which is EXCLUDED from the
+        // hardware-RT BLAS -- under HWRT they were full opaque occluders (a grass billboard cast
+        // a solid X-quad shadow, transparent texels included), diverging from the DDA tracer.
+        let vs = block::is_volume_solid(id);
         match kind {
-            block::RenderKind::Cross => emit_cross(&mut mesh.opaque, origin, x, y, z, id, l),
+            block::RenderKind::Cross => {
+                let geom = if vs { &mut mesh.opaque } else { &mut mesh.detail };
+                emit_cross(geom, origin, x, y, z, id, l)
+            }
             // Slab: a half-height box (bottom/top) or a full cube (double), per the state byte.
             block::RenderKind::Slab => {
                 let (lo, hi) = match block::slab_half(neigh.state_at(x, y, z)) {
@@ -245,7 +260,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                 let st = neigh.state_at(x, y, z);
                 for b in block::solid_boxes(id, st) {
                     emit_box(
-                        &mut mesh.opaque,
+                        if vs { &mut mesh.opaque } else { &mut mesh.detail },
                         origin,
                         x,
                         y,
@@ -263,8 +278,10 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
             block::RenderKind::Connect => {
                 let geom = if id == block::GLASS_PANE {
                     &mut mesh.translucent
-                } else {
+                } else if vs {
                     &mut mesh.opaque
+                } else {
+                    &mut mesh.detail
                 };
                 let dims = block::connect_dims(id);
                 let sides = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)];
@@ -316,7 +333,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                         _ => 0,
                     };
                     emit_box(
-                        &mut mesh.opaque,
+                        if vs { &mut mesh.opaque } else { &mut mesh.detail },
                         origin,
                         x,
                         y,
@@ -335,7 +352,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
                 let st = neigh.state_at(x, y, z);
                 for b in block::solid_boxes(id, st) {
                     emit_box(
-                        &mut mesh.opaque,
+                        if vs { &mut mesh.opaque } else { &mut mesh.detail },
                         origin,
                         x,
                         y,

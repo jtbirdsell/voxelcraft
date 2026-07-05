@@ -198,7 +198,9 @@ position, albedo + skylight) and an ACES tonemap.
   Optical-Flow hardware. The render-resolution depth/motion guides are resized to output res, and the
   HUD is tagged as a separate UI layer so DLSS-G recomposites it crisply instead of interpolating it.
   Needs the Streamline DLLs staged beside the exe (`STREAMLINE_SDK` set), a composited/focused window,
-  and a non-vsync present mode; degrades gracefully to no frame generation.
+  a non-vsync present mode, **and active Ray Reconstruction** (`VOXELCRAFT_DLSS=rr` — DLSS-G's [0,1]
+  depth guide is produced by the RR guide passes; without RR, FG degrades to off with a warning);
+  degrades gracefully to no frame generation.
 - **Supersampling / DLDSR-style** (`VOXELCRAFT_SS=1.5`, NVIDIA RTX): render the scene *above* the
   window (×SS) with DLSS in DLAA mode, then a sharp Catmull-Rom pass downscales to the window — the
   documented best practice for spare GPU headroom (renders the noisy GI at super-res too, so it

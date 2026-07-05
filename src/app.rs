@@ -2806,6 +2806,19 @@ impl ApplicationHandler for App {
             Some(dr) => dr.make_render_targets(&renderer, &gpu.device),
             None => renderer.make_targets(&gpu.device, gpu.config.width, gpu.config.height),
         };
+        // S4b: FG rides on RR. Standalone FG tagged the raw LINEAR view depth as DLSS-G's [0,1]
+        // NDC depth guide (the linear→NDC conversion lives only in the RR guide-resize passes),
+        // corrupting every interpolated frame. Until a standalone conversion pass exists, FG
+        // without RR degrades to off — loudly.
+        let frame_gen = if frame_gen.is_some() && dlss_render.is_none() {
+            log::warn!(
+                "VOXELCRAFT_FG=1 without DLSS Ray Reconstruction: Frame Generation disabled — \
+                 DLSS-G needs the RR guide passes' NDC depth (set VOXELCRAFT_DLSS=rr)"
+            );
+            None
+        } else {
+            frame_gen
+        };
         let rt_scene = RtScene::new();
         // N4: one-time migration of the legacy single world into saves/worlds/ — done here (interactive
         // entry only; the headless SHOT/BENCH/MENU paths returned above, so screenshots never trigger it).

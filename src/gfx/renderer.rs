@@ -55,6 +55,9 @@ pub struct GpuPart {
 
 pub struct GpuMesh {
     pub opaque: Option<GpuPart>,
+    /// S4b: opaque-drawn geometry excluded from the BLAS (plants/doors/fences/torches -- blocks
+    /// the DDA volume doesn't treat as occluders), so HWRT and DDA shadow the same occluder set.
+    pub detail: Option<GpuPart>,
     pub water: Option<GpuPart>,
     pub translucent: Option<GpuPart>,
     /// Hardware-RT bottom-level acceleration structure built from the opaque geometry (M33-G5),
@@ -1438,9 +1441,25 @@ impl ChunkRenderer {
         };
         GpuMesh {
             opaque,
+            // Never a BLAS input: the detail bucket must not occlude hardware rays (S4b).
+            detail: upload_geometry(&gpu.device, &mesh.detail, false),
             water: upload_geometry(&gpu.device, &mesh.water, rt),
             translucent: upload_geometry(&gpu.device, &mesh.translucent, rt),
             blas,
+        }
+    }
+
+    /// Upload a PER-FRAME dynamic mesh (the entity batch): never builds a BLAS. The TLAS only
+    /// instances the per-chunk BLASes, so the old path built + submitted a fresh entity BLAS
+    /// every frame that nothing ever referenced -- pure GPU waste at 60-120 FPS (S4b). Ray-traced
+    /// entity shadows would need per-frame TLAS instancing, a separate feature.
+    pub fn upload_dynamic_mesh(&self, gpu: &Gpu, mesh: &MeshData) -> GpuMesh {
+        GpuMesh {
+            opaque: upload_geometry(&gpu.device, &mesh.opaque, false),
+            detail: upload_geometry(&gpu.device, &mesh.detail, false),
+            water: upload_geometry(&gpu.device, &mesh.water, false),
+            translucent: upload_geometry(&gpu.device, &mesh.translucent, false),
+            blas: None,
         }
     }
 
@@ -1764,6 +1783,14 @@ impl ChunkRenderer {
             }
             for mesh in meshes {
                 if let Some(part) = &mesh.opaque {
+                    pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
+                    pass.set_index_buffer(part.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..part.index_count, 0, 0..1);
+                }
+            }
+            // S4b: the detail bucket rides the same pipeline, right after the solid geometry.
+            for mesh in meshes {
+                if let Some(part) = &mesh.detail {
                     pass.set_vertex_buffer(0, part.vertex_buffer.slice(..));
                     pass.set_index_buffer(part.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..part.index_count, 0, 0..1);

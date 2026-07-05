@@ -2038,7 +2038,8 @@ impl Game {
         if data.is_empty() {
             None
         } else {
-            Some(renderer.upload_mesh(gpu, &data))
+            // S4b: per-frame dynamic upload -- no BLAS (the TLAS never referenced it anyway).
+            Some(renderer.upload_dynamic_mesh(gpu, &data))
         }
     }
 
