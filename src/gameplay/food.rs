@@ -36,6 +36,10 @@ pub fn food(item: ItemId) -> Option<Food> {
         item::APPLE => f(4, 2.4),
         // U4: glow berries (from cave-vine berries) — a small snack.
         item::GLOW_BERRIES => f(2, 0.4),
+        // S6 farming: carrots were never edible before crops made them farmable.
+        item::CARROT => f(3, 3.6),
+        item::POTATO => f(1, 0.6),
+        item::BAKED_POTATO => f(5, 6.0),
         _ => None,
     }
 }

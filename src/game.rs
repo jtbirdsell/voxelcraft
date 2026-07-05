@@ -51,24 +51,31 @@ fn random_tickable(id: BlockId) -> bool {
             | block::CAVE_VINE
             | block::CAVE_VINE_BERRIES
             | block::POINTED_DRIPSTONE
+            // S6 crops.
+            | block::WHEAT_CROP
+            | block::CARROT_CROP
+            | block::POTATO_CROP
     )
 }
 
-/// Pure growth decision for a non-budding random-tickable block (U9), testable without a world.
-/// Returns (relative offset of the edit, new block id) or None. `below`/`above` are neighbor ids;
-/// `vine_len` is the cave-vine chain length above this cell (a length cap). Budding amethyst sprouts
-/// on a random face and is handled separately (it needs a chosen direction).
+/// Pure growth decision for a non-budding random-tickable block (U9/S6), testable without a world.
+/// Returns (relative offset of the edit, new block id, new state byte) or None. `below`/`above` are
+/// neighbor ids; `vine_len` is the cave-vine chain length above (a length cap); `state` is the
+/// cell's own state byte (crop stage); `hydrated` = water near the crop's farmland (sampled by the
+/// caller so this stays pure). Budding amethyst sprouts on a random face and is handled separately.
 fn grow_decision(
     id: BlockId,
     rnd: u32,
     below: BlockId,
     above: BlockId,
     vine_len: i32,
-) -> Option<(IVec3, BlockId)> {
+    state: u8,
+    hydrated: bool,
+) -> Option<(IVec3, BlockId, u8)> {
     match id {
-        block::SMALL_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::MEDIUM_AMETHYST_BUD)),
-        block::MEDIUM_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::LARGE_AMETHYST_BUD)),
-        block::LARGE_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::AMETHYST_CLUSTER)),
+        block::SMALL_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::MEDIUM_AMETHYST_BUD, 0)),
+        block::MEDIUM_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::LARGE_AMETHYST_BUD, 0)),
+        block::LARGE_AMETHYST_BUD if rnd % 100 < 16 => Some((IVec3::ZERO, block::AMETHYST_CLUSTER, 0)),
         block::CAVE_VINE | block::CAVE_VINE_BERRIES
             if rnd % 100 < 12 && below == block::AIR && vine_len < 14 =>
         {
@@ -78,7 +85,7 @@ fn grow_decision(
             } else {
                 block::CAVE_VINE
             };
-            Some((IVec3::NEG_Y, tip))
+            Some((IVec3::NEG_Y, tip, 0))
         }
         block::POINTED_DRIPSTONE
             if rnd % 100 < 5
@@ -86,7 +93,15 @@ fn grow_decision(
                 && below == block::AIR =>
         {
             // Hanging stalactite slowly extends downward.
-            Some((IVec3::NEG_Y, block::POINTED_DRIPSTONE))
+            Some((IVec3::NEG_Y, block::POINTED_DRIPSTONE, 0))
+        }
+        // S6 crops: advance one stage per random tick -- always when hydrated, half the time dry.
+        // Our sampler reaches each block ~every 8.5 min (16 cells / 32^3 chunk / 0.25 s), so p=1
+        // hydrated lands full growth at ~60 min, in vanilla's ballpark; a copied vanilla per-tick
+        // probability here would stretch it to hours (the tick stream is ~7.5x sparser).
+        id2 if block::is_crop(id2) && !block::crop_mature(state) => {
+            let ok = hydrated || rnd % 2 == 0;
+            ok.then_some((IVec3::ZERO, id2, block::crop_stage(state) + 1))
         }
         _ => None,
     }
@@ -1004,6 +1019,12 @@ impl Game {
         crate::block::is_solid(self.block_at(wp))
     }
 
+    /// What the interaction/mining ray can hit (S6): solids plus walk-through plants, so crops and
+    /// tall grass are harvestable instead of the ray passing through to the block behind.
+    pub fn is_targetable_at(&self, wp: IVec3) -> bool {
+        crate::block::is_targetable(self.block_at(wp))
+    }
+
     /// Block id + block-state byte at a world position (air/0 if the chunk isn't loaded). Used by the
     /// player collision closure so stair facing (and future oriented blocks) collide correctly.
     pub fn block_state_at(&self, wp: IVec3) -> (crate::block::BlockId, u8) {
@@ -1465,8 +1486,10 @@ impl Game {
         } else {
             0
         };
-        if let Some((off, new)) = grow_decision(id, rnd, below, above, vine_len) {
-            changes.push((wp + off, new, 0));
+        let (_, state) = self.block_state_at(wp);
+        let hydrated = block::is_crop(id) && self.water_near_farmland(wp - IVec3::Y);
+        if let Some((off, new, nst)) = grow_decision(id, rnd, below, above, vine_len, state, hydrated) {
+            changes.push((wp + off, new, nst));
         }
     }
 
@@ -1485,9 +1508,41 @@ impl Game {
         n
     }
 
+    /// S6: water within 4 blocks horizontally of a farmland cell (its own y or one below --
+    /// irrigation ditches). A bounded 9x9x2 scan run only when a crop random-ticks.
+    fn water_near_farmland(&self, farmland: IVec3) -> bool {
+        for dy in -1..=0 {
+            for dz in -4i32..=4 {
+                for dx in -4i32..=4 {
+                    if self.block_at(farmland + IVec3::new(dx, dy, dz)) == block::WATER {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Step the shared tick rng and hand out one fresh random word (S6: break-drop rolls etc.).
+    pub fn next_rand(&mut self) -> u64 {
+        self.tick_rng ^= self.tick_rng << 13;
+        self.tick_rng ^= self.tick_rng >> 7;
+        self.tick_rng ^= self.tick_rng << 17;
+        self.tick_rng
+    }
+
     /// U9 bonemeal: instantly advance a growable block at `wp` (budding amethyst sprouts/advances,
-    /// cave vines extend with berries, moss spreads to adjacent stone/dirt). Returns true if it grew.
+    /// cave vines extend with berries, moss spreads to adjacent stone/dirt, crops jump stages).
+    /// Returns true if it grew.
     pub fn bonemeal(&mut self, gpu: &Gpu, renderer: &ChunkRenderer, wp: IVec3) -> bool {
+        // S6: bonemeal aimed at farmland redirects to the crop planted on it.
+        let wp = if self.block_at(wp) == block::FARMLAND
+            && block::is_crop(self.block_at(wp + IVec3::Y))
+        {
+            wp + IVec3::Y
+        } else {
+            wp
+        };
         let id = self.block_at(wp);
         let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
         match id {
@@ -1511,6 +1566,16 @@ impl Game {
                     changes.push((p, block::CAVE_VINE_BERRIES, 0));
                     p -= IVec3::Y;
                 }
+            }
+            // S6 crops: jump 2-4 stages (capped at mature).
+            id2 if block::is_crop(id2) => {
+                let (_, st) = self.block_state_at(wp);
+                if block::crop_mature(st) {
+                    return false;
+                }
+                let jump = 2 + (self.next_rand() % 3) as u8;
+                let nst = (block::crop_stage(st) + jump).min(block::CROP_MAX_STAGE);
+                changes.push((wp, id2, nst));
             }
             block::MOSS_BLOCK => {
                 for d in [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z] {
@@ -2235,29 +2300,41 @@ mod furnace_tests {
         // rnd=0 passes every probability gate (0 < threshold), so growth fires deterministically.
         // Amethyst bud stages advance in place.
         assert_eq!(
-            grow_decision(block::SMALL_AMETHYST_BUD, 0, block::STONE, block::STONE, 0),
-            Some((IVec3::ZERO, block::MEDIUM_AMETHYST_BUD))
+            grow_decision(block::SMALL_AMETHYST_BUD, 0, block::STONE, block::STONE, 0, 0, false),
+            Some((IVec3::ZERO, block::MEDIUM_AMETHYST_BUD, 0))
         );
         assert_eq!(
-            grow_decision(block::LARGE_AMETHYST_BUD, 0, block::STONE, block::STONE, 0),
-            Some((IVec3::ZERO, block::AMETHYST_CLUSTER))
+            grow_decision(block::LARGE_AMETHYST_BUD, 0, block::STONE, block::STONE, 0, 0, false),
+            Some((IVec3::ZERO, block::AMETHYST_CLUSTER, 0))
         );
         // Cave vine grows a new tip below only into air and under the length cap.
         assert_eq!(
-            grow_decision(block::CAVE_VINE, 0, block::AIR, block::DEEPSLATE, 3),
-            Some((IVec3::NEG_Y, block::CAVE_VINE_BERRIES)) // rnd=0 -> berried tip
+            grow_decision(block::CAVE_VINE, 0, block::AIR, block::DEEPSLATE, 3, 0, false),
+            Some((IVec3::NEG_Y, block::CAVE_VINE_BERRIES, 0)) // rnd=0 -> berried tip
         );
-        assert_eq!(grow_decision(block::CAVE_VINE, 0, block::STONE, block::STONE, 3), None); // blocked below
-        assert_eq!(grow_decision(block::CAVE_VINE, 0, block::AIR, block::STONE, 14), None); // length cap
+        assert_eq!(grow_decision(block::CAVE_VINE, 0, block::STONE, block::STONE, 3, 0, false), None); // blocked below
+        assert_eq!(grow_decision(block::CAVE_VINE, 0, block::AIR, block::STONE, 14, 0, false), None); // length cap
         // A high rnd fails the probability gate (no growth this tick).
-        assert_eq!(grow_decision(block::SMALL_AMETHYST_BUD, 99, block::STONE, block::STONE, 0), None);
+        assert_eq!(grow_decision(block::SMALL_AMETHYST_BUD, 99, block::STONE, block::STONE, 0, 0, false), None);
         // Pointed dripstone only extends a hanging stalactite (dripstone above, air below).
         assert_eq!(
-            grow_decision(block::POINTED_DRIPSTONE, 0, block::AIR, block::DRIPSTONE_BLOCK, 0),
-            Some((IVec3::NEG_Y, block::POINTED_DRIPSTONE))
+            grow_decision(block::POINTED_DRIPSTONE, 0, block::AIR, block::DRIPSTONE_BLOCK, 0, 0, false),
+            Some((IVec3::NEG_Y, block::POINTED_DRIPSTONE, 0))
         );
-        assert_eq!(grow_decision(block::POINTED_DRIPSTONE, 0, block::AIR, block::STONE, 0), None);
+        assert_eq!(grow_decision(block::POINTED_DRIPSTONE, 0, block::AIR, block::STONE, 0, 0, false), None);
+        // S6 crops: hydrated always advances a stage; dry advances on even rnd only; mature never.
+        assert_eq!(
+            grow_decision(block::WHEAT_CROP, 1, block::FARMLAND, block::AIR, 0, 3, true),
+            Some((IVec3::ZERO, block::WHEAT_CROP, 4))
+        );
+        assert_eq!(grow_decision(block::WHEAT_CROP, 1, block::FARMLAND, block::AIR, 0, 3, false), None);
+        assert_eq!(
+            grow_decision(block::CARROT_CROP, 2, block::FARMLAND, block::AIR, 0, 6, false),
+            Some((IVec3::ZERO, block::CARROT_CROP, 7))
+        );
+        assert_eq!(grow_decision(block::POTATO_CROP, 0, block::FARMLAND, block::AIR, 0, 7, true), None); // mature
         assert!(random_tickable(block::BUDDING_AMETHYST) && !random_tickable(block::STONE));
+        assert!(random_tickable(block::WHEAT_CROP)); // S6
     }
 
     #[test]

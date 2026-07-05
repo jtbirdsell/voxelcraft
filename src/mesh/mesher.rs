@@ -224,7 +224,7 @@ pub fn build_mesh(neigh: &Neighborhood, origin: [i32; 3]) -> MeshData {
         match kind {
             block::RenderKind::Cross => {
                 let geom = if vs { &mut mesh.opaque } else { &mut mesh.detail };
-                emit_cross(geom, origin, x, y, z, id, l)
+                emit_cross(geom, origin, x, y, z, id, neigh.state_at(x, y, z), l)
             }
             // Slab: a half-height box (bottom/top) or a full cube (double), per the state byte.
             block::RenderKind::Slab => {
@@ -458,11 +458,12 @@ fn emit_box(
 }
 
 /// Emit a cross-billboard plant (two diagonal quads) for the cell at chunk-local (lx,ly,lz).
-fn emit_cross(geom: &mut Geometry, origin: [i32; 3], lx: i32, ly: i32, lz: i32, id: u16, face_light: u8) {
+/// `state` picks the stage tile for crops (S6) — mesher-only; `face_tile` stays id+face keyed.
+fn emit_cross(geom: &mut Geometry, origin: [i32; 3], lx: i32, ly: i32, lz: i32, id: u16, state: u8, face_light: u8) {
     let ox = (origin[0] + lx) as f32;
     let oy = (origin[1] + ly) as f32;
     let oz = (origin[2] + lz) as f32;
-    let tile = block::face_tile(id, [0, 1, 0]);
+    let tile = block::crop_tile(id, state);
     let shade = [block::emission(id), block::tint_class(id, [0, 1, 0])];
     let light = [(face_light >> 4) as f32 / 15.0, (face_light & 0x0F) as f32 / 15.0];
     let normal = [0.0, 1.0, 0.0]; // up-ish so plants catch sky/ambient light

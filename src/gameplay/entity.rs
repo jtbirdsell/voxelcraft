@@ -1532,6 +1532,15 @@ impl Entities {
             for &(item, count) in species.loot() {
                 self.spawn_item(drop_at, ItemStack::new(item, count));
             }
+            // S6: zombies rarely carry produce — the bootstrap source for carrots/potatoes
+            // (vanilla's rare drop; farms take over once you have one).
+            if species == Species::Zombie {
+                let r = self.next_seed();
+                if r % 100 < 5 {
+                    let item = if (r >> 8) % 2 == 0 { crate::item::CARROT } else { crate::item::POTATO };
+                    self.spawn_item(drop_at, ItemStack::new(item, 1));
+                }
+            }
         }
         // Arrows skeletons loosed this frame (spawned after the iteration to avoid aliasing the list).
         for (pos, vel) in shots {

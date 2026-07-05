@@ -145,6 +145,15 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::SCULK_SHRIEKER => [0.12, 0.16, 0.18],
         T::SCULK_CATALYST => [0.10, 0.14, 0.16],
         T::REINFORCED_DEEPSLATE => [0.20, 0.21, 0.24],
+        // S6 farming (FARMLAND_TOP must match block::face_color(FARMLAND) + wgsl voxel_color).
+        T::FARMLAND_TOP => [0.35, 0.24, 0.15],
+        T::CROP_WHEAT_YOUNG => [0.40, 0.62, 0.28],
+        T::CROP_WHEAT_MATURE => [0.75, 0.65, 0.30],
+        T::CROP_SPROUT => [0.36, 0.58, 0.26],
+        T::CROP_CARROT_MATURE => [0.35, 0.55, 0.22],
+        T::CROP_POTATO_MATURE => [0.38, 0.52, 0.26],
+        T::FOOD_POTATO => [0.85, 0.70, 0.40],
+        T::FOOD_BAKED_POTATO => [0.75, 0.55, 0.30],
         _ => [1.0, 0.0, 1.0],
     }
 }
@@ -184,6 +193,46 @@ fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
             }
             if stem || leaves {
                 return [to_u8(0.18), to_u8(0.42), to_u8(0.16), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        // S6 crops. Young stages: short green shoots rising from the soil line. Mature wheat: full
+        // golden stalks with heads; mature carrots/potatoes: bushy tops (the produce is underground).
+        T::CROP_WHEAT_YOUNG | T::CROP_SPROUT => {
+            let here = matches!(x % 4, 1 | 3);
+            let top = 10 + (hashf(x, 1, 11) * 3.0) as u32;
+            if here && y >= top {
+                let g = hashf(x, y, 4);
+                let warm = if tile == T::CROP_WHEAT_YOUNG { 0.06 } else { 0.0 };
+                return [to_u8(0.22 + warm), to_u8(0.50 + g * 0.18), to_u8(0.16), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::CROP_WHEAT_MATURE => {
+            if matches!(x % 4, 1 | 2) && y >= 2 {
+                let head = y <= 6 && hashf(x, y, 9) > 0.35;
+                return if head {
+                    [to_u8(0.92), to_u8(0.80), to_u8(0.34), 255]
+                } else {
+                    [to_u8(0.74), to_u8(0.62), to_u8(0.26), 255]
+                };
+            }
+            [0, 0, 0, 0]
+        }
+        T::CROP_CARROT_MATURE | T::CROP_POTATO_MATURE => {
+            let carrot = tile == T::CROP_CARROT_MATURE;
+            // Bushy foliage rows; a hint of the crop at the soil line.
+            let bush = y >= 6 && (x + y) % 2 == 0 && hashf(x, y, 7) > 0.25;
+            if bush {
+                let g = hashf(x, y, 8);
+                return [to_u8(0.18), to_u8(0.44 + g * 0.20), to_u8(0.14), 255];
+            }
+            if y >= 14 && x % 5 == 2 {
+                return if carrot {
+                    [to_u8(0.92), to_u8(0.52), to_u8(0.16), 255]
+                } else {
+                    [to_u8(0.80), to_u8(0.66), to_u8(0.38), 255]
+                };
             }
             [0, 0, 0, 0]
         }
@@ -693,6 +742,26 @@ fn paint_item(tile: u32, x: u32, y: u32) -> [u8; 4] {
             }
             CLEAR
         }
+        T::FOOD_POTATO => {
+            // A lumpy tan oval with a few eyes.
+            if cx * cx + cy * cy * 2 <= 32 {
+                if hashf(x, y, 17) > 0.9 {
+                    return fill([0.55, 0.42, 0.22]); // eye
+                }
+                return fill([0.85, 0.70, 0.40]);
+            }
+            CLEAR
+        }
+        T::FOOD_BAKED_POTATO => {
+            // The same oval, roasted: darker skin with a split showing the pale inside.
+            if cx * cx + cy * cy * 2 <= 32 {
+                if yi == 8 && (5..=10).contains(&xi) {
+                    return fill([0.92, 0.85, 0.62]); // the split
+                }
+                return fill([0.62, 0.44, 0.24]);
+            }
+            CLEAR
+        }
         _ => CLEAR,
     }
 }
@@ -762,13 +831,19 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             | T::HANGING_ROOTS
             | T::SPORE_BLOSSOM
             | T::SCULK_VEIN
+            // S6 crop billboards.
+            | T::CROP_WHEAT_YOUNG
+            | T::CROP_WHEAT_MATURE
+            | T::CROP_SPROUT
+            | T::CROP_CARROT_MATURE
+            | T::CROP_POTATO_MATURE
     ) {
         return paint_plant(tile, x, y);
     }
     if tile == T::GLASS {
         return paint_glass(x, y);
     }
-    if (T::TOOL_BASE..=T::FOOD_COOKED).contains(&tile) {
+    if (T::TOOL_BASE..=T::ITEM_SPRITE_END).contains(&tile) {
         return paint_item(tile, x, y);
     }
     let base = base_color(tile);
@@ -777,6 +852,11 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
 
     let mut c = base;
     match tile {
+        T::FARMLAND_TOP => {
+            // Tilled furrow rows: alternating dark troughs and lighter ridges.
+            let trough = y % 4 < 2;
+            c = shade(base, if trough { -0.22 } else { 0.10 } + (n - 0.5) * 0.10);
+        }
         T::STONE => {
             c = shade(base, (n - 0.5) * 0.16);
             if hashf(x, y, 41) > 0.94 {

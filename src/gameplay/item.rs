@@ -96,6 +96,9 @@ pub const CLAY_BALL: ItemId = MATERIAL_BASE + 37;
 // drop a glow berry (a small edible — see food.rs).
 pub const AMETHYST_SHARD: ItemId = MATERIAL_BASE + 38;
 pub const GLOW_BERRIES: ItemId = MATERIAL_BASE + 39;
+// S6 farming.
+pub const POTATO: ItemId = MATERIAL_BASE + 40;
+pub const BAKED_POTATO: ItemId = MATERIAL_BASE + 41;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -142,6 +145,8 @@ fn material_name(item: ItemId) -> &'static str {
         CLAY_BALL => "Clay Ball",
         AMETHYST_SHARD => "Amethyst Shard",
         GLOW_BERRIES => "Glow Berries",
+        POTATO => "Potato",
+        BAKED_POTATO => "Baked Potato",
         _ => "Material",
     }
 }
@@ -188,6 +193,8 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         CLAY_BALL => [0.62, 0.64, 0.70],
         AMETHYST_SHARD => [0.62, 0.45, 0.85],
         GLOW_BERRIES => [0.95, 0.65, 0.20],
+        POTATO => [0.85, 0.70, 0.40],
+        BAKED_POTATO => [0.75, 0.55, 0.30],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -517,6 +524,8 @@ pub fn item_tile(item: ItemId) -> u32 {
         WHEAT => return t::FOOD_WHEAT,
         SEEDS => return t::FOOD_SEEDS,
         GLOW_BERRIES => return t::FOOD_BERRIES,
+        POTATO => return t::FOOD_POTATO,
+        BAKED_POTATO => return t::FOOD_BAKED_POTATO,
         COOKED_BEEF | COOKED_PORK | COOKED_CHICKEN | COOKED_MUTTON => return t::FOOD_COOKED,
         CLAY_BALL => return t::CLAY, // the clay block tile reads as a clay ball
         _ => {}
@@ -945,8 +954,9 @@ mod tests {
         assert!(is_known(STICK) && is_known(IRON_INGOT) && is_known(GOLD_INGOT));
         assert!(is_known(LEATHER) && is_known(GUNPOWDER)); // defined mob-drop materials
         assert!(is_known(COOKED_BEEF) && is_known(BREAD)); // defined foods
+        assert!(is_known(POTATO) && is_known(BAKED_POTATO)); // S6 foods
         // The unpopulated tail of the material range is still rejected (name falls back to "Material").
-        assert!(!is_known(MATERIAL_BASE + 40), "undefined material id should be rejected");
+        assert!(!is_known(MATERIAL_BASE + 42), "undefined material id should be rejected");
     }
 
     #[test]
@@ -1048,10 +1058,42 @@ mod tests {
     }
 
     #[test]
+    fn s6_farming_registry_and_drops() {
+        use crate::block;
+        // Crops are targetable walk-through cross plants with staged state.
+        assert!(matches!(block::render_kind(block::WHEAT_CROP), block::RenderKind::Cross));
+        assert!(block::is_crop(block::CARROT_CROP) && !block::is_crop(block::TALL_GRASS));
+        assert!(!block::is_solid(block::WHEAT_CROP) && block::is_targetable(block::WHEAT_CROP));
+        assert!(block::is_targetable(block::TALL_GRASS), "plants must be harvestable (S6)");
+        assert!(block::crop_mature(7) && !block::crop_mature(3));
+        // Farmland: opaque shovel-dug cube that drops dirt.
+        assert!(block::is_opaque(block::FARMLAND));
+        assert_eq!(block::drops(block::FARMLAND, 0), Some((block::DIRT, 1)));
+        // Stage-aware crop drops; tall grass never drops itself.
+        assert_eq!(block::drops(block::WHEAT_CROP, 7), Some((WHEAT, 1)));
+        assert_eq!(block::drops(block::WHEAT_CROP, 2), Some((SEEDS, 1)));
+        assert_eq!(block::drops(block::POTATO_CROP, 7), Some((POTATO, 2)));
+        assert_eq!(block::drops(block::TALL_GRASS, 0), None);
+        // Bonus rolls: tall grass seeds ~30%; mature wheat sheds extra seeds; immature never.
+        assert_eq!(block::bonus_drops(block::TALL_GRASS, 0, 0), Some((SEEDS, 1)));
+        assert_eq!(block::bonus_drops(block::TALL_GRASS, 0, 9), None);
+        assert_eq!(block::bonus_drops(block::WHEAT_CROP, 7, 3), Some((SEEDS, 3)));
+        assert_eq!(block::bonus_drops(block::WHEAT_CROP, 3, 3), None);
+        // Foods + smelting.
+        assert!(crate::food::food(CARROT).is_some(), "carrots are edible now (S6)");
+        assert!(crate::food::food(BAKED_POTATO).unwrap().hunger > crate::food::food(POTATO).unwrap().hunger);
+        assert_eq!(crate::smelting::smelt_output(POTATO), Some(BAKED_POTATO));
+        // Stage tiles: young vs mature differ; the id+face face_tile stays state-free (N2 lock).
+        assert_ne!(block::crop_tile(block::WHEAT_CROP, 0), block::crop_tile(block::WHEAT_CROP, 7));
+        assert_eq!(block::face_tile(block::WHEAT_CROP, [0, 1, 0]), block::crop_tile(block::WHEAT_CROP, 7));
+    }
+
+    #[test]
     fn u4_cave_biome_registry() {
         // Registry: a sample of the new blocks + materials are known and bound by MAX_BLOCK.
-        assert_eq!(block::MAX_BLOCK, block::REINFORCED_DEEPSLATE);
+        assert_eq!(block::MAX_BLOCK, block::POTATO_CROP); // S6: crops are the id-space tail
         assert_eq!(block::REINFORCED_DEEPSLATE, 110);
+        assert_eq!(block::POTATO_CROP, 114);
         assert!(is_known(block::AMETHYST_BLOCK) && is_known(block::SCULK_CATALYST));
         assert!(is_known(block::REINFORCED_DEEPSLATE) && is_known(block::SPORE_BLOSSOM));
         assert!(is_known(AMETHYST_SHARD) && is_known(GLOW_BERRIES));

@@ -110,7 +110,7 @@ here so it's the default. GL has no hardware RT (software DDA tracer only).
 | **Left-Ctrl** | Sprint (widens FOV) / fly boost |
 | **F** | Toggle fly / walk (**Creative worlds only**) |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
-| **Right-click** | Place block; open a crafting table / furnace / chest; **open/close a door or trapdoor**; **hold to eat** the selected food |
+| **Right-click** | Place block; open a crafting table / furnace / chest; **open/close a door or trapdoor**; **till with a hoe / plant seeds / bonemeal crops**; **hold to eat** the selected food |
 | **Q** | Drop one of the selected item |
 | **1–9 / scroll** | Select hotbar slot |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
@@ -256,6 +256,12 @@ position, albedo + skylight) and an ACES tonemap.
 - **Survival depth**: health + hunger with saturation-fueled regen and starvation; fall damage;
   **swimming** (buoyancy + paddle up) with an **air/drowning** bubble meter; **lava contact damage**;
   **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.
+- **Farming** (S6): till grass/dirt with a **hoe** into furrowed **farmland**, plant **seeds**
+  (from breaking tall grass) or **carrots/potatoes** (rare zombie drops bootstrap them), and crops
+  grow through 8 stages via random ticks — fast when **water** is within 4 blocks, half-speed dry.
+  **Bonemeal** (bone) jumps stages. Mature wheat drops wheat + bonus seeds (→ **bread**); root crops
+  yield 2-4. Crops pop off if their farmland is broken and only plant on farmland. This also makes
+  **animal breeding fully survival-reachable** (wheat/seeds/carrots are all farmable).
 - **Eating**: hold right-click on a food to eat it (~1.6 s), restoring hunger + saturation. Raw mob
   drops (beef/pork/chicken/mutton) are edible but weak; **cook them in a furnace** (→ steak, cooked
   porkchop/chicken/mutton) for far more, plus bread and apples.

@@ -1129,7 +1129,7 @@ impl App {
         // Block targeting.
         let eye = session.camera.position;
         let fwd = session.camera.forward();
-        let mut target = raycast::cast(eye, fwd, REACH, |p| session.game.is_solid_at(p));
+        let mut target = raycast::cast(eye, fwd, REACH, |p| session.game.is_targetable_at(p));
 
         // Melee: if a mob is nearer than the targeted block FACE, the left-click hits it (not the
         // block). Using the ray's face-hit distance (not the block center) means a mob standing
@@ -1240,10 +1240,32 @@ impl App {
                                     let stack = item::ItemStack::new(drop_item, count);
                                     session.game.spawn_item(center, stack);
                                 }
+                                // S6: random extras (bonus crop yield, tall-grass seeds).
+                                if let Some((bi, bc)) =
+                                    block::bonus_drops(id, bstate, session.game.next_rand())
+                                {
+                                    session.game.spawn_item(center, item::ItemStack::new(bi, bc));
+                                }
                                 // Some ores release experience orbs when mined.
                                 session.game.spawn_xp(center, block::mining_xp(id));
                             }
                             session.inventory.damage_selected(1);
+                        }
+                        // S6: a crop can't float — breaking its support pops it as a drop.
+                        if removed {
+                            let above = hit + IVec3::Y;
+                            let (aid, ast) = session.game.block_state_at(above);
+                            if block::is_crop(aid) {
+                                session.game.set_block(&state.gpu, &state.renderer, above, block::AIR);
+                                if !session.inventory.creative {
+                                    if let Some((di, dc)) = block::drops(aid, ast) {
+                                        session.game.spawn_item(
+                                            above.as_vec3() + Vec3::splat(0.5),
+                                            item::ItemStack::new(di, dc),
+                                        );
+                                    }
+                                }
+                            }
                         }
                         session.mine_target = None;
                         session.mine_progress = 0.0;
@@ -1382,6 +1404,32 @@ impl App {
                     let place = hit.block + hit.normal;
                     session.game.set_block(&state.gpu, &state.renderer, place, block::CAVE_VINE_BERRIES);
                     session.inventory.consume_selected();
+                } else if item::is_tool(session.inventory.selected_item())
+                    && item::tool_class(session.inventory.selected_item()) == block::ToolClass::Hoe
+                    && matches!(targeted, block::GRASS | block::DIRT)
+                    && session.game.block_at(hit.block + IVec3::Y) == block::AIR
+                {
+                    // S6: the hoe tills grass/dirt (open above) into farmland; wears the tool.
+                    if session.game.set_block(&state.gpu, &state.renderer, hit.block, block::FARMLAND)
+                        && !session.inventory.creative
+                    {
+                        session.inventory.damage_selected(1);
+                    }
+                } else if matches!(
+                    session.inventory.selected_item(),
+                    item::SEEDS | item::CARROT | item::POTATO
+                ) && targeted == block::FARMLAND
+                    && session.game.block_at(hit.block + IVec3::Y) == block::AIR
+                {
+                    // S6: plant on farmland — seeds grow wheat; carrots/potatoes plant themselves.
+                    let crop = match session.inventory.selected_item() {
+                        item::SEEDS => block::WHEAT_CROP,
+                        item::CARROT => block::CARROT_CROP,
+                        _ => block::POTATO_CROP,
+                    };
+                    if session.game.set_block(&state.gpu, &state.renderer, hit.block + IVec3::Y, crop) {
+                        session.inventory.consume_selected();
+                    }
                 } else {
                     let id = session.inventory.selected_block();
                     if id == block::WOODEN_DOOR {
@@ -1523,9 +1571,13 @@ impl App {
                         // Torches/levers/buttons can't mount on a ceiling (no ATTACH_CEILING variant) —
                         // reject an underside (bottom-face) click instead of spawning a floating fixture.
                         let attach_invalid = block::is_attach(id) && hit.normal.y == -1;
+                        // S6: crops only sit on farmland, from any placement path.
+                        let crop_unsupported = block::is_crop(id)
+                            && session.game.block_at(place - IVec3::Y) != block::FARMLAND;
                         if id != block::AIR
                             && !blocks_player
                             && !attach_invalid
+                            && !crop_unsupported
                             && session.game.set_block_state(
                                 &state.gpu,
                                 &state.renderer,

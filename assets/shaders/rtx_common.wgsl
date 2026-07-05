@@ -184,6 +184,7 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 108u: { return vec3<f32>(0.12, 0.16, 0.18); } // sculk shrieker
         case 109u: { return vec3<f32>(0.10, 0.14, 0.16); } // sculk catalyst
         case 110u: { return vec3<f32>(0.20, 0.21, 0.24); } // reinforced deepslate
+        case 111u: { return vec3<f32>(0.35, 0.24, 0.15); } // farmland (S6; crops are non-opaque)
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }

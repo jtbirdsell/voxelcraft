@@ -26,6 +26,7 @@ pub fn smelt_output(input: ItemId) -> Option<ItemId> {
         item::PORK => item::COOKED_PORK,
         item::CHICKEN_MEAT => item::COOKED_CHICKEN,
         item::MUTTON => item::COOKED_MUTTON,
+        item::POTATO => item::BAKED_POTATO, // S6
         _ => return None,
     })
 }

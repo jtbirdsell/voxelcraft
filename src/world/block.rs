@@ -128,9 +128,14 @@ pub const SCULK_SENSOR: BlockId = 107;
 pub const SCULK_SHRIEKER: BlockId = 108;
 pub const SCULK_CATALYST: BlockId = 109;
 pub const REINFORCED_DEEPSLATE: BlockId = 110;
+// S6 farming: tilled soil + the three crops (growth stage 0-7 in state bits 0-2).
+pub const FARMLAND: BlockId = 111;
+pub const WHEAT_CROP: BlockId = 112;
+pub const CARROT_CROP: BlockId = 113;
+pub const POTATO_CROP: BlockId = 114;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = REINFORCED_DEEPSLATE;
+pub const MAX_BLOCK: BlockId = POTATO_CROP;
 
 #[inline]
 pub fn is_fence(id: BlockId) -> bool {
@@ -334,6 +339,7 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         WOODEN_TRAPDOOR => RenderKind::Trapdoor,
         WOODEN_FENCE | COBBLESTONE_WALL | GLASS_PANE => RenderKind::Connect,
         TORCH | LEVER | BUTTON => RenderKind::Attach,
+        WHEAT_CROP | CARROT_CROP | POTATO_CROP => RenderKind::Cross, // S6 crops
         _ => RenderKind::Cube,
     }
 }
@@ -382,6 +388,83 @@ pub fn is_volume_solid(id: BlockId) -> bool {
 #[inline]
 pub fn is_solid(id: BlockId) -> bool {
     id != AIR && id != WATER && id != LAVA && !is_plant(id)
+}
+
+/// A block the interaction/mining raycast can hit (S6): everything solid PLUS the walk-through
+/// cross plants — without this, aiming at wheat (or tall grass, or a flower) targeted the block
+/// BEHIND it, so plants could never be harvested or bonemealed directly. Raycast-only: collision
+/// keeps using `is_solid` (plants stay walk-through).
+#[inline]
+pub fn is_targetable(id: BlockId) -> bool {
+    is_solid(id) || is_plant(id)
+}
+
+/// S6 crop helpers: the three crops carry a growth stage 0..=7 in state bits 0-2.
+pub const CROP_MAX_STAGE: u8 = 7;
+#[inline]
+pub fn is_crop(id: BlockId) -> bool {
+    matches!(id, WHEAT_CROP | CARROT_CROP | POTATO_CROP)
+}
+#[inline]
+pub fn crop_stage(state: u8) -> u8 {
+    state & 0b111
+}
+#[inline]
+pub fn crop_mature(state: u8) -> bool {
+    crop_stage(state) >= CROP_MAX_STAGE
+}
+
+/// Stage-aware crop billboard tile (S6). Mesher-only: `face_tile` stays id+face keyed (the N2 GI
+/// lock) and reports the mature tile; crops never enter the voxel volume, so the stage-dependent
+/// visual can't diverge GI from raster.
+pub fn crop_tile(id: BlockId, state: u8) -> u32 {
+    let young = crop_stage(state) < 4;
+    match id {
+        WHEAT_CROP => {
+            if young {
+                tile::CROP_WHEAT_YOUNG
+            } else {
+                tile::CROP_WHEAT_MATURE
+            }
+        }
+        CARROT_CROP => {
+            if young {
+                tile::CROP_SPROUT
+            } else {
+                tile::CROP_CARROT_MATURE
+            }
+        }
+        POTATO_CROP => {
+            if young {
+                tile::CROP_SPROUT
+            } else {
+                tile::CROP_POTATO_MATURE
+            }
+        }
+        _ => face_tile(id, [0, 1, 0]),
+    }
+}
+
+/// Random EXTRA drop on breaking (S6), on top of the deterministic `drops()`: mature wheat sheds
+/// bonus seeds, mature root crops an extra item, tall grass sometimes seeds. `r` is a fresh random
+/// word (the caller steps a game rng); None = no bonus this time.
+pub fn bonus_drops(id: BlockId, state: u8, r: u64) -> Option<(crate::item::ItemId, u8)> {
+    match id {
+        TALL_GRASS if r % 10 < 3 => Some((crate::item::SEEDS, 1)),
+        WHEAT_CROP if crop_mature(state) => {
+            let n = (r % 4) as u8; // 0..=3 bonus seeds
+            (n > 0).then_some((crate::item::SEEDS, n))
+        }
+        CARROT_CROP if crop_mature(state) => {
+            let n = (r % 3) as u8;
+            (n > 0).then_some((crate::item::CARROT, n))
+        }
+        POTATO_CROP if crop_mature(state) => {
+            let n = (r % 3) as u8;
+            (n > 0).then_some((crate::item::POTATO, n))
+        }
+        _ => None,
+    }
 }
 
 /// A solid sub-box in a block's local 0..1 space: `[minx, miny, minz, maxx, maxy, maxz]`.
@@ -767,6 +850,10 @@ pub fn display_name(id: BlockId) -> &'static str {
         SCULK_SHRIEKER => "Sculk Shrieker",
         SCULK_CATALYST => "Sculk Catalyst",
         REINFORCED_DEEPSLATE => "Reinforced Deepslate",
+        FARMLAND => "Farmland",
+        WHEAT_CROP => "Wheat",
+        CARROT_CROP => "Carrots",
+        POTATO_CROP => "Potatoes",
         _ => "Unknown",
     }
 }
@@ -894,6 +981,11 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         SCULK_SHRIEKER => [0.12, 0.16, 0.18],
         SCULK_CATALYST => [0.10, 0.14, 0.16],
         REINFORCED_DEEPSLATE => [0.20, 0.21, 0.24],
+        // S6 farming (FARMLAND must match texture.rs base_color + rtx_common.wgsl voxel_color).
+        FARMLAND => [0.35, 0.24, 0.15],
+        WHEAT_CROP => [0.75, 0.65, 0.30],
+        CARROT_CROP => [0.35, 0.55, 0.22],
+        POTATO_CROP => [0.38, 0.52, 0.26],
         // U4 cave-biome cross-billboard cutouts: representative UI/icon swatch (texel art is paint_plant).
         AMETHYST_CLUSTER | SMALL_AMETHYST_BUD | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD => {
             [0.62, 0.45, 0.85]
@@ -1018,7 +1110,7 @@ pub fn hardness(id: BlockId) -> f32 {
         AZALEA_LEAVES => 0.2,
         GLOW_LICHEN | SCULK_VEIN => 0.2,
         MOSS_BLOCK => 0.4,
-        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY => 0.6,
+        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY | FARMLAND => 0.6,
         // U4: amethyst family, pointed dripstone, rooted dirt, sculk sensor — stone-soft (1.5).
         AMETHYST_BLOCK | BUDDING_AMETHYST | AMETHYST_CLUSTER | SMALL_AMETHYST_BUD
         | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD | POINTED_DRIPSTONE | SCULK_SENSOR => 1.5,
@@ -1074,7 +1166,7 @@ pub fn tool_class(id: BlockId) -> ToolClass {
         WOOD | PLANKS | CRAFTING_TABLE | CHEST | PUMPKIN | WOOD_SLAB | WOODEN_DOOR
         | WOODEN_TRAPDOOR | WOODEN_FENCE => ToolClass::Axe,
         COBBLESTONE_WALL | BUTTON => ToolClass::Pickaxe,
-        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY | ROOTED_DIRT => ToolClass::Shovel,
+        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY | ROOTED_DIRT | FARMLAND => ToolClass::Shovel,
         _ => ToolClass::None,
     }
 }
@@ -1096,6 +1188,15 @@ pub fn drops(id: BlockId, state: u8) -> Option<(crate::item::ItemId, u8)> {
         AIR => return None,
         STONE => (COBBLESTONE, 1),
         GRASS => (DIRT, 1),
+        FARMLAND => (DIRT, 1),
+        // S6 crops: the deterministic base drop by stage; the random bonus rides `bonus_drops`.
+        WHEAT_CROP => {
+            if crop_mature(state) { (crate::item::WHEAT, 1) } else { (crate::item::SEEDS, 1) }
+        }
+        CARROT_CROP => (crate::item::CARROT, if crop_mature(state) { 2 } else { 1 }),
+        POTATO_CROP => (crate::item::POTATO, if crop_mature(state) { 2 } else { 1 }),
+        // S6: tall grass drops seeds by chance (bonus_drops), never itself (vanilla).
+        TALL_GRASS => return None,
         LEAVES => return None, // saplings/apples arrive with tree variety + farming
         ICE => return None,             // melts away (no silk touch yet)
         GLASS | GLASS_PANE => return None, // shatters
@@ -1306,6 +1407,17 @@ pub mod tile {
     pub const FOOD_SEEDS: u32 = 177;
     pub const FOOD_BERRIES: u32 = 178;
     pub const FOOD_COOKED: u32 = 179; // a cooked steak/chop (shared by the cooked meats)
+    pub const FOOD_POTATO: u32 = 180; // S6 (sprite band grows: texture.rs paint_item range)
+    pub const FOOD_BAKED_POTATO: u32 = 181;
+    /// Last item-sprite tile (texture.rs's `paint_item` dispatch band ends here); block tiles resume after.
+    pub const ITEM_SPRITE_END: u32 = FOOD_BAKED_POTATO;
+    // S6 farming block tiles.
+    pub const FARMLAND_TOP: u32 = 182;
+    pub const CROP_WHEAT_YOUNG: u32 = 183;
+    pub const CROP_WHEAT_MATURE: u32 = 184;
+    pub const CROP_SPROUT: u32 = 185; // shared young-stage sprout (carrots + potatoes)
+    pub const CROP_CARROT_MATURE: u32 = 186;
+    pub const CROP_POTATO_MATURE: u32 = 187;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
@@ -1451,6 +1563,16 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
         SCULK_SHRIEKER => tile::SCULK_SHRIEKER,
         SCULK_CATALYST => tile::SCULK_CATALYST,
         REINFORCED_DEEPSLATE => tile::REINFORCED_DEEPSLATE,
+        FARMLAND => {
+            if top {
+                tile::FARMLAND_TOP
+            } else {
+                tile::DIRT
+            }
+        }
+        WHEAT_CROP => tile::CROP_WHEAT_MATURE,
+        CARROT_CROP => tile::CROP_CARROT_MATURE,
+        POTATO_CROP => tile::CROP_POTATO_MATURE,
         _ => tile::MAGENTA,
     }
 }
