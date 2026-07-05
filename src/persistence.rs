@@ -45,6 +45,31 @@ pub struct ChestSave {
     pub slots: Vec<Option<ItemStack>>,
 }
 
+/// One persisted world entity (S3): a live mob, a dropped item stack, or an XP orb. Arrows and the
+/// Warden are intentionally transient (the Warden "digs away"; arrows are seconds-lived). Stored as
+/// a trailing section of `save_state.bin` — pre-S3 loaders simply stop after the chest section.
+pub enum EntitySave {
+    Mob {
+        /// Index into `Species::ALL` — a persisted format value; the order must never be reordered.
+        species: u8,
+        pos: [f32; 3],
+        health: f32,
+        baby: bool,
+        growth: f32,
+        angry: bool,
+        slime_tier: u8,
+    },
+    Item {
+        pos: [f32; 3],
+        stack: ItemStack,
+        age: f32,
+    },
+    Xp {
+        pos: [f32; 3],
+        amount: u32,
+    },
+}
+
 /// One furnace's persisted contents (M24), saved in the container section of `save_state.bin`.
 /// Plain primitives + `ItemStack` so persistence stays decoupled from `game::FurnaceState`.
 pub struct FurnaceSave {
@@ -278,6 +303,15 @@ fn migrate_legacy_world_in(legacy: &Path, root: &Path) {
     }
 }
 
+/// Write via a sibling `.tmp` + rename (S3): a crash or power loss mid-write can never truncate
+/// the live file — the old save survives intact until the new bytes are fully on disk. Rename
+/// replaces an existing target atomically on both NTFS (MOVEFILE_REPLACE_EXISTING) and POSIX.
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)
+}
+
 fn rd_u32(d: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(d[o..o + 4].try_into().unwrap())
 }
@@ -338,7 +372,7 @@ pub fn save_level(dir: &Path, level: &Level) -> std::io::Result<()> {
     b.extend_from_slice(&level.level.to_le_bytes());
     b.push(level.difficulty); // P6: difficulty byte, after the survival block
     b.push(level.mode); // S1: game-mode byte (0 survival / 1 creative)
-    fs::write(dir.join("level.bin"), b)
+    atomic_write(&dir.join("level.bin"), &b)
 }
 
 /// Serialize one inventory slot: a present byte, then item(u16)+count(u8)+durability(u16) if present.
@@ -378,14 +412,17 @@ fn rd_slot(d: &[u8], o: &mut usize) -> Option<ItemStack> {
     })
 }
 
-/// Write the player inventory + furnace + chest containers to `save_state.bin` (VCIV v4). Sparse
-/// inventory; each container section is length-prefixed and appended, so an older loader simply
-/// stops after the sections it knows.
+/// Write the player inventory + furnace + chest + entity sections to `save_state.bin` (VCIV v4 +
+/// the S3 trailing entity section). Sparse inventory; each container section is length-prefixed
+/// and appended, so an older loader simply stops after the sections it knows — which is why the
+/// version byte stays 4: bumping it would make pre-S3 builds hard-reject the whole file (and then
+/// wipe it on their next save) instead of just ignoring the entity tail.
 pub fn save_state(
     dir: &Path,
     inv: &Inventory,
     furnaces: &[FurnaceSave],
     chests: &[ChestSave],
+    entities: &[EntitySave],
 ) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     let mut b = Vec::new();
@@ -431,26 +468,62 @@ pub fn save_state(
             wr_slot(&mut b, s);
         }
     }
-    fs::write(dir.join("save_state.bin"), b)
+    // Entity section (S3, trailing): mobs + dropped items + XP orbs survive save/quit.
+    b.extend_from_slice(&(entities.len() as u32).to_le_bytes());
+    for e in entities {
+        match e {
+            EntitySave::Mob { species, pos, health, baby, growth, angry, slime_tier } => {
+                b.push(0);
+                b.push(*species);
+                for c in pos {
+                    b.extend_from_slice(&c.to_le_bytes());
+                }
+                b.extend_from_slice(&health.to_le_bytes());
+                b.push(*baby as u8);
+                b.extend_from_slice(&growth.to_le_bytes());
+                b.push(*angry as u8);
+                b.push(*slime_tier);
+            }
+            EntitySave::Item { pos, stack, age } => {
+                b.push(1);
+                for c in pos {
+                    b.extend_from_slice(&c.to_le_bytes());
+                }
+                b.extend_from_slice(&stack.item.to_le_bytes());
+                b.push(stack.count);
+                b.extend_from_slice(&stack.durability.to_le_bytes());
+                b.extend_from_slice(&age.to_le_bytes());
+            }
+            EntitySave::Xp { pos, amount } => {
+                b.push(2);
+                for c in pos {
+                    b.extend_from_slice(&c.to_le_bytes());
+                }
+                b.extend_from_slice(&amount.to_le_bytes());
+            }
+        }
+    }
+    atomic_write(&dir.join("save_state.bin"), &b)
 }
 
-/// Load the inventory + furnace + chest containers, or a fresh inventory if absent/corrupt.
+/// Load the inventory + furnace + chest + entity sections, or a fresh inventory if absent/corrupt.
 pub fn load_state(
     dir: &Path,
     creative_default: bool,
-) -> (Inventory, Vec<FurnaceSave>, Vec<ChestSave>) {
+) -> (Inventory, Vec<FurnaceSave>, Vec<ChestSave>, Vec<EntitySave>) {
     let mut inv = Inventory::new(creative_default);
     let mut furnaces = Vec::new();
     let mut chests = Vec::new();
+    let mut entities = Vec::new();
     let Ok(d) = fs::read(dir.join("save_state.bin")) else {
-        return (inv, furnaces, chests);
+        return (inv, furnaces, chests, entities);
     };
     if d.len() < 8 || rd_u32(&d, 0) != INV_MAGIC {
-        return (inv, furnaces, chests);
+        return (inv, furnaces, chests, entities);
     }
     let version = d[4];
     if !(1..=4).contains(&version) {
-        return (inv, furnaces, chests); // unknown version -> fresh inventory
+        return (inv, furnaces, chests, entities); // unknown version -> fresh inventory
     }
     inv.selected = (d[5] as usize).min(HOTBAR - 1);
     inv.creative = d[6] != 0;
@@ -522,9 +595,81 @@ pub fn load_state(
                 }
                 chests.push(ChestSave { pos, slots });
             }
+            // Entity section (S3, trailing): absent in pre-S3 saves — the probe just fails.
+            if o + 4 <= d.len() {
+                let ecount = rd_u32(&d, o) as usize;
+                o += 4;
+                'ent: for _ in 0..ecount {
+                    if o >= d.len() {
+                        break;
+                    }
+                    let tag = d[o];
+                    o += 1;
+                    let rd_pos = |d: &[u8], o: usize| {
+                        [rd_f32(d, o), rd_f32(d, o + 4), rd_f32(d, o + 8)]
+                    };
+                    match tag {
+                        0 => {
+                            if o + 24 > d.len() {
+                                break 'ent;
+                            }
+                            let species = d[o];
+                            let pos = rd_pos(&d, o + 1);
+                            let health = rd_f32(&d, o + 13);
+                            let baby = d[o + 17] != 0;
+                            let growth = rd_f32(&d, o + 18);
+                            let angry = d[o + 22] != 0;
+                            let slime_tier = d[o + 23].min(2);
+                            o += 24;
+                            // Structural sanity only; species/health semantics are clamped by
+                            // the entity restore (which knows per-species maxima).
+                            if pos.iter().all(|c| c.is_finite()) && health.is_finite() && health > 0.0 {
+                                entities.push(EntitySave::Mob {
+                                    species, pos, health, baby,
+                                    growth: growth.clamp(0.0, 600.0),
+                                    angry, slime_tier,
+                                });
+                            }
+                        }
+                        1 => {
+                            if o + 21 > d.len() {
+                                break 'ent;
+                            }
+                            let pos = rd_pos(&d, o);
+                            let item = u16::from_le_bytes([d[o + 12], d[o + 13]]);
+                            let count = d[o + 14].min(crate::item::max_stack(item));
+                            let durability = u16::from_le_bytes([d[o + 15], d[o + 16]]);
+                            let age = rd_f32(&d, o + 17);
+                            o += 21;
+                            if pos.iter().all(|c| c.is_finite()) && count > 0 && crate::item::is_known(item) {
+                                let mut stack = ItemStack::new(item, count);
+                                stack.durability = durability;
+                                entities.push(EntitySave::Item {
+                                    pos, stack,
+                                    age: age.clamp(0.0, 600.0),
+                                });
+                            }
+                        }
+                        2 => {
+                            if o + 16 > d.len() {
+                                break 'ent;
+                            }
+                            let pos = rd_pos(&d, o);
+                            let amount = rd_u32(&d, o + 12).min(10_000);
+                            o += 16;
+                            if pos.iter().all(|c| c.is_finite()) && amount > 0 {
+                                entities.push(EntitySave::Xp { pos, amount });
+                            }
+                        }
+                        // Unknown tag: record sizes are unknown, so the rest of the section is
+                        // unreadable — stop here (everything parsed so far is kept).
+                        _ => break 'ent,
+                    }
+                }
+            }
         }
     }
-    (inv, furnaces, chests)
+    (inv, furnaces, chests, entities)
 }
 
 /// Migrate legacy block ids to the current id + block-state scheme.
@@ -618,7 +763,16 @@ pub fn load_chunks(dir: &Path) -> FxHashMap<IVec3, Chunk> {
             }
         }
     }
-    log::info!("Loaded {} edited chunks from save", map.len());
+    // S3: a short read is CORRUPTION (external truncation — atomic writes preclude a torn save),
+    // not success. Say so loudly instead of silently reporting a smaller world.
+    if (map.len() as u32) < count {
+        log::error!(
+            "chunks.bin is corrupt: recovered {} of {count} chunks — the rest of the file is unreadable",
+            map.len()
+        );
+    } else {
+        log::info!("Loaded {} edited chunks from save", map.len());
+    }
     map
 }
 
@@ -645,7 +799,7 @@ pub fn save_chunks(dir: &Path, chunks: &[(IVec3, &Chunk)]) -> std::io::Result<()
         b.extend_from_slice(&(scomp.len() as u32).to_le_bytes());
         b.extend_from_slice(&scomp);
     }
-    fs::write(dir.join("chunks.bin"), b)?;
+    atomic_write(&dir.join("chunks.bin"), &b)?;
     log::info!("Saved {} edited chunks", chunks.len());
     Ok(())
 }
@@ -1017,9 +1171,9 @@ mod tests {
             pos: IVec3::new(-8, 64, 3),
             slots: chest_slots,
         }];
-        save_state(&dir, &inv, &furnaces, &chests).unwrap();
+        save_state(&dir, &inv, &furnaces, &chests, &[]).unwrap();
 
-        let (loaded, lf, lc) = load_state(&dir, true);
+        let (loaded, lf, lc, _le) = load_state(&dir, true);
         assert_eq!(loaded.selected, 3);
         assert!(!loaded.creative);
         assert_eq!(loaded.slots[0].unwrap().count, 64);

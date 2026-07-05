@@ -164,7 +164,8 @@ fn sculk_convertible(b: BlockId) -> bool {
 /// Natural-spawn tuning (P16: light + biome-gated, per-category caps, packs).
 const SPAWN_INTERVAL: f32 = 2.0; // seconds between spawn attempts
 const HOSTILE_CAP: usize = 12; // max live hostile mobs (continuous night spawning is MC-faithful)
-const PASSIVE_CAP: usize = 8; // max live passive animals
+const PASSIVE_CAP: usize = 8; // max live passive animals NEAR the spawn site (S3: local, not global)
+const PASSIVE_NEAR_RADIUS: f32 = 64.0; // the "near" radius for that local cap
 const PASSIVE_MIN: f32 = 8.0; // animals may spawn close (8..24 ring)
 const PASSIVE_MAX: f32 = 24.0;
 const HOSTILE_MIN: f32 = 16.0; // a no-spawn bubble so hostiles don't appear point-blank (MC ~24)
@@ -766,6 +767,12 @@ impl Game {
             |wp| block_at(wp) == block::LAVA,
             |wp| day > 0.6 && sky_light(wp, top, &block_at) == 15,
             |from, range| nearest_vibration_in(vibrations, from, range),
+            // S3: entities freeze while their chunk is unresident (block_at reads AIR there).
+            |wp| {
+                wp.y < 0
+                    || wp.y >= WORLD_HEIGHT_CHUNKS * CHUNK_SIZE_I
+                    || chunks.contains_key(&world::chunk_of(wp))
+            },
         );
 
         // Apply any creeper explosions: carve the crater, then add radial blast damage to the player.
@@ -1793,9 +1800,12 @@ impl Game {
         let mut spawned = 0;
         let mut used: Vec<(i32, i32)> = Vec::new();
         let mut attempts = 0;
+        // S3: the cap counts only passives NEAR the pack site — persisted pens and no-longer-
+        // despawning animals elsewhere must not starve fresh areas of spawns.
+        let near = Vec3::new(wx as f32, 0.0, wz as f32);
         while spawned < PACK_SIZE && attempts < PACK_SIZE * 4 {
             attempts += 1;
-            if self.entities.passive_count() >= PASSIVE_CAP {
+            if self.entities.passive_count_near_xz(near, PASSIVE_NEAR_RADIUS) >= PASSIVE_CAP {
                 break;
             }
             let r = self.spawn_rand();
@@ -1856,7 +1866,12 @@ impl Game {
         }
 
         // Daytime passive pack on lit grass, species drawn from the biome's pool.
-        if surf != block::GRASS || self.entities.passive_count() >= PASSIVE_CAP {
+        if surf != block::GRASS
+            || self.entities.passive_count_near_xz(
+                Vec3::new(wx as f32, 0.0, wz as f32),
+                PASSIVE_NEAR_RADIUS,
+            ) >= PASSIVE_CAP
+        {
             return false;
         }
         if self.sky_light_at(feet) < 15 {
@@ -2068,15 +2083,22 @@ impl Game {
     }
 
     /// Write the edited chunks and the level header to the given world directory.
-    pub fn save(&self, dir: &std::path::Path, level: &Level) {
+    /// Save the edited chunks + level header. Errors PROPAGATE (S3): a failed save must not be
+    /// reported to the player as success (the writes themselves are atomic, so the previous save
+    /// always survives a failure).
+    pub fn save(&self, dir: &std::path::Path, level: &Level) -> std::io::Result<()> {
         let chunks: Vec<(IVec3, &Chunk)> =
             self.saved.iter().map(|(p, c)| (*p, c.as_ref())).collect();
-        if let Err(e) = persistence::save_chunks(dir, &chunks) {
-            log::error!("failed to save chunks: {e}");
-        }
-        if let Err(e) = persistence::save_level(dir, level) {
-            log::error!("failed to save level: {e}");
-        }
+        persistence::save_chunks(dir, &chunks)?;
+        persistence::save_level(dir, level)
+    }
+
+    /// Snapshot the live entities for the save (S3) / rebuild them on load.
+    pub fn entities_to_save(&self) -> Vec<persistence::EntitySave> {
+        self.entities.to_save()
+    }
+    pub fn restore_entities(&mut self, saved: Vec<persistence::EntitySave>) {
+        self.entities.restore(saved);
     }
 
     pub fn visible_meshes(&self, frustum: &Frustum) -> Vec<&GpuMesh> {

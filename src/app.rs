@@ -35,6 +35,7 @@ const SEED: u64 = 0x5EED_C0FFEE;
 const REACH: f32 = 6.0;
 const EAT_TIME: f32 = 1.6; // seconds to eat a food (hold right-click)
 const SHIELD_RAISE_DELAY: f32 = 0.25; // seconds a shield must be up before it blocks (MC ~5 ticks)
+const AUTOSAVE_SECS: f32 = 300.0; // S3: autosave cadence (vanilla saves every 5 min)
 const SENSITIVITY: f32 = 0.0022;
 
 /// Active GUI screen. Gameplay input is suppressed while any screen is open (M15b; grows later).
@@ -143,6 +144,8 @@ struct Session {
     /// S2: whether the loaded position has been occupancy-validated against real chunks (the
     /// deferred buried check). Physics stays paused until it passes.
     spawn_checked: bool,
+    /// S3: seconds of play since the last save; at AUTOSAVE_SECS the world autosaves.
+    autosave: f32,
     /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
     mine_target: Option<IVec3>,
     mine_progress: f32,
@@ -204,8 +207,12 @@ impl App {
         }
     }
 
-    fn save_world(&self) {
-        let Some(session) = self.state.as_ref().and_then(|s| s.session.as_ref()) else { return };
+    /// Save the world; returns whether EVERYTHING was written (S3). With no session there is
+    /// nothing to save — that is success, not failure (Quit from the main menu).
+    fn save_world(&self) -> bool {
+        let Some(session) = self.state.as_ref().and_then(|s| s.session.as_ref()) else {
+            return true;
+        };
         let level = Level {
             seed: session.game.seed(),
             spawn: session.player.position.to_array(),
@@ -224,7 +231,11 @@ impl App {
             mode: session.inventory.creative as u8,
         };
         let dir = &session.world_dir;
-        session.game.save(dir, &level);
+        let mut ok = true;
+        if let Err(e) = session.game.save(dir, &level) {
+            log::error!("SAVE FAILED (world chunks/level): {e} — the previous save is intact");
+            ok = false;
+        }
         // Fold any cursor-held stack back into slots so it isn't lost when saving mid-screen
         // (P / window-close don't go through close_screen's return_held path).
         let mut inv = session.inventory.clone();
@@ -236,9 +247,12 @@ impl App {
             &inv,
             &session.game.furnaces_to_save(),
             &session.game.chests_to_save(),
+            &session.game.entities_to_save(),
         ) {
-            log::error!("failed to save state: {e}");
+            log::error!("SAVE FAILED (inventory/containers/entities): {e} — the previous save is intact");
+            ok = false;
         }
+        ok
     }
 
     /// Center of the window in pixels — for placing the cursor when a GUI screen opens.
@@ -930,6 +944,21 @@ impl App {
     }
 
     fn frame_ingame(&mut self) {
+        // S3 autosave: fires every AUTOSAVE_SECS of play. Peek immutably, save (save_world takes
+        // &self), then reset the timer — all before the frame's mutable state borrow below.
+        let autosave_due = self
+            .state
+            .as_ref()
+            .and_then(|s| s.session.as_ref())
+            .is_some_and(|se| se.autosave >= AUTOSAVE_SECS);
+        if autosave_due {
+            if self.save_world() {
+                log::info!("autosaved");
+            }
+            if let Some(se) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+                se.autosave = 0.0;
+            }
+        }
         let Some(state) = &mut self.state else { return };
         let now = Instant::now();
         let dt = (now - state.last_frame).as_secs_f32().min(0.1);
@@ -938,6 +967,7 @@ impl App {
         let Some(session) = state.session.as_mut() else { return };
         session.environment.update(dt);
         session.elapsed += dt;
+        session.autosave += dt;
 
         // Apply mouse look.
         let (yaw_d, pitch_d) = session.input.take_look();
@@ -1874,8 +1904,8 @@ fn create_session(
     } else {
         persistence::load_chunks(dir)
     };
-    let (inventory, furnaces, chests) = if let Some(mode) = new_mode {
-        (Inventory::new(mode.is_creative()), Vec::new(), Vec::new())
+    let (inventory, furnaces, chests, entities) = if let Some(mode) = new_mode {
+        (Inventory::new(mode.is_creative()), Vec::new(), Vec::new(), Vec::new())
     } else {
         // Pre-first-save worlds have no save_state.bin: seed the creative flag from the level
         // header's mode byte (S1; legacy headers default to creative). save_state's own byte wins
@@ -1889,6 +1919,8 @@ fn create_session(
     let mut game = Game::new(gpu, renderer.volume_bgl(), seed, quality, saved);
     game.restore_furnaces(furnaces);
     game.restore_chests(chests);
+    // S3: restored entities stay frozen (no physics/AI) until their chunks stream in.
+    game.restore_entities(entities);
     // Spawn validation: only a below-world / non-finite position lifts eagerly. "Below the
     // worldgen surface" is NOT buried — an underground save (a cave home) is legitimate; the S2
     // deferred occupancy check in frame_ingame judges against real loaded blocks and lifts only
@@ -1967,6 +1999,7 @@ fn create_session(
         mine_target: None,
         mine_progress: 0.0,
         spawn_checked: false,
+        autosave: 0.0,
         melee_cd: 0.0,
         melee_was_held: false,
         melee_prev_sel: 0,
@@ -2101,11 +2134,33 @@ pub fn persist_selftest() {
         pos: IVec3::new(-5, 70, 8),
         slots: chest_slots,
     }];
-    persistence::save_state(&dir, &inv, &furnaces, &chests).unwrap();
+    // S3: a mob + a dropped item + an XP orb ride the new trailing entity section.
+    let entities = vec![
+        persistence::EntitySave::Mob {
+            species: crate::entity::Species::Cow.to_u8(),
+            pos: [3.0, 100.0, 4.0],
+            health: 7.5,
+            baby: true,
+            growth: 42.0,
+            angry: false,
+            slime_tier: 0,
+        },
+        persistence::EntitySave::Item {
+            pos: [1.0, 99.0, 1.0],
+            stack: item::ItemStack::new(item::item_of_block(block::COBBLESTONE), 17),
+            age: 12.0,
+        },
+        persistence::EntitySave::Xp { pos: [2.0, 99.0, 2.0], amount: 9 },
+    ];
+    persistence::save_state(&dir, &inv, &furnaces, &chests, &entities).unwrap();
     persistence::save_level(&dir, &level).unwrap();
 
-    let (linv, lf, lc) = persistence::load_state(&dir, true);
+    let (linv, lf, lc, le) = persistence::load_state(&dir, true);
     let ll = persistence::load_level(&dir).unwrap();
+    let ents_ok = le.len() == 3
+        && matches!(le[0], persistence::EntitySave::Mob { health, baby: true, .. } if (health - 7.5).abs() < 1e-6)
+        && matches!(le[1], persistence::EntitySave::Item { stack, .. } if stack.count == 17)
+        && matches!(le[2], persistence::EntitySave::Xp { amount: 9, .. });
     let ok = linv.slots[5].map(|s| s.durability) == Some(777)
         && linv.slots[36].map(|s| s.item) == Some(item::armor_id(3, 0))
         && lf.len() == 1
@@ -2118,12 +2173,13 @@ pub fn persist_selftest() {
         && (ll.health - 11.0).abs() < 1e-6
         && (ll.air - 5.0).abs() < 1e-6
         && ll.level == 3
-        && ll.difficulty == 3;
+        && ll.difficulty == 3
+        && ents_ok;
     let _ = std::fs::remove_dir_all(&dir);
     if ok {
-        log::info!("PERSIST_TEST: PASS — inventory + armor + furnace + survival all round-tripped on disk");
+        log::info!("PERSIST_TEST: PASS — inventory + armor + furnace + survival + entities all round-tripped on disk");
     } else {
-        log::error!("PERSIST_TEST: FAIL — state did not survive save/load");
+        log::error!("PERSIST_TEST: FAIL — state did not survive save/load (entities ok: {ents_ok})");
     }
 }
 

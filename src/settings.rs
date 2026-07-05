@@ -189,10 +189,14 @@ impl Settings {
         )
     }
 
-    /// Persist to `saves/settings.cfg` (best-effort; logs on failure).
+    /// Persist to `saves/settings.cfg` (best-effort; logs on failure). Tmp+rename so a crash
+    /// mid-write can't truncate the file (S3 — same pattern as the world saves).
     pub fn save(&self) {
         let _ = std::fs::create_dir_all("saves");
-        if let Err(e) = std::fs::write(settings_path(), self.to_text()) {
+        let path = settings_path();
+        let tmp = path.with_extension("cfg.tmp");
+        let write = std::fs::write(&tmp, self.to_text()).and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(e) = write {
             log::error!("failed to save settings: {e}");
         }
     }

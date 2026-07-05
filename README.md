@@ -240,9 +240,13 @@ position, albedo + skylight) and an ACES tonemap.
 - **Chests**: right-click a chest for a 27-slot storage screen (drag/drop against your inventory);
   breaking a chest spills its contents. A generic `Container` so future storage blocks reuse it.
 - **Persistence**: edited chunks (LZ4 blocks **+ block-state**), the level header, the full inventory +
-  armor + tool durability, **furnace + chest contents**, and **player survival**
-  (health/hunger/air/saturation/XP/level) all round-trip across save/reload; older saves load
-  forward-compatibly.
+  armor + tool durability, **furnace + chest contents**, **player survival**
+  (health/hunger/air/saturation/XP/level), and **live entities** — mobs (health, babies + growth
+  timers, anger, slime size), dropped item stacks, and XP orbs — all round-trip across save/reload;
+  older saves load forward-compatibly. Every save file is written **atomically** (tmp + rename), so a
+  crash or power loss mid-save can never corrupt the previous save, and the world **autosaves every
+  5 minutes**. Passive animals never despawn by distance (pens and pets survive roaming and reload);
+  entities in not-yet-streamed chunks stay frozen until the world catches up.
 - **Game modes** (chosen at world creation, persisted per world): **Survival** — no flying, full
   damage/hunger/air simulation, finite items, death drops your inventory at the death site; **Creative**
   — the paged infinite palette, F-toggled flight, and total invulnerability (no hunger, fall, lava,
