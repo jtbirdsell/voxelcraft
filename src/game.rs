@@ -2535,7 +2535,7 @@ mod furnace_tests {
         }
         assert_eq!(f.output.map(|s| (s.item, s.count)), Some((item::IRON_INGOT, 1)));
         assert_eq!(f.input.map(|s| s.count), Some(1));
-        assert!(f.burn_remaining > 0.0); // a plank (9s) still has burn left after one 6s smelt
+        assert!(f.burn_remaining > 0.0); // a plank (1.5 smelts of fuel) still has burn left after one 6s smelt
     }
 
     /// Swapping the input mid-cook must not let banked progress finish a different recipe instantly.

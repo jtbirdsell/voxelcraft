@@ -1094,7 +1094,18 @@ pub enum ToolClass {
 
 /// Whether a block needs the correct tool to yield a drop (pickaxe blocks do; wood/dirt drop by hand).
 pub fn requires_tool(id: BlockId) -> bool {
+    // S8: pickaxe-class blocks take the vanilla 5x wrong-tool time penalty and drop nothing by
+    // hand — EXCEPT the hand-friendly ones vanilla marks requiresTool=false.
     matches!(tool_class(id), ToolClass::Pickaxe)
+        && !matches!(
+            id,
+            ICE | BUTTON
+                | AMETHYST_CLUSTER
+                | SMALL_AMETHYST_BUD
+                | MEDIUM_AMETHYST_BUD
+                | LARGE_AMETHYST_BUD
+                | POINTED_DRIPSTONE
+        )
 }
 
 /// Minimum harvest level needed to get a drop (0 = any pickaxe). Iron/lapis need stone, gold/diamond/
@@ -1120,13 +1131,17 @@ pub fn hardness(id: BlockId) -> f32 {
         // Reinforced deepslate is unbreakable like bedrock (breakable() returns false for non-finite).
         BEDROCK | REINFORCED_DEEPSLATE => f32::INFINITY,
         AIR | WATER | LAVA => 0.0,
-        LEAVES | TORCH | GLOWSTONE => 0.3,
+        TORCH => 0.0, // instant, like vanilla
+        LEAVES => 0.2,
+        GLOWSTONE => 0.3,
         // U4 thin foliage: azalea leaves are leaf-soft; glow lichen / sculk vein are cross billboards
         // but slightly tougher than 0 (listed BEFORE the `is_plant => 0.0` fallback so they win).
         AZALEA_LEAVES => 0.2,
         GLOW_LICHEN | SCULK_VEIN => 0.2,
-        MOSS_BLOCK => 0.4,
-        DIRT | GRASS | SAND | GRAVEL | SNOW | CLAY | FARMLAND => 0.6,
+        MOSS_BLOCK => 0.1,
+        DIRT | SAND => 0.5,
+        GRASS | GRAVEL | CLAY | FARMLAND => 0.6,
+        SNOW => 0.2,
         // U4: amethyst family, pointed dripstone, rooted dirt, sculk sensor — stone-soft (1.5).
         AMETHYST_BLOCK | BUDDING_AMETHYST | AMETHYST_CLUSTER | SMALL_AMETHYST_BUD
         | MEDIUM_AMETHYST_BUD | LARGE_AMETHYST_BUD | POINTED_DRIPSTONE | SCULK_SENSOR => 1.5,
@@ -1134,27 +1149,32 @@ pub fn hardness(id: BlockId) -> f32 {
         // U4: sculk core blocks are 0.6; the shrieker/catalyst are tougher (3.0).
         SCULK => 0.6,
         SCULK_SHRIEKER | SCULK_CATALYST => 3.0,
-        WOOD | PLANKS | CRAFTING_TABLE | CHEST | WOODEN_DOOR | WOODEN_TRAPDOOR | WOODEN_FENCE => 1.2,
+        WOOD | PLANKS | WOODEN_FENCE => 2.0,
+        CRAFTING_TABLE | CHEST => 2.5,
+        WOODEN_DOOR | WOODEN_TRAPDOOR => 3.0,
         COBBLESTONE_WALL => 2.0,
-        STONE | COBBLESTONE | BRICKS | COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE
-        | REDSTONE_ORE | LAPIS_ORE | COPPER_ORE | EMERALD_ORE => 1.5,
+        STONE => 1.5,
+        COBBLESTONE | BRICKS => 2.0,
+        COAL_ORE | IRON_ORE | GOLD_ORE | DIAMOND_ORE | REDSTONE_ORE | LAPIS_ORE | COPPER_ORE
+        | EMERALD_ORE => 3.0,
         TUFF | CALCITE | GRANITE | POLISHED_GRANITE | DIORITE | POLISHED_DIORITE | ANDESITE
         | POLISHED_ANDESITE | DRIPSTONE_BLOCK | SMOOTH_BASALT => 1.5,
-        DEEPSLATE | FURNACE => 2.0,
+        DEEPSLATE => 3.0,
+        FURNACE => 3.5,
         DEEPSLATE_COAL_ORE | DEEPSLATE_IRON_ORE | DEEPSLATE_COPPER_ORE | DEEPSLATE_GOLD_ORE
         | DEEPSLATE_REDSTONE_ORE | DEEPSLATE_EMERALD_ORE | DEEPSLATE_LAPIS_ORE
-        | DEEPSLATE_DIAMOND_ORE => 3.0,
+        | DEEPSLATE_DIAMOND_ORE => 4.5,
         // Storage/raw blocks + deepslate build variants + cut copper: metal/slate-tough (3.0).
         IRON_BLOCK | GOLD_BLOCK | DIAMOND_BLOCK | EMERALD_BLOCK | LAPIS_BLOCK | REDSTONE_BLOCK
         | COPPER_BLOCK | COAL_BLOCK | RAW_IRON_BLOCK | RAW_COPPER_BLOCK | RAW_GOLD_BLOCK
         | COBBLED_DEEPSLATE | POLISHED_DEEPSLATE | DEEPSLATE_BRICKS | DEEPSLATE_TILES
         | CUT_COPPER => 3.0,
-        OBSIDIAN => 8.0,
+        OBSIDIAN => 50.0, // diamond pick: 50*1.5/8 = 9.4 s (vanilla)
         ICE => 0.5,
         PUMPKIN => 1.0,
         GLASS | GLASS_PANE => 0.3,
-        STONE_SLAB | STONE_STAIRS => 1.5,
-        WOOD_SLAB => 1.2,
+        STONE_SLAB | STONE_STAIRS => 2.0,
+        WOOD_SLAB => 2.0,
         LEVER | BUTTON => 0.5,
         _ if is_plant(id) => 0.0,
         _ => 1.0,

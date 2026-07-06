@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 
-const DAY_LENGTH_SECS: f32 = 600.0; // a full cycle in 10 minutes
+const DAY_LENGTH_SECS: f32 = 1200.0; // S8: a full cycle in 20 minutes (vanilla)
 
 pub struct Environment {
     /// Time of day in [0, 1): 0.25 = sunrise, 0.5 = noon, 0.75 = sunset, 0.0 = midnight.

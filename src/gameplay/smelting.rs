@@ -7,7 +7,7 @@ use crate::block;
 use crate::item::{self, ItemId};
 
 /// Seconds of furnace burn it takes to smelt one item.
-pub const SMELT_TIME: f32 = 6.0;
+pub const SMELT_TIME: f32 = 10.0; // S8: vanilla
 
 /// The item a furnace produces from one unit of `input`, or `None` if it can't be smelted.
 pub fn smelt_output(input: ItemId) -> Option<ItemId> {
@@ -35,10 +35,10 @@ pub fn smelt_output(input: ItemId) -> Option<ItemId> {
 pub fn fuel_value(fuel: ItemId) -> Option<f32> {
     Some(match fuel {
         item::COAL | item::CHARCOAL => 8.0 * SMELT_TIME, // a coal smelts 8 items (Minecraft)
-        block::COAL_BLOCK => 8.0 * (8.0 * SMELT_TIME),   // U3: a coal block burns ~8 coal worth
-        block::PLANKS => 9.0,                            // 1.5 items
-        block::WOOD => 18.0,                             // 3 items — a whole log
-        item::STICK => 3.0,                              // 0.5 items
+        block::COAL_BLOCK => 80.0 * SMELT_TIME,          // vanilla: 800 s = 10 coal worth
+        block::PLANKS => 1.5 * SMELT_TIME,               // vanilla 15 s
+        block::WOOD => 1.5 * SMELT_TIME,                 // vanilla: a log burns like its planks
+        item::STICK => 0.5 * SMELT_TIME,                 // vanilla 5 s
         _ => return None,
     })
 }
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn fuels_have_positive_burn() {
         assert!(fuel_value(block::PLANKS).unwrap() > 0.0);
-        assert!(fuel_value(block::WOOD).unwrap() > fuel_value(block::PLANKS).unwrap());
+        assert!(fuel_value(block::WOOD).unwrap() >= fuel_value(block::PLANKS).unwrap());
         assert!(fuel_value(item::STICK).is_some());
         assert_eq!(fuel_value(block::IRON_ORE), None); // ore is input, never fuel
     }

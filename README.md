@@ -224,7 +224,7 @@ position, albedo + skylight) and an ACES tonemap.
   Covers the **full tool + armor progression** (all five tool classes and four armor pieces across
   wood/stone/iron/gold/diamond), torches, slabs/stairs, table/furnace/chest, planks and sticks.
 - **Smelting**: right-click a furnace for an input/fuel/output screen with a live burning-fuel flame
-  gauge and smelt-progress arrow; a `step_furnaces` tick burns fuel (coal/charcoal/logs/planks/sticks)
+  gauge and smelt-progress arrow; a `step_furnaces` tick burns fuel (coal 8 smelts, coal block 80, logs/planks 1.5, sticks 0.5)
   to smelt **raw iron/gold → ingots**, **sand → glass**, **logs → charcoal**, cobblestone → stone, and
   **raw meat → cooked food**. Mined ores drop their material (coal/diamond/redstone/lapis directly;
   iron/gold as raw ore). Breaking a lit furnace spills it.
@@ -253,6 +253,14 @@ position, albedo + skylight) and an ACES tonemap.
   damage/hunger/air simulation, finite items, death drops your inventory at the death site; **Creative**
   — the paged infinite palette, F-toggled flight, and total invulnerability (no hunger, fall, lava,
   drowning, or mob damage), on foot or airborne.
+- **Vanilla pacing** (S8): the real Minecraft mining formula — vanilla hardness units with the
+  1.5x can-harvest / 5x wrong-tool time factors (stone is 7.5 s by hand, 1.1 s with a wooden pick;
+  a wooden pick on diamond ore is slow AND dropless), a full **exhaustion model** (sprinting,
+  jumping, attacking, mining, swimming, and regeneration all cost hunger through the vanilla
+  exhaustion sawtooth; idling and walking cost nothing), vanilla **regen cadences** (1 HP/0.5 s
+  saturated at full hunger, 1 HP/4 s at 18+, each paid in exhaustion), starvation at 1 dmg/4 s,
+  **sprint gated at more than 3 haunches**, 10-second smelts with item-denominated fuel values,
+  and **20-minute days**.
 - **Survival depth**: health + hunger with saturation-fueled regen and starvation; fall damage;
   **swimming** (buoyancy + paddle up) with an **air/drowning** bubble meter; **lava contact damage**;
   **sneak** (Shift won't let you walk off ledges) and a sprint **FOV** kick; death drops + respawn.

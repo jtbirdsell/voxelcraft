@@ -1046,7 +1046,10 @@ impl App {
             70_f32
         } else if session.player.submerged {
             66.0
-        } else if session.input.sprint && (session.input.forward || session.input.back) {
+        } else if session.input.sprint
+            && session.player.can_sprint()
+            && (session.input.forward || session.input.back)
+        {
             78.0
         } else {
             70.0
@@ -1159,10 +1162,13 @@ impl App {
             let charge = (1.0 - session.melee_cd / cd_max).clamp(0.0, 1.0);
             let mut dmg = item::charged_damage(item::attack_damage(sel), charge);
             // Critical hit (+50%): a falling, non-sprinting, grounded-feet-off attack.
+            // S8: "sprinting" for combat rules means EFFECTIVE sprint (key + hunger gate) —
+            // a starving player holding Ctrl is walking, so crits/sweeps behave accordingly.
+            let sprinting = session.input.sprint && session.player.can_sprint();
             let crit = crate::player::is_critical_hit(
                 session.player.on_ground,
                 session.player.velocity.y,
-                session.input.sprint,
+                sprinting,
                 session.player.submerged,
                 session.player.flying,
             );
@@ -1173,16 +1179,17 @@ impl App {
             let sweep = if charge >= 0.999
                 && item::is_sword(sel)
                 && session.player.on_ground
-                && !session.input.sprint
+                && !sprinting
             {
                 Some(1.0)
             } else {
                 None
             };
             // Sprint-attack: extra horizontal knockback (and it can't crit — see is_critical_hit).
-            let kb_mult = if session.input.sprint && session.player.on_ground { 1.5 } else { 1.0 };
+            let kb_mult = if sprinting && session.player.on_ground { 1.5 } else { 1.0 };
             session.game.attack_nearest(eye, fwd, REACH, dmg, crit, sweep, kb_mult);
             session.melee_cd = cd_max;
+            session.player.add_exhaustion(crate::player::EXH_ATTACK); // S8 (no-op in creative)
             if !session.inventory.creative {
                 session.inventory.damage_selected(1); // weapons wear from hitting
             }
@@ -1207,12 +1214,20 @@ impl App {
                     }
                     let sel = session.inventory.selected_item();
                     let block_tool = block::tool_class(id);
-                    // A matching tool divides the break time by its tier speed.
-                    let mut time = block::hardness(id);
-                    if item::is_tool(sel)
+                    // S8 vanilla formula: hardness is in vanilla units. canHarvest (right class AND
+                    // sufficient tier, or no tool required) gives base 1.5x; a tool-requiring block
+                    // without its proper tool takes the 5x penalty (stone by hand = 1.5*5 = 7.5 s).
+                    // A class-matching tool divides by its tier speed either way (a wooden pick on
+                    // diamond ore is still 5x-penalized AND dropless — the tier half of canHarvest).
+                    let class_match = item::is_tool(sel)
                         && item::tool_class(sel) == block_tool
-                        && block_tool != block::ToolClass::None
-                    {
+                        && block_tool != block::ToolClass::None;
+                    let can_harvest = !block::requires_tool(id)
+                        || (class_match
+                            && item::harvest_level(item::tool_tier(sel))
+                                >= block::required_harvest(id));
+                    let mut time = block::hardness(id) * if can_harvest { 1.5 } else { 5.0 };
+                    if class_match {
                         time /= item::tool_speed(item::tool_tier(sel));
                     }
                     if session.inventory.creative {
@@ -1250,6 +1265,7 @@ impl App {
                                 session.game.spawn_xp(center, block::mining_xp(id));
                             }
                             session.inventory.damage_selected(1);
+                            session.player.add_exhaustion(crate::player::EXH_MINE); // S8
                         }
                         // S6: a crop can't float — breaking its support pops it as a drop.
                         if removed {

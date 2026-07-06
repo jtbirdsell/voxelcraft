@@ -29,12 +29,21 @@ const SWIM_UP: f32 = 4.0;
 const MAX_HEALTH: f32 = 20.0;
 const MAX_HUNGER: f32 = 20.0;
 const SAFE_FALL: f32 = 3.0; // blocks of fall absorbed before damage; then 1 hp per extra block
-const HUNGER_DRAIN: f32 = 0.08; // hunger/sec while walking
-const HUNGER_SPRINT_MULT: f32 = 2.5;
-const REGEN_HUNGER: f32 = 17.0; // health regenerates while hunger is at least this
-const REGEN_RATE: f32 = 1.2; // hp/sec regenerated
-const REGEN_COST: f32 = 0.6; // hunger/sec spent regenerating
-const STARVE_RATE: f32 = 0.8; // hp/sec lost at zero hunger
+// S8 full-vanilla pacing: hunger drains through EXHAUSTION (actions cost; time doesn't), regen
+// runs on vanilla cadences paid in exhaustion, and sprinting needs food in the tank.
+const EXHAUSTION_LIMIT: f32 = 4.0; // at 4.0: -1 saturation (or -1 hunger once saturation is dry)
+const EXH_SPRINT_PER_M: f32 = 0.1;
+const EXH_SWIM_PER_M: f32 = 0.01;
+const EXH_JUMP: f32 = 0.05;
+const EXH_SPRINT_JUMP: f32 = 0.2;
+pub const EXH_ATTACK: f32 = 0.1; // per landed swing (app.rs melee site)
+pub const EXH_MINE: f32 = 0.005; // per block broken (app.rs mining site)
+const EXH_REGEN_PER_HP: f32 = 6.0;
+const REGEN_HUNGER: f32 = 18.0; // vanilla threshold (was 17)
+const REGEN_INTERVAL: f32 = 4.0; // 1 HP / 4 s at hunger >= 18
+const REGEN_SATURATED_INTERVAL: f32 = 0.5; // 1 HP / 0.5 s at full hunger with saturation left
+const STARVE_RATE: f32 = 0.25; // vanilla 1 dmg / 4 s, applied continuously
+const SPRINT_MIN_HUNGER: f32 = 6.0; // vanilla: can't sprint at 3 haunches or less
 const MAX_SATURATION: f32 = 5.0; // hidden food reserve: drains before hunger, fuels faster regen
 const PEACEFUL_REGEN: f32 = 1.0; // hp/sec passive health regen on Peaceful (no hunger cost)
 
@@ -96,6 +105,11 @@ pub struct Player {
     pub submerged: bool,
     /// Hidden food saturation; drains before hunger and fuels faster regen.
     saturation: f32,
+    /// S8: accumulated action cost (sprint/jump/attack/mine/regen). At 4.0 it spends a point of
+    /// saturation-then-hunger. Transient (a 0..4 sawtooth; vanilla persists it — accepted loss).
+    exhaustion: f32,
+    /// S8: vanilla regen cadence timer (1 HP per 4 s, or per 0.5 s when saturated at full hunger).
+    regen_timer: f32,
     /// Experience: total points toward the next level, plus the current level.
     pub xp: f32,
     pub level: u32,
@@ -173,6 +187,8 @@ impl Player {
             air: MAX_AIR,
             submerged: false,
             saturation: MAX_SATURATION,
+            exhaustion: 0.0,
+            regen_timer: 0.0,
             xp: 0.0,
             level: 0,
             armor_points: 0,
@@ -208,6 +224,19 @@ impl Player {
         }
         self.apply_damage(scaled, self.armor_points);
         self.hurt_cooldown = 0.5;
+    }
+
+    /// S8: record action cost. Creative/flying never exhausts (survival mechanics don't run there).
+    pub fn add_exhaustion(&mut self, amount: f32) {
+        if self.creative || self.flying {
+            return;
+        }
+        self.exhaustion += amount;
+    }
+
+    /// S8: vanilla sprint gate — sprinting needs more than 3 haunches of hunger.
+    pub fn can_sprint(&self) -> bool {
+        self.creative || self.flying || self.hunger > SPRINT_MIN_HUNGER
     }
 
     /// Award experience points, rolling over into levels.
@@ -281,41 +310,54 @@ impl Player {
         self.darkness = 0.0;
     }
 
-    /// Hunger drain, regen when well-fed (faster while saturation lasts), starvation at empty hunger.
-    /// `env_damage` suppresses regen so the player can't heal mid-lava / mid-drown.
-    fn update_survival(&mut self, dt: f32, input: &Input, env_damage: bool) {
+    /// S8 vanilla survival tick: spend banked exhaustion into saturation/hunger, regen on the
+    /// vanilla cadence (paid in exhaustion), starve at empty. `env_damage` suppresses regen so the
+    /// player can't heal mid-lava / mid-drown.
+    fn update_survival(&mut self, dt: f32, env_damage: bool) {
         // Peaceful: hunger never depletes and health regenerates passively at no hunger cost (like
         // Minecraft). Environmental damage still applies (handled in update_environment_damage).
+        // Exhaustion is discarded so leaving Peaceful can't bank a stale -1 saturation.
         if self.difficulty == crate::rules::Difficulty::Peaceful {
             self.hunger = MAX_HUNGER;
             self.saturation = MAX_SATURATION;
+            self.exhaustion = 0.0;
             if !env_damage && self.health < MAX_HEALTH {
                 self.health = (self.health + PEACEFUL_REGEN * dt).min(MAX_HEALTH);
             }
             return;
         }
 
-        let moving = input.forward || input.back || input.left || input.right;
-        // Hunger only drains through activity (no AFK starvation) — saturation absorbs it first.
-        if moving {
-            let mult = if input.sprint { HUNGER_SPRINT_MULT } else { 1.0 };
-            let drain = HUNGER_DRAIN * mult * dt;
+        // Spend banked exhaustion: each 4.0 costs a point of saturation, then hunger.
+        while self.exhaustion >= EXHAUSTION_LIMIT {
+            self.exhaustion -= EXHAUSTION_LIMIT;
             if self.saturation > 0.0 {
-                self.saturation = (self.saturation - drain).max(0.0);
+                self.saturation = (self.saturation - 1.0).max(0.0);
             } else {
-                self.hunger = (self.hunger - drain).max(0.0);
+                self.hunger = (self.hunger - 1.0).max(0.0);
             }
         }
 
-        if !env_damage && self.hunger >= REGEN_HUNGER && self.health < MAX_HEALTH {
-            let rate = if self.saturation > 0.0 { REGEN_RATE * 2.0 } else { REGEN_RATE };
-            self.health = (self.health + rate * dt).min(MAX_HEALTH);
-            if self.saturation > 0.0 {
-                self.saturation = (self.saturation - REGEN_COST * dt).max(0.0);
+        if !env_damage && self.health < MAX_HEALTH {
+            // Vanilla cadence: 1 HP / 0.5 s while saturated at full hunger, 1 HP / 4 s at >= 18.
+            let interval = if self.hunger >= MAX_HUNGER && self.saturation > 0.0 {
+                Some(REGEN_SATURATED_INTERVAL)
+            } else if self.hunger >= REGEN_HUNGER {
+                Some(REGEN_INTERVAL)
             } else {
-                self.hunger = (self.hunger - REGEN_COST * dt).max(0.0);
+                None
+            };
+            if let Some(iv) = interval {
+                self.regen_timer += dt;
+                if self.regen_timer >= iv {
+                    self.regen_timer -= iv;
+                    self.health = (self.health + 1.0).min(MAX_HEALTH);
+                    self.add_exhaustion(EXH_REGEN_PER_HP);
+                }
+            } else {
+                self.regen_timer = 0.0;
             }
-        } else if self.hunger <= 0.0 {
+        }
+        if self.hunger <= 0.0 {
             // Starvation can't push health below the difficulty's floor (Easy 10, Normal 1, Hard 0).
             let floor = self.difficulty.starve_floor();
             if self.health > floor {
@@ -486,21 +528,30 @@ impl Player {
                 self.velocity.y = SWIM_UP;
             }
             self.velocity.y = self.velocity.y.clamp(-WATER_SINK, SWIM_UP);
+            if wish != Vec3::ZERO {
+                self.add_exhaustion(SWIM_SPEED * dt * EXH_SWIM_PER_M); // S8: 0.01/m swum
+            }
         } else {
+            // S8: sprinting needs hunger in the tank (the key alone doesn't make you sprint).
+            let sprinting = input.sprint && !input.sneak && self.can_sprint();
             let speed = if input.sneak {
                 SNEAK_SPEED
-            } else if input.sprint {
+            } else if sprinting {
                 SPRINT_SPEED
             } else {
                 WALK_SPEED
             };
             self.velocity.x = wish.x * speed;
             self.velocity.z = wish.z * speed;
+            if sprinting && wish != Vec3::ZERO {
+                self.add_exhaustion(SPRINT_SPEED * dt * EXH_SPRINT_PER_M); // S8: 0.1/m sprinted
+            }
             self.velocity.y -= GRAVITY * dt;
             self.velocity.y = self.velocity.y.max(-TERMINAL);
             if input.up && self.on_ground {
                 self.velocity.y = JUMP_SPEED;
                 self.on_ground = false;
+                self.add_exhaustion(if sprinting { EXH_SPRINT_JUMP } else { EXH_JUMP }); // S8
             }
         }
 
@@ -550,7 +601,7 @@ impl Player {
                 self.submerged = head_submerged;
             } else {
                 let env_damage = self.update_environment_damage(dt, head_submerged, in_lava);
-                self.update_survival(dt, input, env_damage);
+                self.update_survival(dt, env_damage);
             }
         }
     }
@@ -798,6 +849,40 @@ mod tests {
     }
 
     #[test]
+    fn s8_vanilla_regen_and_sprint_gate() {
+        let floor = |q: IVec3| if q.y < 10 { (block::STONE, 0) } else { (block::AIR, 0) };
+        let input = Input::default();
+        // Saturated fast regen: 1 HP per 0.5 s at full hunger with saturation left.
+        let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
+        p.restore_state(10.0, 20.0, 11.0, 5.0, 0.0, 0);
+        for _ in 0..28 {
+            p.update(1.0 / 60.0, 0.0, &input, floor, 0);
+        }
+        assert!((p.health - 10.0).abs() < 1e-3, "no heal before the 0.5 s cadence");
+        for _ in 0..6 {
+            p.update(1.0 / 60.0, 0.0, &input, floor, 0);
+        }
+        assert!((p.health - 11.0).abs() < 1e-3, "exactly 1 HP at the saturated cadence");
+        // Normal regen (hunger 18, no saturation): 1 HP per 4 s — the old 1.2-2.4 HP/s is gone.
+        let mut q = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
+        q.restore_state(10.0, 18.0, 11.0, 0.0, 0.0, 0);
+        for _ in 0..180 {
+            q.update(1.0 / 60.0, 0.0, &input, floor, 0);
+        }
+        assert!((q.health - 10.0).abs() < 1e-3, "no heal before 4 s");
+        for _ in 0..66 {
+            q.update(1.0 / 60.0, 0.0, &input, floor, 0);
+        }
+        assert!((q.health - 11.0).abs() < 1e-3, "1 HP per 4 s");
+        // Sprint gate: vanilla denies sprint at 3 haunches (hunger 6) or less.
+        let mut r = Player::new(Vec3::ZERO, false);
+        r.restore_state(20.0, 6.0, 11.0, 0.0, 0.0, 0);
+        assert!(!r.can_sprint(), "hunger 6 cannot sprint");
+        r.restore_state(20.0, 7.0, 11.0, 0.0, 0.0, 0);
+        assert!(r.can_sprint());
+    }
+
+    #[test]
     fn air_drains_underwater_and_refills_in_air() {
         let water = |_: IVec3| (block::WATER, 0);
         let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
@@ -863,24 +948,24 @@ mod tests {
         let mut p = Player::new(Vec3::ZERO, false);
         p.difficulty = Difficulty::Hard;
         (p.health, p.hunger, p.saturation) = (3.0, 0.0, 0.0);
-        for _ in 0..600 {
-            p.update_survival(1.0 / 60.0, &input, false);
+        for _ in 0..1200 {
+            p.update_survival(1.0 / 60.0, false);
         }
         assert!(p.health <= 0.0, "Hard starvation should kill, got {}", p.health);
         // Easy: starvation can't drop below 10 HP.
         let mut p = Player::new(Vec3::ZERO, false);
         p.difficulty = Difficulty::Easy;
         (p.health, p.hunger, p.saturation) = (20.0, 0.0, 0.0);
-        for _ in 0..1800 {
-            p.update_survival(1.0 / 60.0, &input, false);
+        for _ in 0..3600 {
+            p.update_survival(1.0 / 60.0, false);
         }
         assert!((p.health - 10.0).abs() < 0.2, "Easy floors starvation at 10, got {}", p.health);
         // Peaceful: health regenerates with zero hunger, and hunger stays full.
         let mut p = Player::new(Vec3::ZERO, false);
         p.difficulty = Difficulty::Peaceful;
         (p.health, p.hunger, p.saturation) = (5.0, 0.0, 0.0);
-        for _ in 0..600 {
-            p.update_survival(1.0 / 60.0, &input, false);
+        for _ in 0..1200 {
+            p.update_survival(1.0 / 60.0, false);
         }
         assert!(p.health > 5.0, "Peaceful should passively regen, got {}", p.health);
         assert_eq!(p.hunger, MAX_HUNGER, "Peaceful keeps hunger full");
@@ -901,17 +986,26 @@ mod tests {
 
     #[test]
     fn saturation_drains_before_hunger() {
-        // Ground at y<0 (stone) so the player rests at y=0; air (not water) elsewhere.
-        let blocks = |p: IVec3| if p.y < 0 { (block::STONE, 0) } else { (block::AIR, 0) };
-        let mut p = Player::new(Vec3::new(0.5, 0.0, 0.5), false);
-        let full_hunger = p.hunger;
-        let mut input = Input::default();
-        input.forward = true;
-        for _ in 0..120 {
-            p.update(1.0 / 60.0, 0.0, &input, blocks, 0);
+        // S8: hunger drains through EXHAUSTION (4.0 = one point), saturation absorbing first.
+        let mut p = Player::new(Vec3::new(0.5, 10.0, 0.5), false);
+        let floor = |q: IVec3| if q.y < 10 { (block::STONE, 0) } else { (block::AIR, 0) };
+        let input = Input::default();
+        p.add_exhaustion(8.0); // two points banked
+        p.update(1.0 / 60.0, 0.0, &input, floor, 0);
+        assert!(p.saturation() < MAX_SATURATION, "saturation pays first");
+        assert_eq!(p.hunger, MAX_HUNGER, "hunger untouched while saturation lasts");
+        p.add_exhaustion(EXHAUSTION_LIMIT * (MAX_SATURATION + 2.0));
+        p.update(1.0 / 60.0, 0.0, &input, floor, 0);
+        assert_eq!(p.saturation(), 0.0);
+        assert!(p.hunger < MAX_HUNGER, "hunger pays once saturation is dry");
+        // Plain walking costs nothing now (vanilla): banked exhaustion is the only drain.
+        let before = p.hunger;
+        let mut walk = Input::default();
+        walk.forward = true;
+        for _ in 0..240 {
+            p.update(1.0 / 60.0, 0.0, &walk, floor, 0);
         }
-        // While saturation lasts, hunger is untouched.
-        assert_eq!(p.hunger, full_hunger, "hunger should hold while saturation remains");
+        assert_eq!(p.hunger, before, "walking alone never drains hunger (S8)")
     }
 
     #[test]
