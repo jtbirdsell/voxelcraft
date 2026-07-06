@@ -170,6 +170,21 @@ fn log_within(start: IVec3, range: i32, block_at: &impl Fn(IVec3) -> BlockId) ->
     false
 }
 
+/// S12: what happens when `spreading` fluid tries to enter a cell holding another fluid. None =
+/// no reaction (same kind / not a fluid). Water meeting lava hardens the LAVA cell: obsidian if
+/// it was a source (state/reach 0), cobblestone if flowing. Lava meeting water cools to cobble.
+fn fluid_meet(spreading: BlockId, occupant: BlockId, occupant_is_source: bool) -> Option<BlockId> {
+    match (spreading, occupant) {
+        (block::WATER, block::LAVA) => Some(if occupant_is_source {
+            block::OBSIDIAN
+        } else {
+            block::COBBLESTONE
+        }),
+        (block::LAVA, block::WATER) => Some(block::COBBLESTONE),
+        _ => None,
+    }
+}
+
 /// U10 sculk-spread tuning: conversions per tick, the catalyst detection radius from a mob death.
 const SCULK_BUDGET: u32 = 24;
 const SCULK_CATALYST_RANGE: i32 = 8;
@@ -994,7 +1009,7 @@ impl Game {
         // Collect the cells to clear, then carve them in ONE batched pass (apply_fluid_changes
         // re-meshes each affected chunk once — set_block-per-block would remesh 100+ times). Fluids
         // are left intact (Minecraft blasts don't destroy water; carving them leaves dry holes).
-        let mut changes: Vec<(IVec3, BlockId)> = Vec::new();
+        let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
         for dx in -r..=r {
             for dy in -r..=r {
                 for dz in -r..=r {
@@ -1002,13 +1017,14 @@ impl Game {
                     if (p.as_vec3() + Vec3::splat(0.5) - center).length() <= radius {
                         let id = self.block_at(p);
                         if id != block::AIR && id != block::BEDROCK && !block::is_fluid(id) {
-                            changes.push((p, block::AIR));
+                            changes.push((p, block::AIR, 0));
                         }
                     }
                 }
             }
         }
         self.apply_fluid_changes(gpu, renderer, &changes);
+        self.wake_fluids_around_list(&changes); // S12: craters at a lake edge flood
         explosion_damage((player_pos - center).length(), radius)
     }
 
@@ -1245,6 +1261,8 @@ impl Game {
         if !block::is_fluid(id) {
             self.fluid.remove(&wp);
         }
+        // S12: the edit may have opened a path for (or disturbed) neighboring fluids.
+        self.wake_fluids_around(&[wp]);
 
         // Edited chunk plus any neighbor whose BAKED LIGHT this edit can reach must re-mesh (S4a).
         // Light floods up to 15 blocks, so the old boundary-only rule (lx==0/31) left stale light
@@ -1345,7 +1363,7 @@ impl Game {
         if self.fluid_frontier.is_empty() {
             return false;
         }
-        let mut changes: Vec<(IVec3, BlockId)> = Vec::new();
+        let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
         let mut created: Vec<IVec3> = Vec::new();
         let mut budget = FLUID_BUDGET;
         while budget > 0 {
@@ -1361,20 +1379,35 @@ impl Game {
                 self.fluid.remove(&pos);
                 continue;
             }
+            // S12: meeting the opposite fluid reacts instead of stopping dead. Source-ness comes
+            // from the fluid map's live reach, falling back to the persisted state byte.
+            let is_source = |g: &Game, n: IVec3| {
+                g.fluid.get(&n).map(|&(_, l)| l == 0).unwrap_or_else(|| g.block_state_at(n).1 == 0)
+            };
             let below = pos - IVec3::Y;
-            if self.is_air_loaded(below) {
+            let below_id = self.block_at(below);
+            if let Some(product) = fluid_meet(kind, below_id, is_source(self, below)) {
+                changes.push((below, product, 0));
+                self.fluid.remove(&below);
+            } else if self.is_air_loaded(below) {
                 // Fall straight down; landing resets horizontal reach to full.
                 self.fluid.insert(below, (kind, 0));
-                changes.push((below, kind));
+                changes.push((below, kind, 0));
                 created.push(below);
             } else {
                 let max_spread = if kind == block::LAVA { LAVA_SPREAD } else { WATER_SPREAD };
                 if level < max_spread {
                     for d in [IVec3::X, -IVec3::X, IVec3::Z, -IVec3::Z] {
                         let n = pos + d;
+                        let nid = self.block_at(n);
+                        if let Some(product) = fluid_meet(kind, nid, is_source(self, n)) {
+                            changes.push((n, product, 0));
+                            self.fluid.remove(&n);
+                            continue;
+                        }
                         if !self.fluid.contains_key(&n) && self.is_air_loaded(n) {
                             self.fluid.insert(n, (kind, level + 1));
-                            changes.push((n, kind));
+                            changes.push((n, kind, level + 1));
                             created.push(n);
                         }
                     }
@@ -1396,11 +1429,11 @@ impl Game {
         &mut self,
         gpu: &Gpu,
         renderer: &ChunkRenderer,
-        changes: &[(IVec3, BlockId)],
+        changes: &[(IVec3, BlockId, u8)],
     ) {
         let mut mutated: FxHashSet<IVec3> = FxHashSet::default();
         let mut affected: FxHashSet<IVec3> = FxHashSet::default();
-        for &(wp, id) in changes {
+        for &(wp, id, st) in changes {
             let cpos = world::chunk_of(wp);
             let origin = world::chunk_origin(cpos);
             let (lx, ly, lz) = (
@@ -1412,10 +1445,12 @@ impl Game {
                 continue;
             };
             let chunk = Arc::make_mut(arc);
-            if chunk.get(lx, ly, lz) == id {
+            if chunk.get(lx, ly, lz) == id && chunk.state(lx, ly, lz) == st {
                 continue;
             }
-            chunk.set(lx, ly, lz, id);
+            // S12: a fluid's horizontal reach persists in the state byte (reload/exposure would
+            // otherwise promote every flowing tail back into a full source and multiply water).
+            chunk.set_state(lx, ly, lz, id, st);
             mutated.insert(cpos);
             affected.insert(cpos);
             if lx == 0 {
@@ -1562,6 +1597,7 @@ impl Game {
         self.tick_rng = rng;
         if !changes.is_empty() {
             self.apply_block_changes(gpu, renderer, &changes);
+            self.wake_fluids_around_list(&changes); // S12
         }
         // S7: decayed leaves shed their roll as world items.
         for (wp, di, dc) in drops {
@@ -1742,6 +1778,7 @@ impl Game {
             return false;
         }
         self.apply_block_changes(gpu, renderer, &changes);
+        self.wake_fluids_around_list(&changes); // S12
         true
     }
 
@@ -2162,6 +2199,33 @@ impl Game {
         }
         let species = pool[((r >> 32) as usize) % pool.len()];
         self.spawn_passive_pack(species, wx, wz) > 0
+    }
+
+    /// S12: after any edit, wake adjacent fluids — re-queue mapped cells and RE-ACTIVATE inert
+    /// ones (worldgen lakes, reloaded flows) with their persisted reach from the state byte.
+    /// This is what makes a lake pour into a freshly dug channel.
+    fn wake_fluids_around(&mut self, cells: &[IVec3]) {
+        const DIRS: [IVec3; 6] =
+            [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        for &c in cells {
+            for d in DIRS {
+                let n = c + d;
+                let (id, st) = self.block_state_at(n);
+                if !block::is_fluid(id) {
+                    continue;
+                }
+                if !self.fluid.contains_key(&n) {
+                    self.fluid.insert(n, (id, st));
+                }
+                self.fluid_frontier.push_back(n);
+            }
+        }
+    }
+
+    /// The tuple-list flavor for the batch appliers.
+    fn wake_fluids_around_list(&mut self, changes: &[(IVec3, BlockId, u8)]) {
+        let cells: Vec<IVec3> = changes.iter().map(|&(p, _, _)| p).collect();
+        self.wake_fluids_around(&cells);
     }
 
     /// S11: any live hostile within `r` of `p` (the "monsters nearby" sleep check).
@@ -2673,6 +2737,19 @@ mod furnace_tests {
         assert_eq!(block::leaf_drop(10), Some((block::SAPLING, 1)));
         assert_eq!(block::leaf_drop(500), None);
         assert!(random_tickable(block::SAPLING) && random_tickable(block::LEAVES));
+    }
+
+    #[test]
+    fn s12_fluid_meet_reactions() {
+        // Water hardens lava: obsidian for a source, cobblestone for a flow.
+        assert_eq!(fluid_meet(block::WATER, block::LAVA, true), Some(block::OBSIDIAN));
+        assert_eq!(fluid_meet(block::WATER, block::LAVA, false), Some(block::COBBLESTONE));
+        // Lava cools against water into cobblestone either way.
+        assert_eq!(fluid_meet(block::LAVA, block::WATER, true), Some(block::COBBLESTONE));
+        assert_eq!(fluid_meet(block::LAVA, block::WATER, false), Some(block::COBBLESTONE));
+        // Same fluid / solids: no reaction.
+        assert_eq!(fluid_meet(block::WATER, block::WATER, true), None);
+        assert_eq!(fluid_meet(block::WATER, block::STONE, false), None);
     }
 
     #[test]

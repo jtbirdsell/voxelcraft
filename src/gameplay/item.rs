@@ -99,6 +99,10 @@ pub const GLOW_BERRIES: ItemId = MATERIAL_BASE + 39;
 // S6 farming.
 pub const POTATO: ItemId = MATERIAL_BASE + 40;
 pub const BAKED_POTATO: ItemId = MATERIAL_BASE + 41;
+// S12 buckets.
+pub const BUCKET: ItemId = MATERIAL_BASE + 42;
+pub const WATER_BUCKET: ItemId = MATERIAL_BASE + 43;
+pub const LAVA_BUCKET: ItemId = MATERIAL_BASE + 44;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -147,6 +151,9 @@ fn material_name(item: ItemId) -> &'static str {
         GLOW_BERRIES => "Glow Berries",
         POTATO => "Potato",
         BAKED_POTATO => "Baked Potato",
+        BUCKET => "Bucket",
+        WATER_BUCKET => "Water Bucket",
+        LAVA_BUCKET => "Lava Bucket",
         _ => "Material",
     }
 }
@@ -195,6 +202,9 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         GLOW_BERRIES => [0.95, 0.65, 0.20],
         POTATO => [0.85, 0.70, 0.40],
         BAKED_POTATO => [0.75, 0.55, 0.30],
+        BUCKET => [0.75, 0.75, 0.78],
+        WATER_BUCKET => [0.35, 0.55, 0.85],
+        LAVA_BUCKET => [0.95, 0.45, 0.10],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -424,7 +434,12 @@ pub fn item_of_block(b: BlockId) -> ItemId {
 /// Max stack size: tools, armor, and bows don't stack.
 #[inline]
 pub fn max_stack(item: ItemId) -> u8 {
-    if is_tool(item) || is_armor(item) || item == BOW || item == SHIELD {
+    if is_tool(item)
+        || is_armor(item)
+        || item == BOW
+        || item == SHIELD
+        || matches!(item, BUCKET | WATER_BUCKET | LAVA_BUCKET)
+    {
         1
     } else {
         64
@@ -526,6 +541,9 @@ pub fn item_tile(item: ItemId) -> u32 {
         GLOW_BERRIES => return t::FOOD_BERRIES,
         POTATO => return t::FOOD_POTATO,
         BAKED_POTATO => return t::FOOD_BAKED_POTATO,
+        BUCKET => return t::BUCKET_EMPTY,
+        WATER_BUCKET => return t::BUCKET_WATER,
+        LAVA_BUCKET => return t::BUCKET_LAVA,
         COOKED_BEEF | COOKED_PORK | COOKED_CHICKEN | COOKED_MUTTON => return t::FOOD_COOKED,
         CLAY_BALL => return t::CLAY, // the clay block tile reads as a clay ball
         _ => {}
@@ -956,7 +974,7 @@ mod tests {
         assert!(is_known(COOKED_BEEF) && is_known(BREAD)); // defined foods
         assert!(is_known(POTATO) && is_known(BAKED_POTATO)); // S6 foods
         // The unpopulated tail of the material range is still rejected (name falls back to "Material").
-        assert!(!is_known(MATERIAL_BASE + 42), "undefined material id should be rejected");
+        assert!(!is_known(MATERIAL_BASE + 45), "undefined material id should be rejected");
     }
 
     #[test]
@@ -1086,6 +1104,14 @@ mod tests {
         // Stage tiles: young vs mature differ; the id+face face_tile stays state-free (N2 lock).
         assert_ne!(block::crop_tile(block::WHEAT_CROP, 0), block::crop_tile(block::WHEAT_CROP, 7));
         assert_eq!(block::face_tile(block::WHEAT_CROP, [0, 1, 0]), block::crop_tile(block::WHEAT_CROP, 7));
+    }
+
+    #[test]
+    fn s12_buckets() {
+        assert!(is_known(BUCKET) && is_known(WATER_BUCKET) && is_known(LAVA_BUCKET));
+        assert_eq!(max_stack(BUCKET), 1);
+        assert_eq!(max_stack(LAVA_BUCKET), 1);
+        assert_eq!(item_name(WATER_BUCKET), "Water Bucket");
     }
 
     #[test]

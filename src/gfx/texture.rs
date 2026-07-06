@@ -156,6 +156,9 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::WOOL => [0.92, 0.92, 0.92],
         T::BED_TOP => [0.55, 0.15, 0.15],
         T::BED_SIDE => [0.45, 0.16, 0.14],
+        T::BUCKET_EMPTY => [0.75, 0.75, 0.78],
+        T::BUCKET_WATER => [0.45, 0.55, 0.80],
+        T::BUCKET_LAVA => [0.85, 0.50, 0.25],
         T::HEART => [0.90, 0.15, 0.25],
         T::CRIT => [0.95, 0.85, 0.35],
         T::SMOKE => [0.40, 0.40, 0.42],
@@ -800,6 +803,28 @@ fn paint_item(tile: u32, x: u32, y: u32) -> [u8; 4] {
             }
             CLEAR
         }
+        T::BUCKET_EMPTY | T::BUCKET_WATER | T::BUCKET_LAVA => {
+            // A tin pail: tapered body + handle arc; filled variants show their liquid at the brim.
+            let body = (3..=12).contains(&yi)
+                && (xi - 8).abs() <= 4 - (3 - yi.min(3)).max(0)
+                && (xi - 8).abs() <= 4;
+            let handle = yi == 2 && (xi - 8).abs() <= 3;
+            if handle {
+                return fill([0.55, 0.55, 0.58]);
+            }
+            if body {
+                if yi <= 5 && tile != T::BUCKET_EMPTY {
+                    return if tile == T::BUCKET_WATER {
+                        fill([0.30, 0.52, 0.88])
+                    } else {
+                        fill([0.98, 0.45, 0.08])
+                    };
+                }
+                let edge = (xi - 8).abs() == 4;
+                return fill(if edge { [0.55, 0.55, 0.58] } else { [0.78, 0.78, 0.82] });
+            }
+            CLEAR
+        }
         T::FOOD_BAKED_POTATO => {
             // The same oval, roasted: darker skin with a split showing the pale inside.
             if cx * cx + cy * cy * 2 <= 32 {
@@ -895,7 +920,9 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
     if tile == T::GLASS {
         return paint_glass(x, y);
     }
-    if (T::TOOL_BASE..=T::ITEM_SPRITE_END).contains(&tile) {
+    if (T::TOOL_BASE..=T::ITEM_SPRITE_END).contains(&tile)
+        || matches!(tile, T::BUCKET_EMPTY | T::BUCKET_WATER | T::BUCKET_LAVA)
+    {
         return paint_item(tile, x, y);
     }
     let base = base_color(tile);

@@ -328,6 +328,13 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Buckets & living fluids** (S12): craft a **bucket** (3 iron), scoop up any water or lava
+  source (a fluid-aware use ray — the mining ray still ignores liquids), and pour it back out as a
+  live source. Fluids **re-flow when the world changes**: dig into a lake — worldgen or player-made,
+  even after a reload — and it pours into your channel; creeper craters at a shoreline flood.
+  Fluid reach persists in the block-state byte, so a reload can't multiply water into new sources.
+  And fluids **react**: water meeting a lava source hardens it to **obsidian**, flowing lava
+  cools to **cobblestone** — portal material and cobble generators both work.
 - **Beds & respawn** (S11): craft a **bed** (3 wool — sheep drop it — over 3 planks), place it
   (a real 2-cell half-height block; breaking either half removes both), and **sleep at night** to
   skip to sunrise — unless monsters are nearby. Sleeping **sets your respawn point**: death returns

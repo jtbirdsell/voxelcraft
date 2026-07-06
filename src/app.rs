@@ -1607,6 +1607,31 @@ impl App {
                 // P17: fed a breedable animal its food → love-mode; consume one (takes priority over
                 // placing, like melee's mob-precedence).
                 session.inventory.consume_selected();
+            } else if session.inventory.selected_item() == item::BUCKET
+                && let Some(fcell) = {
+                    // S12 bucket fill: a fluid-aware ray (the standard target ignores fluids, so
+                    // open water yields no target at all). A solid hit first → None → fall through.
+                    raycast::cast(eye, fwd, REACH, |p| {
+                        session.game.is_targetable_at(p)
+                            || block::is_fluid(session.game.block_at(p))
+                    })
+                    .filter(|h| block::is_fluid(session.game.block_at(h.block)))
+                    .map(|h| h.block)
+                }
+            {
+                let fid = session.game.block_at(fcell);
+                session.game.set_block(&state.gpu, &state.renderer, fcell, block::AIR);
+                if !session.inventory.creative {
+                    let filled =
+                        if fid == block::WATER { item::WATER_BUCKET } else { item::LAVA_BUCKET };
+                    session.inventory.slots[session.inventory.selected] =
+                        Some(item::ItemStack::new(filled, 1));
+                }
+                if fid == block::WATER {
+                    if let Some(audio) = &state.audio {
+                        audio.play_at(crate::audio::Sfx::Splash, 0.7, fcell.as_vec3() + Vec3::splat(0.5), session.camera.position, fwd);
+                    }
+                }
             } else if let Some(hit) = &target {
                 let targeted = session.game.block_at(hit.block);
                 if targeted == block::WOODEN_DOOR {
@@ -1662,6 +1687,30 @@ impl App {
                     session.game.set_block_state(&state.gpu, &state.renderer, hit.block, targeted, ns);
                     if let Some(audio) = &state.audio {
                         audio.play_at(crate::audio::Sfx::LeverClick, 0.7, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                    }
+                } else if matches!(
+                    session.inventory.selected_item(),
+                    item::WATER_BUCKET | item::LAVA_BUCKET
+                ) && session.game.block_at(hit.block + hit.normal) == block::AIR
+                {
+                    // S12 pour: place the fluid as a live source; the bucket empties (survival).
+                    let place = hit.block + hit.normal;
+                    let fluid = if session.inventory.selected_item() == item::WATER_BUCKET {
+                        block::WATER
+                    } else {
+                        block::LAVA
+                    };
+                    if session.game.set_block(&state.gpu, &state.renderer, place, fluid) {
+                        session.game.add_fluid_source(place, fluid);
+                        if !session.inventory.creative {
+                            session.inventory.slots[session.inventory.selected] =
+                                Some(item::ItemStack::new(item::BUCKET, 1));
+                        }
+                        if fluid == block::WATER {
+                            if let Some(audio) = &state.audio {
+                                audio.play_at(crate::audio::Sfx::Splash, 0.7, place.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                            }
+                        }
                     }
                 } else if session.inventory.selected_item() == item::BONE
                     && session.game.bonemeal(&state.gpu, &state.renderer, hit.block)

@@ -1497,6 +1497,11 @@ pub mod tile {
     pub const WOOL: u32 = 192;
     pub const BED_TOP: u32 = 193;
     pub const BED_SIDE: u32 = 194;
+    // S12 bucket sprites (outside the contiguous 126..=181 item band; texture.rs dispatches
+    // these three explicitly).
+    pub const BUCKET_EMPTY: u32 = 195;
+    pub const BUCKET_WATER: u32 = 196;
+    pub const BUCKET_LAVA: u32 = 197;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
