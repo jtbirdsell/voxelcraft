@@ -860,6 +860,7 @@ impl Game {
         let mut collected = collected;
         for (center, radius) in std::mem::take(&mut collected.explosions) {
             let dmg = self.apply_explosion(gpu, renderer, center, radius, camera_pos);
+            collected.sounds.push((crate::audio::Sfx::Explosion, center)); // S9
             if dmg > 0.0 {
                 collected.player_damage.push((dmg, center)); // source = blast center
             }

@@ -98,6 +98,8 @@ struct State {
     scene: Scene,
     /// M35: the loaded world, or `None` while in a menu.
     session: Option<Session>,
+    /// S9: the audio engine (`None` = silent: no device / VOXELCRAFT_MUTE / FG self-test).
+    audio: Option<crate::audio::Audio>,
     /// Fail-safe for GPU/driver wedges (P21, 2026-06-03 Metal incident): when submitted frames stop
     /// completing, save the world and exit instead of piling more work on a dead queue.
     gpu_watchdog: crate::gpu::GpuWatchdog,
@@ -146,6 +148,15 @@ struct Session {
     spawn_checked: bool,
     /// S3: seconds of play since the last save; at AUTOSAVE_SECS the world autosaves.
     autosave: f32,
+    // ── S9 audio edge trackers ──
+    /// Health last frame (env damage has no event — hurt sounds fire on the drop edge).
+    prev_health: f32,
+    /// Highest y since leaving the ground (the player's own tracker resets mid-substep).
+    fall_top: f32,
+    was_on_ground: bool,
+    was_wet: bool,
+    /// Stride accumulator (blocks walked) toward the next footstep.
+    step_accum: f32,
     /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
     mine_target: Option<IVec3>,
     mine_progress: f32,
@@ -551,7 +562,12 @@ impl App {
     /// Render the active menu screen (no world; world-independent render targets). A frozen session is
     /// left untouched behind the menu.
     fn frame_menu(&mut self) {
-        let Some(state) = self.state.as_ref() else { return };
+        let Some(state) = self.state.as_mut() else { return };
+        // S9: keep the ambient pads fed/faded while in menus (a paused session keeps its palette).
+        let day = state.session.as_ref().map(|s| s.environment.day_factor()).unwrap_or(1.0);
+        if let Some(audio) = state.audio.as_mut() {
+            audio.tick_music(day, 1.0 / 60.0);
+        }
         let (w, h) = (state.gpu.config.width as f32, state.gpu.config.height as f32);
         let Some((verts, _)) = Self::build_menu(state, w, h) else { return };
         state.renderer.present_menu(&state.gpu, &verts);
@@ -594,6 +610,9 @@ impl App {
     /// The single click-dispatch point for every menu widget.
     fn activate(&mut self, id: crate::menu::WidgetId, rect: crate::menu::Rect, event_loop: &ActiveEventLoop) {
         use crate::menu::WidgetId as W;
+        if let Some(audio) = self.state.as_ref().and_then(|s| s.audio.as_ref()) {
+            audio.play(crate::audio::Sfx::Click, 0.5); // S9
+        }
         // Any click that isn't on a delete control disarms a pending-delete confirm (so it never lingers).
         if !matches!(id, W::DeleteWorld(_)) {
             if let Some(state) = self.state.as_mut() {
@@ -968,6 +987,10 @@ impl App {
         session.environment.update(dt);
         session.elapsed += dt;
         session.autosave += dt;
+        // S9: ambient pads track day/night (crossfaded; a segment is always queued).
+        if let Some(audio) = state.audio.as_mut() {
+            audio.tick_music(session.environment.day_factor(), dt);
+        }
 
         // Apply mouse look.
         let (yaw_d, pitch_d) = session.input.take_look();
@@ -1031,6 +1054,51 @@ impl App {
                 );
             }
         }
+        // ── S9 body-feel audio: landings, footsteps, splashes, and the env-damage hurt edge ──
+        {
+            let on_ground = session.player.on_ground;
+            let flying = session.player.flying;
+            let pos = session.player.position;
+            let vel = session.player.velocity;
+            let health = session.player.health;
+            if !on_ground {
+                session.fall_top = session.fall_top.max(pos.y);
+            }
+            if let Some(audio) = &state.audio {
+                if on_ground && !session.was_on_ground && !flying {
+                    let fall = session.fall_top - pos.y;
+                    if fall > 3.0 {
+                        audio.play(crate::audio::Sfx::Land, (fall / 12.0).clamp(0.3, 1.0));
+                    }
+                }
+                let hspeed = Vec3::new(vel.x, 0.0, vel.z).length();
+                if on_ground && !flying && hspeed > 0.5 {
+                    session.step_accum += hspeed * dt;
+                    if session.step_accum >= 2.2 {
+                        session.step_accum = 0.0;
+                        let under =
+                            session.game.block_at((pos - Vec3::Y * 0.5).floor().as_ivec3());
+                        let (step, _) = crate::audio::block_sfx(under);
+                        audio.play(step, 0.45);
+                    }
+                } else {
+                    session.step_accum = 0.0;
+                }
+                let wet = block::is_fluid(session.game.block_at(pos.floor().as_ivec3()));
+                if wet && !session.was_wet {
+                    audio.play(crate::audio::Sfx::Splash, 0.8);
+                }
+                session.was_wet = wet;
+                if health < session.prev_health - 0.05 {
+                    audio.play(crate::audio::Sfx::PlayerHurt, 0.9);
+                }
+            }
+            if on_ground {
+                session.fall_top = pos.y;
+            }
+            session.was_on_ground = on_ground;
+            session.prev_health = health;
+        }
         session.camera.position = session.player.eye();
         // M34-VM5: optional camera head-bob, folded into the real camera transform BEFORE the camera
         // uniform rolls prev_view_proj — so DLSS motion vectors include it and stay correct. Uses the
@@ -1060,6 +1128,9 @@ impl App {
         // Survival: a hard fall or starvation can kill; respawn at spawn. Creative is immortal (S1).
         if !session.player.creative && session.player.is_dead() {
             log::info!("You died — respawning at spawn.");
+            if let Some(audio) = &state.audio {
+                audio.play(crate::audio::Sfx::PlayerHurt, 1.0); // the death gasp (screen lands S10)
+            }
             // Drop the whole inventory at the death site, then respawn empty.
             let death_pos = session.player.position + Vec3::new(0.0, 1.0, 0.0);
             // One entity per stack (carries count + tool durability) — tools drop too, not vanish.
@@ -1083,7 +1154,8 @@ impl App {
         if dark > 0.0 {
             session.player.apply_darkness(dark);
         }
-        for stack in collected.items {
+        let picked_any = !collected.items.is_empty();
+        for stack in std::mem::take(&mut collected.items) {
             if let Some(leftover) = session.inventory.insert(stack) {
                 // Inventory full — drop the remainder back so items aren't vacuum-deleted.
                 session
@@ -1093,6 +1165,19 @@ impl App {
         }
         if collected.xp > 0 {
             session.player.add_xp(collected.xp);
+        }
+        // S9: pickup blips + the world-positioned sound feed from the entity/game tick.
+        if let Some(audio) = &state.audio {
+            if picked_any {
+                audio.play(crate::audio::Sfx::ItemPop, 0.5);
+            }
+            if collected.xp > 0 {
+                audio.play(crate::audio::Sfx::XpDing, 0.5);
+            }
+            let (cp, cf) = (session.camera.position, session.camera.forward());
+            for (sfx, pos) in std::mem::take(&mut collected.sounds) {
+                audio.play_at(sfx, 1.0, pos, cp, cf);
+            }
         }
 
         // P14 shield raise-timer: hold right-click with a SHIELD (no screen open) to raise it. Updated
@@ -1126,7 +1211,14 @@ impl App {
             incoming += amount;
         }
         if incoming > 0.0 {
+            let before = session.player.health;
             session.player.take_hit(incoming);
+            if session.player.health < before - 0.05 {
+                if let Some(audio) = &state.audio {
+                    audio.play(crate::audio::Sfx::PlayerHurt, 0.9);
+                }
+            }
+            session.prev_health = session.player.health;
         }
 
         // Block targeting.
@@ -1146,12 +1238,10 @@ impl App {
             session.melee_cd = 0.0;
         }
         let block_dist = target.as_ref().map_or(REACH, |h| h.dist);
+        let mob_dist = session.game.nearest_mob_hit(eye, fwd, REACH);
         let mob_in_way = session.screen == Screen::None
             && session.input.break_held
-            && session
-                .game
-                .nearest_mob_hit(eye, fwd, REACH)
-                .is_some_and(|md| md <= block_dist);
+            && mob_dist.is_some_and(|md| md <= block_dist);
         // A swing fires on the click EDGE (so spamming yields partial-charge hits) or as an auto-swing
         // when LMB is held and the meter is already full.
         let pressed_now = session.input.break_held && !session.melee_was_held;
@@ -1188,6 +1278,10 @@ impl App {
             // Sprint-attack: extra horizontal knockback (and it can't crit — see is_critical_hit).
             let kb_mult = if sprinting && session.player.on_ground { 1.5 } else { 1.0 };
             session.game.attack_nearest(eye, fwd, REACH, dmg, crit, sweep, kb_mult);
+            if let Some(audio) = &state.audio {
+                let at = eye + fwd * mob_dist.unwrap_or(1.5);
+                audio.play_at(crate::audio::Sfx::MobHit, 0.9, at, eye, fwd); // S9
+            }
             session.melee_cd = cd_max;
             session.player.add_exhaustion(crate::player::EXH_ATTACK); // S8 (no-op in creative)
             if !session.inventory.creative {
@@ -1239,6 +1333,13 @@ impl App {
                         let bstate = session.game.block_state_at(hit).1;
                         let removed =
                             session.game.set_block(&state.gpu, &state.renderer, hit, block::AIR);
+                        if removed {
+                            if let Some(audio) = &state.audio {
+                                let (_, brk) = crate::audio::block_sfx(id);
+                                let (cp, cf) = (session.camera.position, session.camera.forward());
+                                audio.play_at(brk, 0.9, hit.as_vec3() + Vec3::splat(0.5), cp, cf);
+                            }
+                        }
                         if removed && !session.inventory.creative {
                             // Pickaxe blocks need a matching tool of sufficient harvest level to drop.
                             let harvest_ok = if block::requires_tool(id) {
@@ -1318,6 +1419,9 @@ impl App {
                 let dir = session.camera.forward();
                 let pos = session.camera.position + dir * 1.2; // muzzle clear of the player AABB
                 session.game.spawn_player_arrow(pos, dir * speed, damage);
+                if let Some(audio) = &state.audio {
+                    audio.play(crate::audio::Sfx::BowShoot, 0.8); // S9
+                }
                 if !session.inventory.creative {
                     session.inventory.consume_item(item::ARROW);
                 }
@@ -1345,11 +1449,20 @@ impl App {
                 session.eat_item = Some(sel_item);
                 session.eat_progress = 0.0;
             }
+            let before_crunch = (session.eat_progress / 0.35) as i32;
             session.eat_progress += dt;
+            if let Some(audio) = &state.audio {
+                if (session.eat_progress / 0.35) as i32 > before_crunch {
+                    audio.play(crate::audio::Sfx::Eat, 0.6); // S9: chewing
+                }
+            }
             if session.eat_progress >= EAT_TIME {
                 if let Some(f) = crate::food::food(sel_item) {
                     session.player.eat(f.hunger, f.saturation);
                     session.inventory.consume_selected();
+                }
+                if let Some(audio) = &state.audio {
+                    audio.play(crate::audio::Sfx::Burp, 0.5); // S9
                 }
                 session.eat_progress = 0.0;
                 session.eat_item = None;
@@ -1387,11 +1500,20 @@ impl App {
                     let p_half = if half == block::DOOR_LOWER { block::DOOR_UPPER } else { block::DOOR_LOWER };
                     session.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_DOOR, block::door_state(f, no, h, half));
                     session.game.set_block_state(&state.gpu, &state.renderer, partner, block::WOODEN_DOOR, block::door_state(f, no, h, p_half));
+                    if let Some(audio) = &state.audio {
+                        let sfx = if no { crate::audio::Sfx::DoorOpen } else { crate::audio::Sfx::DoorClose };
+                        audio.play_at(sfx, 0.9, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                    }
                 } else if targeted == block::WOODEN_TRAPDOOR {
                     // Right-click toggles the trapdoor open/closed.
                     let (_, st) = session.game.block_state_at(hit.block);
-                    let ns = block::trapdoor_state(block::trapdoor_facing(st), block::trapdoor_half(st), !block::trapdoor_open(st));
+                    let opening = !block::trapdoor_open(st);
+                    let ns = block::trapdoor_state(block::trapdoor_facing(st), block::trapdoor_half(st), opening);
                     session.game.set_block_state(&state.gpu, &state.renderer, hit.block, block::WOODEN_TRAPDOOR, ns);
+                    if let Some(audio) = &state.audio {
+                        let sfx = if opening { crate::audio::Sfx::DoorOpen } else { crate::audio::Sfx::DoorClose };
+                        audio.play_at(sfx, 0.8, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                    }
                 } else if targeted == block::CRAFTING_TABLE {
                     // Right-clicking a crafting table opens the 3x3 crafting screen instead.
                     session.pending_open = Some(Screen::Crafting);
@@ -1407,6 +1529,9 @@ impl App {
                     let (_, st) = session.game.block_state_at(hit.block);
                     let ns = block::attach_state(block::attach_face(st), !block::attach_on(st));
                     session.game.set_block_state(&state.gpu, &state.renderer, hit.block, targeted, ns);
+                    if let Some(audio) = &state.audio {
+                        audio.play_at(crate::audio::Sfx::LeverClick, 0.7, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                    }
                 } else if session.inventory.selected_item() == item::BONE
                     && session.game.bonemeal(&state.gpu, &state.renderer, hit.block)
                 {
@@ -1426,10 +1551,13 @@ impl App {
                     && session.game.block_at(hit.block + IVec3::Y) == block::AIR
                 {
                     // S6: the hoe tills grass/dirt (open above) into farmland; wears the tool.
-                    if session.game.set_block(&state.gpu, &state.renderer, hit.block, block::FARMLAND)
-                        && !session.inventory.creative
-                    {
-                        session.inventory.damage_selected(1);
+                    if session.game.set_block(&state.gpu, &state.renderer, hit.block, block::FARMLAND) {
+                        if let Some(audio) = &state.audio {
+                            audio.play_at(crate::audio::Sfx::StepDirt, 0.8, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                        }
+                        if !session.inventory.creative {
+                            session.inventory.damage_selected(1);
+                        }
                     }
                 } else if matches!(
                     session.inventory.selected_item(),
@@ -1445,6 +1573,9 @@ impl App {
                     };
                     if session.game.set_block(&state.gpu, &state.renderer, hit.block + IVec3::Y, crop) {
                         session.inventory.consume_selected();
+                        if let Some(audio) = &state.audio {
+                            audio.play_at(crate::audio::Sfx::StepLeaves, 0.6, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                        }
                     }
                 } else {
                     let id = session.inventory.selected_block();
@@ -1610,6 +1741,9 @@ impl App {
                             )
                         {
                             session.inventory.consume_selected();
+                            if let Some(audio) = &state.audio {
+                                audio.play_at(crate::audio::Sfx::Place, 0.7, place.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                            }
                             if block::is_fluid(id) {
                                 // Placed water/lava becomes a flowing source.
                                 session.game.add_fluid_source(place, id);
@@ -2050,6 +2184,7 @@ fn create_session(
     if let Some(l) = &level {
         player.restore_state(l.health, l.hunger, l.air, l.saturation, l.xp, l.level);
     }
+    let spawn_health = player.health;
     let camera = Camera::new(player.eye(), yaw, pitch);
     let mut camera_uniform = CameraUniform::new();
     camera_uniform.update(&camera, gpu.aspect());
@@ -2075,6 +2210,11 @@ fn create_session(
         mine_progress: 0.0,
         spawn_checked: false,
         autosave: 0.0,
+        prev_health: spawn_health,
+        fall_top: spawn.y,
+        was_on_ground: false,
+        was_wet: false,
+        step_accum: 0.0,
         melee_cd: 0.0,
         melee_was_held: false,
         melee_prev_sel: 0,
@@ -2934,6 +3074,7 @@ impl ApplicationHandler for App {
             fps_smooth: 0.0,
             scene,
             session,
+            audio: crate::audio::Audio::new(),
             quality,
             gpu_watchdog: crate::gpu::GpuWatchdog::new(),
             menu: crate::menu::UiState::default(),

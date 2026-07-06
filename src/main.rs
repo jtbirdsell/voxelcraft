@@ -8,6 +8,7 @@
 
 mod app;
 mod game;
+mod audio;
 mod gameplay;
 mod gfx;
 mod mesh;
@@ -37,6 +38,12 @@ fn main() {
         env_logger::Env::default().default_filter_or("warn,voxelcraft=info"),
     )
     .init();
+
+    // Headless audio-bank render (no device needed): every SFX + music heads into one WAV.
+    if std::env::var("VOXELCRAFT_AUDIO_TEST").is_ok() {
+        audio::audio_selftest();
+        return;
+    }
 
     // Headless persistence round-trip check (no window needed).
     if std::env::var("VOXELCRAFT_PERSIST_TEST").is_ok() {

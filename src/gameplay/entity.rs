@@ -441,6 +441,23 @@ struct MobData {
     sonic_cd: f32,
     /// `warden_target` = world position of the last vibration it heard (its blind pursuit goal).
     warden_target: Option<Vec3>,
+    /// S9: seconds until this mob next vocalizes (groan/moo/cluck...). Transient.
+    voice: f32,
+}
+
+/// S9: a species' idle vocalization (None = a silent species).
+fn voice_sfx(s: Species) -> Option<crate::audio::Sfx> {
+    use crate::audio::Sfx;
+    Some(match s {
+        Species::Zombie => Sfx::ZombieGroan,
+        Species::Skeleton => Sfx::SkeletonRattle,
+        Species::Cow => Sfx::CowMoo,
+        Species::Pig => Sfx::PigOink,
+        Species::Sheep => Sfx::SheepBaa,
+        Species::Chicken => Sfx::ChickenCluck,
+        Species::Wolf => Sfx::WolfBark,
+        _ => return None,
+    })
 }
 
 /// Slime size-tier factor (small/medium/large): scales both the render model and the collision/hit
@@ -498,6 +515,10 @@ pub struct Collected {
     /// World positions where a mob died this frame (U10): drives sculk-catalyst spread + a death
     /// vibration the Warden/sensors can hear.
     pub deaths: Vec<Vec3>,
+    /// S9: world-positioned sound events raised inside the entity/game tick (creeper fuses,
+    /// skeleton shots, mob voices, explosions...). Drained by the app each frame; also the feed
+    /// S10's particles extend.
+    pub sounds: Vec<(crate::audio::Sfx, Vec3)>,
 }
 
 struct Entity {
@@ -934,6 +955,7 @@ impl Entities {
                 no_vib: 0.0,
                 sonic_cd: 0.0,
                 warden_target: None,
+                voice: 3.0 + randf(&mut rng) * 8.0, // S9: first vocalization 3-11 s in
             }),
             pos,
             vel: Vec3::ZERO,
@@ -1195,6 +1217,17 @@ impl Entities {
                         }
                     }
                     m.atk_cd = (m.atk_cd - dt).max(0.0);
+                    // S9: idle vocalizations on a per-mob timer (species without a voice stay mute).
+                    m.voice -= dt;
+                    if m.voice <= 0.0 {
+                        e.rng ^= e.rng << 13;
+                        e.rng ^= e.rng >> 7;
+                        e.rng ^= e.rng << 17;
+                        m.voice = 6.0 + (e.rng % 10) as f32;
+                        if let Some(v) = voice_sfx(m.species) {
+                            collected.sounds.push((v, e.pos));
+                        }
+                    }
                     let (mw, mh) = dims(&m);
 
                     // Perception: distance to the player + (for hostiles) exact line-of-sight.
@@ -1318,6 +1351,7 @@ impl Entities {
                                 // Aim a touch high so gravity arcs the shot into the target.
                                 let vel = aim * ARROW_SPEED + Vec3::new(0.0, dist * 0.05, 0.0);
                                 shots.push((shot_from, vel));
+                                collected.sounds.push((crate::audio::Sfx::BowShoot, e.pos)); // S9
                                 m.atk_cd = SKELETON_SHOOT_CD;
                             }
                         }
@@ -1326,6 +1360,8 @@ impl Entities {
                             if m.ai == Ai::Attack {
                                 if m.fuse < 0.0 {
                                     m.fuse = CREEPER_FUSE;
+                                    // S9: THE warning cue — the hiss starts exactly with the fuse.
+                                    collected.sounds.push((crate::audio::Sfx::CreeperHiss, e.pos));
                                 }
                                 m.fuse -= dt;
                                 // Blink white as it primes, but never hide a fresh melee hit-flash.
@@ -1506,6 +1542,7 @@ impl Entities {
         // Apply player-arrow hits (deferred from the &mut iteration above; indices are still valid
         // pre-retain). Light knockback + hurt-flash; the mob's death/loot settles next tick like melee.
         for (mi, hit_pos, dmg) in arrow_hits {
+            collected.sounds.push((crate::audio::Sfx::ArrowHit, hit_pos)); // S9
             if let Some(e) = self.list.get_mut(mi) {
                 if let Kind::Mob(m) = &mut e.kind {
                     if m.emerge > 0.0 {
@@ -1526,6 +1563,7 @@ impl Entities {
         self.list.retain(|e| !e.dead);
         // Killed mobs drop their species loot + experience.
         for (pos, species) in deaths {
+            collected.sounds.push((crate::audio::Sfx::MobDeath, pos)); // S9
             collected.deaths.push(pos); // U10: sculk-catalyst spread + death vibration
             let drop_at = pos + Vec3::new(0.0, 0.3, 0.0);
             self.spawn_xp(drop_at, species.xp_drop());

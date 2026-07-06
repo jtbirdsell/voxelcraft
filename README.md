@@ -328,6 +328,15 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Audio, synthesized in code** (S9): no sound files anywhere — every effect is generated at
+  startup (`audio/synth.rs`, the same ethos as the procedural textures) and mixed through rodio.
+  Positional world sounds with distance falloff + stereo pan: footsteps keyed by the block
+  underfoot, per-material break/place, doors/trapdoors/levers, bow + arrow impacts, mob voices
+  (zombies groan, cows moo, wolves bark...), damage thuds, splashes, landings, eating, pickups —
+  and the **creeper hiss**, a genuine 1.4-second warning cue. Generative **ambient music**: slow
+  chord pads that crossfade between a brighter day palette and a darker night one.
+  `VOXELCRAFT_MUTE=1` silences everything; `VOXELCRAFT_AUDIO_TEST=1` renders the whole bank to a
+  WAV for human-free verification.
 - A from-scratch **bitmap-font** text renderer and an **F3 debug overlay**.
 
 Performance: comfortably **vsync-capped** at render distance 12 with full ray-traced GI on an RTX 4090;

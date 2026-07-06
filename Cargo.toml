@@ -20,6 +20,10 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 log = "0.4.30"
 lz4_flex = "0.13.1"
 pollster = "0.4.0"
+# S9 audio: mixing/playback only — every sound is synthesized in code (audio/synth.rs), so the
+# decoder default-features are dead weight. Pinned exact: rodio 0.21+ reworked the whole API
+# (OutputStreamBuilder/mixer), so a routine bump is a deliberate migration.
+rodio = { version = "=0.20.1", default-features = false }
 rustc-hash = "2.1.2"
 # Pinned exact: wgpu's experimental hardware-RT API breaks ~every quarterly release, so a bump
 # is a deliberate mini-project (re-probe -> re-spike -> re-parity -> re-WSI), not a routine update.
