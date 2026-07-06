@@ -37,6 +37,9 @@ pub struct Level {
     /// Game mode (S1) as a u8 (0 Survival, 1 Creative), at offset 58. Absent in pre-S1 saves →
     /// defaults to 1: every pre-S1 world was created creative+flying, so legacy stays creative.
     pub mode: u8,
+    /// S11: the bed respawn anchor (the bed's foot cell), appended at offset 59 as
+    /// has(u8) + xyz(3xf32). Absent in older saves → None.
+    pub bed: Option<[f32; 3]>,
 }
 
 /// One chest's persisted contents (P3), saved in the chest section of `save_state.bin` (v4+).
@@ -228,6 +231,7 @@ pub fn create_world_in(
         level: 0,
         difficulty: 2, // Normal
         mode: mode.as_u8(),
+        bed: None,
     };
     save_level(&dir, &level)?;
     let display = name.trim();
@@ -349,6 +353,12 @@ pub fn load_level(dir: &Path) -> Option<Level> {
         difficulty: if d.len() >= 58 { d[57] } else { 2 },
         // Game-mode byte at offset 58 (S1); pre-S1 worlds were all creative (1).
         mode: if d.len() >= 59 { d[58] } else { 1 },
+        // S11 bed anchor at 59..72; absent/flag-0 -> None.
+        bed: if d.len() >= 72 && d[59] == 1 {
+            Some([rd_f32(&d, 60), rd_f32(&d, 64), rd_f32(&d, 68)])
+        } else {
+            None
+        },
     })
 }
 
@@ -372,6 +382,12 @@ pub fn save_level(dir: &Path, level: &Level) -> std::io::Result<()> {
     b.extend_from_slice(&level.level.to_le_bytes());
     b.push(level.difficulty); // P6: difficulty byte, after the survival block
     b.push(level.mode); // S1: game-mode byte (0 survival / 1 creative)
+    // S11: bed anchor (flag + xyz).
+    b.push(level.bed.is_some() as u8);
+    let bed = level.bed.unwrap_or([0.0; 3]);
+    for c in bed {
+        b.extend_from_slice(&c.to_le_bytes());
+    }
     atomic_write(&dir.join("level.bin"), &b)
 }
 
@@ -849,6 +865,7 @@ mod tests {
             level: 4,
             difficulty: 3, // Hard
             mode: 0,       // Survival
+            bed: Some([4.5, 100.0, -2.5]),
         };
         save_level(&dir, &level).unwrap();
         let ll = load_level(&dir).unwrap();
@@ -862,6 +879,7 @@ mod tests {
         assert_eq!(ll.level, 4);
         assert_eq!(ll.difficulty, 3); // P6 difficulty round-trips
         assert_eq!(ll.mode, 0); // S1 game mode round-trips
+        assert_eq!(ll.bed, Some([4.5, 100.0, -2.5])); // S11 bed anchor round-trips
 
         // A pre-S1 level.bin (no mode byte) loads as creative — every legacy world was creative.
         let legacy = fs::read(dir.join("level.bin")).unwrap();
@@ -1017,6 +1035,7 @@ mod tests {
             level: 0,
             difficulty: 2,
             mode: 0,
+            bed: None,
         }
     }
 

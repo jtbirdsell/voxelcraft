@@ -185,6 +185,8 @@ fn voxel_color(id: u32) -> vec3<f32> {
         case 109u: { return vec3<f32>(0.10, 0.14, 0.16); } // sculk catalyst
         case 110u: { return vec3<f32>(0.20, 0.21, 0.24); } // reinforced deepslate
         case 111u: { return vec3<f32>(0.35, 0.24, 0.15); } // farmland (S6; crops are non-opaque)
+        case 116u: { return vec3<f32>(0.55, 0.15, 0.15); } // bed (S11; volume-solid partial)
+        case 117u: { return vec3<f32>(0.92, 0.92, 0.92); } // wool (S11)
         default:  { return vec3<f32>(0.5, 0.5, 0.5); }
     }
 }

@@ -124,6 +124,8 @@ pub struct Player {
     air_max_y: f32,
     /// Where `respawn` returns the player on death.
     respawn_point: Vec3,
+    /// S11: the bed anchor (sleeping sets it); death returns here while the bed still stands.
+    pub bed_respawn: Option<Vec3>,
     /// U11 Darkness effect timer (seconds): set by a sculk shrieker's shriek, decays each tick toward
     /// 0. Drives a screen-dimming pulse (render effect deferred — see notes); the value is exposed so
     /// the renderer can read it when wired up.
@@ -197,6 +199,7 @@ impl Player {
             drown_timer: 0.0,
             air_max_y: position.y,
             respawn_point: position,
+            bed_respawn: None,
             darkness: 0.0,
         }
     }
@@ -300,7 +303,12 @@ impl Player {
 
     /// Reset to the spawn point with full health and hunger (called on death).
     pub fn respawn(&mut self) {
-        self.position = self.respawn_point;
+        self.respawn_to(self.respawn_point);
+    }
+
+    /// S11: reset to an explicit point (the bed anchor while it stands, else world spawn).
+    pub fn respawn_to(&mut self, at: Vec3) {
+        self.position = at;
         self.velocity = Vec3::ZERO;
         self.health = MAX_HEALTH;
         self.hunger = MAX_HUNGER;
@@ -308,7 +316,7 @@ impl Player {
         self.submerged = false;
         self.saturation = MAX_SATURATION;
         self.drown_timer = 0.0;
-        self.air_max_y = self.respawn_point.y;
+        self.air_max_y = self.position.y;
         self.on_ground = false;
         self.darkness = 0.0;
     }

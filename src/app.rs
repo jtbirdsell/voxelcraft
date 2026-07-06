@@ -248,6 +248,7 @@ impl App {
             difficulty: session.difficulty.as_u8(),
             // Runtime source of truth for mode is the inventory's creative flag (S1).
             mode: session.inventory.creative as u8,
+            bed: session.player.bed_respawn.map(|v| v.to_array()),
         };
         let dir = &session.world_dir;
         let mut ok = true;
@@ -785,7 +786,27 @@ impl App {
         for stack in se.inventory.drain_all() {
             se.game.spawn_item(death_pos, stack);
         }
-        se.player.respawn();
+        // S11: wake at the bed while it stands. An UNLOADED bed chunk is trusted (dying far from
+        // home is the whole point of a bed); only a resident cell that is no longer a bed
+        // invalidates the anchor.
+        let bed_target = se.player.bed_respawn.and_then(|bp| {
+            let cell = bp.floor().as_ivec3();
+            let standing = bp + Vec3::new(0.5, 0.55, 0.5);
+            if !se.game.chunk_loaded_at(cell) || se.game.block_at(cell) == block::BED {
+                Some(standing)
+            } else {
+                None
+            }
+        });
+        match bed_target {
+            Some(t) => se.player.respawn_to(t),
+            None => {
+                if se.player.bed_respawn.take().is_some() {
+                    se.toast = Some(("Your bed was destroyed".into(), 2.5));
+                }
+                se.player.respawn();
+            }
+        }
         se.camera.position = se.player.eye();
         se.prev_health = se.player.health;
         se.fall_top = se.player.position.y;
@@ -1611,6 +1632,19 @@ impl App {
                         let sfx = if opening { crate::audio::Sfx::DoorOpen } else { crate::audio::Sfx::DoorClose };
                         audio.play_at(sfx, 0.8, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
                     }
+                } else if targeted == block::BED {
+                    // S11 sleep: night only, no monsters nearby; sets the respawn anchor and
+                    // skips to just after sunrise (0.25 = sunrise; 0.30 clears the night gate).
+                    if session.environment.day_factor() > 0.35 {
+                        session.toast = Some(("You can only sleep at night".into(), 2.0));
+                    } else if session.game.hostile_near(session.player.position, 12.0) {
+                        session.toast =
+                            Some(("You may not rest now — monsters are nearby".into(), 2.5));
+                    } else {
+                        session.environment.time = 0.30;
+                        session.player.bed_respawn = Some(hit.block.as_vec3());
+                        session.toast = Some(("Respawn point set".into(), 2.5));
+                    }
                 } else if targeted == block::CRAFTING_TABLE {
                     // Right-clicking a crafting table opens the 3x3 crafting screen instead.
                     session.pending_open = Some(Screen::Crafting);
@@ -1700,6 +1734,39 @@ impl App {
                             session.game.set_block_state(&state.gpu, &state.renderer, lower, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_LOWER));
                             session.game.set_block_state(&state.gpu, &state.renderer, upper, block::WOODEN_DOOR, block::door_state(facing, false, 0, block::DOOR_UPPER));
                             session.inventory.consume_selected();
+                        }
+                    } else if id == block::BED {
+                        // S11: 2-cell bed — foot at the placed cell, head one cell along the
+                        // camera facing; both need support + air (door-pattern guards).
+                        let foot = hit.block + hit.normal;
+                        let f = session.camera.forward();
+                        let facing: u8 = if f.x.abs() > f.z.abs() {
+                            if f.x > 0.0 { 1 } else { 3 }
+                        } else if f.z > 0.0 {
+                            0
+                        } else {
+                            2
+                        };
+                        let (dx, dz) = match facing {
+                            0 => (0, 1),
+                            1 => (1, 0),
+                            2 => (0, -1),
+                            _ => (-1, 0),
+                        };
+                        let head = foot + IVec3::new(dx, 0, dz);
+                        let support = block::is_solid(session.game.block_at(foot - IVec3::Y))
+                            && block::is_solid(session.game.block_at(head - IVec3::Y));
+                        let space = session.game.block_at(foot) == block::AIR
+                            && session.game.block_at(head) == block::AIR
+                            && !session.player.intersects_block(foot)
+                            && !session.player.intersects_block(head);
+                        if support && space {
+                            session.game.set_block_state(&state.gpu, &state.renderer, foot, block::BED, block::bed_state(facing, false));
+                            session.game.set_block_state(&state.gpu, &state.renderer, head, block::BED, block::bed_state(facing, true));
+                            session.inventory.consume_selected();
+                            if let Some(audio) = &state.audio {
+                                audio.play_at(crate::audio::Sfx::Place, 0.7, foot.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
+                            }
                         }
                     } else if id == block::WOODEN_TRAPDOOR {
                         let place = hit.block + hit.normal;
@@ -2278,6 +2345,7 @@ fn create_session(
             level: 0,
             difficulty: difficulty.as_u8(),
             mode: inventory.creative as u8,
+            bed: None,
         });
     }
     if let Ok(Ok(rays)) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
@@ -2292,6 +2360,7 @@ fn create_session(
         // with fresh stats at the saved position instead of instantly re-dying on frame one.
         let health = if l.health <= 0.0 { 20.0 } else { l.health };
         player.restore_state(health, l.hunger, l.air, l.saturation, l.xp, l.level);
+        player.bed_respawn = l.bed.map(Vec3::from); // S11
     }
     let spawn_health = player.health;
     let camera = Camera::new(player.eye(), yaw, pitch);
@@ -2454,6 +2523,7 @@ pub fn persist_selftest() {
         level: 3,
         difficulty: 3, // Hard
         mode: 0,       // Survival
+        bed: Some([7.0, 99.0, 7.0]),
     };
     let mut chest_slots = vec![None; crate::container::CHEST_SLOTS];
     chest_slots[2] = Some(item::ItemStack::new(block::DIAMOND_ORE, 9));
@@ -2501,6 +2571,7 @@ pub fn persist_selftest() {
         && (ll.air - 5.0).abs() < 1e-6
         && ll.level == 3
         && ll.difficulty == 3
+        && ll.bed == Some([7.0, 99.0, 7.0])
         && ents_ok;
     let _ = std::fs::remove_dir_all(&dir);
     if ok {

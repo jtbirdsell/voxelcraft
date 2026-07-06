@@ -135,9 +135,12 @@ pub const CARROT_CROP: BlockId = 113;
 pub const POTATO_CROP: BlockId = 114;
 // S7: oak sapling (random-ticks into a tree; leaves shed them).
 pub const SAPLING: BlockId = 115;
+// S11: bed (2-cell, half-height; the respawn anchor) + wool (sheep drop it; beds need it).
+pub const BED: BlockId = 116;
+pub const WOOL: BlockId = 117;
 
 /// Highest defined block id; bounds save-id validation (keep in sync as blocks are added).
-pub const MAX_BLOCK: BlockId = SAPLING;
+pub const MAX_BLOCK: BlockId = WOOL;
 
 #[inline]
 pub fn is_fence(id: BlockId) -> bool {
@@ -321,6 +324,8 @@ pub enum RenderKind {
     /// Big dripleaf (F2): a thin standable leaf platform whose collision/render box droops with the
     /// tilt stage in the state byte (stand on it → it tilts down → you fall through → it resets).
     Platform,
+    /// S11: a half-height 2-cell bed (state: facing + head flag).
+    Bed,
 }
 
 #[inline]
@@ -342,6 +347,7 @@ pub fn render_kind(id: BlockId) -> RenderKind {
         WOODEN_FENCE | COBBLESTONE_WALL | GLASS_PANE => RenderKind::Connect,
         TORCH | LEVER | BUTTON => RenderKind::Attach,
         WHEAT_CROP | CARROT_CROP | POTATO_CROP | SAPLING => RenderKind::Cross, // S6 crops + S7 sapling
+        BED => RenderKind::Bed, // S11
         _ => RenderKind::Cube,
     }
 }
@@ -362,7 +368,7 @@ pub fn is_attach(id: BlockId) -> bool {
 /// A partial-geometry block (slab/stairs): solid for collision but emitted per-cell, not greedy.
 #[inline]
 pub fn is_partial(id: BlockId) -> bool {
-    matches!(render_kind(id), RenderKind::Slab | RenderKind::Stairs)
+    matches!(render_kind(id), RenderKind::Slab | RenderKind::Stairs | RenderKind::Bed)
 }
 
 /// Translucent glass: a full cube that renders in its own alpha-blended pass and never blocks light.
@@ -399,6 +405,27 @@ pub fn is_solid(id: BlockId) -> bool {
 #[inline]
 pub fn is_targetable(id: BlockId) -> bool {
     is_solid(id) || is_plant(id)
+}
+
+/// S11 bed state: bits 0-1 = facing (0:+z 1:+x 2:-z 3:-x, foot -> head), bit 2 = the head half.
+pub fn bed_state(facing: u8, head: bool) -> u8 {
+    (facing & 3) | ((head as u8) << 2)
+}
+pub fn bed_facing(state: u8) -> u8 {
+    state & 3
+}
+pub fn bed_is_head(state: u8) -> bool {
+    state & 4 != 0
+}
+/// (dx, dz) from this bed half toward its partner.
+pub fn bed_partner_offset(state: u8) -> (i32, i32) {
+    let (dx, dz) = match bed_facing(state) {
+        0 => (0, 1),
+        1 => (1, 0),
+        2 => (0, -1),
+        _ => (-1, 0),
+    };
+    if bed_is_head(state) { (-dx, -dz) } else { (dx, dz) }
 }
 
 /// S6 crop helpers: the three crops carry a growth stage 0..=7 in state bits 0-2.
@@ -640,6 +667,7 @@ pub fn solid_boxes(id: BlockId, state: u8) -> &'static [Aabb] {
         return &BOX_NONE;
     }
     match render_kind(id) {
+        RenderKind::Bed => &BOX_SLAB, // S11: half-height (explicit — the wildcard is BOX_FULL)
         RenderKind::Slab => match slab_half(state) {
             SLAB_TOP => &BOX_SLAB_TOP,
             SLAB_DOUBLE => &BOX_FULL,
@@ -866,6 +894,8 @@ pub fn display_name(id: BlockId) -> &'static str {
         REINFORCED_DEEPSLATE => "Reinforced Deepslate",
         FARMLAND => "Farmland",
         SAPLING => "Oak Sapling",
+        BED => "Bed",
+        WOOL => "Wool",
         WHEAT_CROP => "Wheat",
         CARROT_CROP => "Carrots",
         POTATO_CROP => "Potatoes",
@@ -999,6 +1029,8 @@ pub fn face_color(id: BlockId, face_offset: [i32; 3]) -> [f32; 3] {
         // S6 farming (FARMLAND must match texture.rs base_color + rtx_common.wgsl voxel_color).
         FARMLAND => [0.35, 0.24, 0.15],
         SAPLING => [0.30, 0.50, 0.20],
+        BED => [0.55, 0.15, 0.15],
+        WOOL => [0.92, 0.92, 0.92],
         WHEAT_CROP => [0.75, 0.65, 0.30],
         CARROT_CROP => [0.35, 0.55, 0.22],
         POTATO_CROP => [0.38, 0.52, 0.26],
@@ -1139,6 +1171,8 @@ pub fn hardness(id: BlockId) -> f32 {
         AZALEA_LEAVES => 0.2,
         GLOW_LICHEN | SCULK_VEIN => 0.2,
         MOSS_BLOCK => 0.1,
+        BED => 0.2,
+        WOOL => 0.8,
         DIRT | SAND => 0.5,
         GRASS | GRAVEL | CLAY | FARMLAND => 0.6,
         SNOW => 0.2,
@@ -1459,6 +1493,10 @@ pub mod tile {
     pub const HEART: u32 = 189;
     pub const CRIT: u32 = 190;
     pub const SMOKE: u32 = 191;
+    // S11.
+    pub const WOOL: u32 = 192;
+    pub const BED_TOP: u32 = 193;
+    pub const BED_SIDE: u32 = 194;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,
@@ -1612,6 +1650,16 @@ pub fn face_tile(id: BlockId, face_offset: [i32; 3]) -> u32 {
             }
         }
         SAPLING => tile::SAPLING,
+        WOOL => tile::WOOL,
+        BED => {
+            if top {
+                tile::BED_TOP
+            } else if bottom {
+                tile::PLANKS
+            } else {
+                tile::BED_SIDE
+            }
+        }
         WHEAT_CROP => tile::CROP_WHEAT_MATURE,
         CARROT_CROP => tile::CROP_CARROT_MATURE,
         POTATO_CROP => tile::CROP_POTATO_MATURE,

@@ -244,7 +244,7 @@ impl Species {
         match self {
             Species::Cow => &[(BEEF, 1), (LEATHER, 1)],
             Species::Pig => &[(PORK, 2)],
-            Species::Sheep => &[(MUTTON, 1)],
+            Species::Sheep => &[(MUTTON, 1), (crate::block::WOOL, 1)], // S11: +wool (shearing lands S24)
             Species::Chicken => &[(CHICKEN_MEAT, 1), (FEATHER, 1)],
             Species::Zombie => &[(ROTTEN_FLESH, 1)],
             Species::Skeleton => &[(BONE, 2)],

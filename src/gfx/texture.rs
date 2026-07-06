@@ -153,6 +153,9 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::CROP_CARROT_MATURE => [0.35, 0.55, 0.22],
         T::CROP_POTATO_MATURE => [0.38, 0.52, 0.26],
         T::SAPLING => [0.30, 0.50, 0.20],
+        T::WOOL => [0.92, 0.92, 0.92],
+        T::BED_TOP => [0.55, 0.15, 0.15],
+        T::BED_SIDE => [0.45, 0.16, 0.14],
         T::HEART => [0.90, 0.15, 0.25],
         T::CRIT => [0.95, 0.85, 0.35],
         T::SMOKE => [0.40, 0.40, 0.42],
@@ -901,6 +904,28 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
 
     let mut c = base;
     match tile {
+        T::WOOL => {
+            // Soft fluffy weave: gentle looping brightness, no hard grain.
+            let w = ((x as f32 * 0.9).sin() + (y as f32 * 0.9).cos()) * 0.5;
+            c = shade(base, w * 0.06 + (n - 0.5) * 0.05);
+        }
+        T::BED_TOP => {
+            // A red quilt with stitched squares and a pale pillow band at the head edge.
+            if y < 4 {
+                c = shade([0.88, 0.87, 0.82], (n - 0.5) * 0.06); // pillow
+            } else {
+                let stitch = x % 5 == 0 || y % 5 == 0;
+                c = shade(base, if stitch { -0.18 } else { 0.04 } + (n - 0.5) * 0.05);
+            }
+        }
+        T::BED_SIDE => {
+            // Blanket over a plank frame: red above, wood-brown base rail.
+            if y >= 11 {
+                c = shade([0.45, 0.30, 0.18], (n - 0.5) * 0.10);
+            } else {
+                c = shade(base, (n - 0.5) * 0.07);
+            }
+        }
         T::FARMLAND_TOP => {
             // Tilled furrow rows: alternating dark troughs and lighter ridges.
             let trough = y % 4 < 2;
@@ -1343,10 +1368,12 @@ mod tests {
             }
         }
         for id in 1..=crate::block::MAX_BLOCK {
-            if crate::block::is_opaque(id) {
+            // S11: everything the GI volume stores needs a case — the volume-solid set (opaque
+            // cubes PLUS slabs/stairs/beds), not just the opaque one.
+            if crate::block::is_volume_solid(id) {
                 assert!(
                     covered.contains(&id),
-                    "rtx_common.wgsl voxel_color is missing opaque block id {} ({})",
+                    "rtx_common.wgsl voxel_color is missing volume-solid block id {} ({})",
                     id,
                     crate::block::display_name(id)
                 );

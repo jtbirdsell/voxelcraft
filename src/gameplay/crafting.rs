@@ -92,6 +92,8 @@ fn build_recipes() -> Vec<Recipe> {
     // Torches: coal or charcoal over a stick -> 4 torches.
     r.push(shaped(&["O", "S"], &[('O', item::COAL), ('S', S)], block::TORCH, 4));
     r.push(shaped(&["O", "S"], &[('O', item::CHARCOAL), ('S', S)], block::TORCH, 4));
+    // S11: a bed — wool over planks.
+    r.push(shaped(&["WWW", "PPP"], &[('W', block::WOOL), ('P', P)], block::BED, 1));
     // S6: bread — the farm-to-table staple.
     r.push(shaped(&["WWW"], &[('W', item::WHEAT)], item::BREAD, 1));
     // Slabs + stairs (cobblestone + planks; per-material variants come with wood types).

@@ -1089,12 +1089,35 @@ mod tests {
     }
 
     #[test]
+    fn s11_bed_state_and_registry() {
+        use crate::block;
+        // State round-trip + partner offsets: head points back toward the foot and vice versa.
+        for f in 0..4u8 {
+            let foot = block::bed_state(f, false);
+            let head = block::bed_state(f, true);
+            assert_eq!(block::bed_facing(foot), f);
+            assert!(!block::bed_is_head(foot) && block::bed_is_head(head));
+            let (fx, fz) = block::bed_partner_offset(foot);
+            let (hx, hz) = block::bed_partner_offset(head);
+            assert_eq!((fx + hx, fz + hz), (0, 0), "offsets must be opposite");
+            assert_ne!((fx, fz), (0, 0));
+        }
+        // Half-height collision + volume-solid (GI stores it), but not opaque.
+        assert_eq!(block::solid_boxes(block::BED, 0), &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]);
+        assert!(block::is_volume_solid(block::BED) && !block::is_opaque(block::BED));
+        assert!(block::is_opaque(block::WOOL));
+        assert_eq!(block::drops(block::BED, 4), Some((block::BED, 1)));
+    }
+
+    #[test]
     fn u4_cave_biome_registry() {
         // Registry: a sample of the new blocks + materials are known and bound by MAX_BLOCK.
-        assert_eq!(block::MAX_BLOCK, block::SAPLING); // S7: the id-space tail
+        assert_eq!(block::MAX_BLOCK, block::WOOL); // S11: the id-space tail
         assert_eq!(block::REINFORCED_DEEPSLATE, 110);
         assert_eq!(block::POTATO_CROP, 114);
         assert_eq!(block::SAPLING, 115);
+        assert_eq!(block::BED, 116);
+        assert_eq!(block::WOOL, 117);
         assert!(is_known(block::AMETHYST_BLOCK) && is_known(block::SCULK_CATALYST));
         assert!(is_known(block::REINFORCED_DEEPSLATE) && is_known(block::SPORE_BLOSSOM));
         assert!(is_known(AMETHYST_SHARD) && is_known(GLOW_BERRIES));

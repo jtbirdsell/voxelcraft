@@ -328,6 +328,11 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Beds & respawn** (S11): craft a **bed** (3 wool — sheep drop it — over 3 planks), place it
+  (a real 2-cell half-height block; breaking either half removes both), and **sleep at night** to
+  skip to sunrise — unless monsters are nearby. Sleeping **sets your respawn point**: death returns
+  you to your bed for as long as it stands (persisted per world), falling back to world spawn with
+  a "Your bed was destroyed" notice if it's gone.
 - **Particles + legible consequences** (S10): a GI-lit billboard particle system riding the same
   deferred pipeline as mobs — breaking a block sprays **shards textured with that block's own
   tile**, explosions billow smoke, breeding pops **hearts**, critical hits burst **stars**. Damage

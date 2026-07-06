@@ -1224,6 +1224,15 @@ impl Game {
                 self.set_block_state(gpu, renderer, partner, block::AIR, 0);
             }
         }
+        // S11: breaking either bed half removes the other (same pattern; the partner offset comes
+        // from the broken half's facing + head flag). The single bed item drops from the mined cell.
+        if old == block::BED && id != block::BED {
+            let (dx, dz) = block::bed_partner_offset(old_state);
+            let partner = wp + IVec3::new(dx, 0, dz);
+            if self.block_at(partner) == block::BED {
+                self.set_block_state(gpu, renderer, partner, block::AIR, 0);
+            }
+        }
 
         // Persist the edited chunk (kept resident in `saved`) and refresh its volume voxels.
         if let Some(arc) = self.world.chunks.get(&cpos) {
@@ -2153,6 +2162,11 @@ impl Game {
         }
         let species = pool[((r >> 32) as usize) % pool.len()];
         self.spawn_passive_pack(species, wx, wz) > 0
+    }
+
+    /// S11: any live hostile within `r` of `p` (the "monsters nearby" sleep check).
+    pub fn hostile_near(&self, p: Vec3, r: f32) -> bool {
+        self.entities.hostile_positions().iter().any(|h| (*h - p).length() < r)
     }
 
     /// S5 selftest: hostiles whose feet sit at/above their column's worldgen surface (sky-side).
