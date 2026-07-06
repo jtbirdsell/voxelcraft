@@ -490,6 +490,8 @@ pub fn crop_tile(id: BlockId, state: u8) -> u32 {
 pub fn bonus_drops(id: BlockId, state: u8, r: u64) -> Option<(crate::item::ItemId, u8)> {
     match id {
         TALL_GRASS if r % 10 < 3 => Some((crate::item::SEEDS, 1)),
+        // S13: gravel sheds flint 10% — the mining site suppresses the gravel drop (vanilla replace).
+        GRAVEL if r % 10 == 0 => Some((crate::item::FLINT, 1)),
         // S7: leaves shed a sapling 5% / an apple 0.5% (same roll decayed leaves use).
         LEAVES | AZALEA_LEAVES => leaf_drop(r),
         WHEAT_CROP if crop_mature(state) => {
@@ -1502,6 +1504,13 @@ pub mod tile {
     pub const BUCKET_EMPTY: u32 = 195;
     pub const BUCKET_WATER: u32 = 196;
     pub const BUCKET_LAVA: u32 = 197;
+    // S13 item sprites (explicit dispatch, like the buckets).
+    pub const SLIMEBALL: u32 = 198;
+    pub const ENDER_PEARL: u32 = 199;
+    pub const SHEARS: u32 = 200;
+    pub const FLINT_STEEL: u32 = 201;
+    pub const BOWL: u32 = 202;
+    pub const STEW: u32 = 203;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,

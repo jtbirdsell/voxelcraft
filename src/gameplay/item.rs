@@ -103,6 +103,13 @@ pub const BAKED_POTATO: ItemId = MATERIAL_BASE + 41;
 pub const BUCKET: ItemId = MATERIAL_BASE + 42;
 pub const WATER_BUCKET: ItemId = MATERIAL_BASE + 43;
 pub const LAVA_BUCKET: ItemId = MATERIAL_BASE + 44;
+// S13 loot + utility items.
+pub const SLIMEBALL: ItemId = MATERIAL_BASE + 45;
+pub const ENDER_PEARL: ItemId = MATERIAL_BASE + 46;
+pub const SHEARS: ItemId = MATERIAL_BASE + 47;
+pub const FLINT_AND_STEEL: ItemId = MATERIAL_BASE + 48;
+pub const BOWL: ItemId = MATERIAL_BASE + 49;
+pub const MUSHROOM_STEW: ItemId = MATERIAL_BASE + 50;
 
 /// Size of the material id window (room for foods, dyes, and other crafting materials to come).
 pub const MATERIAL_COUNT: ItemId = 64;
@@ -154,6 +161,12 @@ fn material_name(item: ItemId) -> &'static str {
         BUCKET => "Bucket",
         WATER_BUCKET => "Water Bucket",
         LAVA_BUCKET => "Lava Bucket",
+        SLIMEBALL => "Slimeball",
+        ENDER_PEARL => "Ender Pearl",
+        SHEARS => "Shears",
+        FLINT_AND_STEEL => "Flint and Steel",
+        BOWL => "Bowl",
+        MUSHROOM_STEW => "Mushroom Stew",
         _ => "Material",
     }
 }
@@ -205,6 +218,12 @@ pub fn material_color(item: ItemId) -> [f32; 3] {
         BUCKET => [0.75, 0.75, 0.78],
         WATER_BUCKET => [0.35, 0.55, 0.85],
         LAVA_BUCKET => [0.95, 0.45, 0.10],
+        SLIMEBALL => [0.45, 0.75, 0.40],
+        ENDER_PEARL => [0.10, 0.45, 0.45],
+        SHEARS => [0.70, 0.72, 0.75],
+        FLINT_AND_STEEL => [0.55, 0.52, 0.50],
+        BOWL => [0.48, 0.34, 0.20],
+        MUSHROOM_STEW => [0.72, 0.52, 0.38],
         _ => [0.55, 0.40, 0.22], // stick / generic wooden
     }
 }
@@ -438,7 +457,7 @@ pub fn max_stack(item: ItemId) -> u8 {
         || is_armor(item)
         || item == BOW
         || item == SHIELD
-        || matches!(item, BUCKET | WATER_BUCKET | LAVA_BUCKET)
+        || matches!(item, BUCKET | WATER_BUCKET | LAVA_BUCKET | SHEARS | FLINT_AND_STEEL | MUSHROOM_STEW)
     {
         1
     } else {
@@ -544,6 +563,12 @@ pub fn item_tile(item: ItemId) -> u32 {
         BUCKET => return t::BUCKET_EMPTY,
         WATER_BUCKET => return t::BUCKET_WATER,
         LAVA_BUCKET => return t::BUCKET_LAVA,
+        SLIMEBALL => return t::SLIMEBALL,
+        ENDER_PEARL => return t::ENDER_PEARL,
+        SHEARS => return t::SHEARS,
+        FLINT_AND_STEEL => return t::FLINT_STEEL,
+        BOWL => return t::BOWL,
+        MUSHROOM_STEW => return t::STEW,
         COOKED_BEEF | COOKED_PORK | COOKED_CHICKEN | COOKED_MUTTON => return t::FOOD_COOKED,
         CLAY_BALL => return t::CLAY, // the clay block tile reads as a clay ball
         _ => {}
@@ -974,7 +999,7 @@ mod tests {
         assert!(is_known(COOKED_BEEF) && is_known(BREAD)); // defined foods
         assert!(is_known(POTATO) && is_known(BAKED_POTATO)); // S6 foods
         // The unpopulated tail of the material range is still rejected (name falls back to "Material").
-        assert!(!is_known(MATERIAL_BASE + 45), "undefined material id should be rejected");
+        assert!(!is_known(MATERIAL_BASE + 51), "undefined material id should be rejected");
     }
 
     #[test]
@@ -1104,6 +1129,24 @@ mod tests {
         // Stage tiles: young vs mature differ; the id+face face_tile stays state-free (N2 lock).
         assert_ne!(block::crop_tile(block::WHEAT_CROP, 0), block::crop_tile(block::WHEAT_CROP, 7));
         assert_eq!(block::face_tile(block::WHEAT_CROP, [0, 1, 0]), block::crop_tile(block::WHEAT_CROP, 7));
+    }
+
+    #[test]
+    fn s13_materials() {
+        for id in [SLIMEBALL, ENDER_PEARL, SHEARS, FLINT_AND_STEEL, BOWL, MUSHROOM_STEW] {
+            assert!(is_known(id), "S13 material {id} must be registered");
+        }
+        // Utility items don't stack; loot materials do.
+        assert_eq!(max_stack(SHEARS), 1);
+        assert_eq!(max_stack(FLINT_AND_STEEL), 1);
+        assert_eq!(max_stack(MUSHROOM_STEW), 1);
+        assert_eq!(max_stack(SLIMEBALL), 64);
+        // Stew is a real food (bowl-return is exercised at the app eat site).
+        let f = crate::food::food(MUSHROOM_STEW).expect("stew is edible");
+        assert_eq!(f.hunger, 6);
+        // Gravel's flint bonus rolls 10% (the mining site replaces the base drop with it).
+        assert_eq!(crate::block::bonus_drops(crate::block::GRAVEL, 0, 10), Some((FLINT, 1)));
+        assert_eq!(crate::block::bonus_drops(crate::block::GRAVEL, 0, 11), None);
     }
 
     #[test]

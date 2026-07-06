@@ -328,6 +328,14 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Recipes & loot completion** (S13): every shipped interactive/deco block is now **craftable in
+  survival** — doors, trapdoors, fences, glass panes, cobblestone walls, levers, buttons — plus
+  **flint & steel** (portal lighter-in-waiting), **shears**, and **bowls + mushroom stew** (eating
+  the stew hands the bowl back). Mob loot went from fixed handouts to **vanilla-style ranged
+  tables** — beef 1-3, leather 0-2, bones/arrows 0-2 each, and **slimes finally drop slimeballs**
+  (smallest body only) and **endermen ender pearls** (the End's prerequisite currency). Gravel has
+  a 10% chance to shed **flint in place of itself**. New: `VOXELCRAFT_ATLAS=path.png` dumps the
+  full procedural texture atlas for human-free tile verification.
 - **Buckets & living fluids** (S12): craft a **bucket** (3 iron), scoop up any water or lava
   source (a fluid-aware use ray — the mining ray still ignores liquids), and pour it back out as a
   live source. Fluids **re-flow when the world changes**: dig into a lake — worldgen or player-made,

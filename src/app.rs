@@ -1470,14 +1470,18 @@ impl App {
                             };
                             if harvest_ok {
                                 let center = hit.as_vec3() + Vec3::splat(0.5);
-                                if let Some((drop_item, count)) = block::drops(id, bstate) {
-                                    let stack = item::ItemStack::new(drop_item, count);
-                                    session.game.spawn_item(center, stack);
-                                }
                                 // S6: random extras (bonus crop yield, tall-grass seeds).
-                                if let Some((bi, bc)) =
-                                    block::bonus_drops(id, bstate, session.game.next_rand())
-                                {
+                                let bonus = block::bonus_drops(id, bstate, session.game.next_rand());
+                                // S13: gravel's flint REPLACES the gravel drop (vanilla semantics);
+                                // every other bonus is additive to the base drop.
+                                let replaced = bonus.is_some() && id == block::GRAVEL;
+                                if !replaced {
+                                    if let Some((drop_item, count)) = block::drops(id, bstate) {
+                                        let stack = item::ItemStack::new(drop_item, count);
+                                        session.game.spawn_item(center, stack);
+                                    }
+                                }
+                                if let Some((bi, bc)) = bonus {
                                     session.game.spawn_item(center, item::ItemStack::new(bi, bc));
                                 }
                                 // Some ores release experience orbs when mined.
@@ -1578,6 +1582,16 @@ impl App {
                 if let Some(f) = crate::food::food(sel_item) {
                     session.player.eat(f.hunger, f.saturation);
                     session.inventory.consume_selected();
+                    // S13: stew hands its bowl back (vanilla); spill it if the inventory is full.
+                    if sel_item == item::MUSHROOM_STEW {
+                        if let Some(left) =
+                            session.inventory.insert(item::ItemStack::new(item::BOWL, 1))
+                        {
+                            session
+                                .game
+                                .spawn_item(session.player.position + Vec3::new(0.0, 1.0, 0.0), left);
+                        }
+                    }
                 }
                 if let Some(audio) = &state.audio {
                     audio.play(crate::audio::Sfx::Burp, 0.5); // S9
@@ -2715,6 +2729,23 @@ impl ApplicationHandler for App {
         // M33-G8: bring up the DLSS SDK (Tensor-core denoise + upscale). `None` => native-resolution
         // rendering (off / non-DX12 / unsupported). Used by both the headless and interactive paths.
         let dlss = crate::dlss::Dlss::init(&gpu);
+
+        // S13: VOXELCRAFT_ATLAS=path.png dumps the procedural texture atlas (all 256 tiles at
+        // native 16px) and exits — the human-free way to verify new tile art without staging items.
+        if let Ok(path) = std::env::var("VOXELCRAFT_ATLAS") {
+            let rgba = crate::texture::build_atlas();
+            image::save_buffer(
+                &path,
+                &rgba,
+                crate::texture::ATLAS_W,
+                crate::texture::ATLAS_H,
+                image::ColorType::Rgba8,
+            )
+            .expect("failed to save atlas PNG");
+            log::info!("Saved atlas: {path}");
+            event_loop.exit();
+            return;
+        }
 
         // M35: VOXELCRAFT_MENU=main|worlds|create|settings|pause renders one menu screen to a PNG (no
         // world) so menu layouts can be verified headlessly. Path = VOXELCRAFT_SHOT or "menu.png".

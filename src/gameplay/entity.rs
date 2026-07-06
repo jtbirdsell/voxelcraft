@@ -238,21 +238,25 @@ impl Species {
         }
     }
 
-    /// Item loot dropped when this mob is killed (in addition to XP).
-    fn loot(self) -> &'static [(crate::item::ItemId, u8)] {
+    /// Item loot dropped when this mob is killed (in addition to XP): (item, min, max) — the
+    /// deaths loop rolls each entry an independent uniform count in [min, max] (min 0 = may skip).
+    fn loot(self) -> &'static [(crate::item::ItemId, u8, u8)] {
         use crate::item::*;
         match self {
-            Species::Cow => &[(BEEF, 1), (LEATHER, 1)],
-            Species::Pig => &[(PORK, 2)],
-            Species::Sheep => &[(MUTTON, 1), (crate::block::WOOL, 1)], // S11: +wool (shearing lands S24)
-            Species::Chicken => &[(CHICKEN_MEAT, 1), (FEATHER, 1)],
-            Species::Zombie => &[(ROTTEN_FLESH, 1)],
-            Species::Skeleton => &[(BONE, 2)],
-            Species::Creeper => &[(GUNPOWDER, 1)],
-            Species::Spider => &[(STRING, 1), (SPIDER_EYE, 1)],
-            // P18: no slimeball/ender-pearl/emerald items yet — these drop nothing (MC: wolves do too).
-            // U11: the Warden drops nothing either (MC: only a sculk catalyst, deferred).
-            Species::Wolf | Species::Enderman | Species::Slime | Species::Villager | Species::Warden => &[],
+            Species::Cow => &[(BEEF, 1, 3), (LEATHER, 0, 2)],
+            Species::Pig => &[(PORK, 1, 3)],
+            Species::Sheep => &[(MUTTON, 1, 2), (crate::block::WOOL, 1, 1)], // S11: +wool (shearing lands S24)
+            Species::Chicken => &[(CHICKEN_MEAT, 1, 1), (FEATHER, 0, 2)],
+            Species::Zombie => &[(ROTTEN_FLESH, 0, 2)],
+            Species::Skeleton => &[(BONE, 0, 2), (ARROW, 0, 2)],
+            Species::Creeper => &[(GUNPOWDER, 0, 2)],
+            Species::Spider => &[(STRING, 0, 2), (SPIDER_EYE, 0, 1)],
+            // S13: slimeballs come from the smallest body ONLY (gated in the deaths loop, where
+            // the split tier is known) — a large slime's full cascade would otherwise roll ~7x.
+            Species::Slime => &[(SLIMEBALL, 0, 2)],
+            Species::Enderman => &[(ENDER_PEARL, 0, 1)],
+            // U11: the Warden drops nothing (MC: only a sculk catalyst, deferred); wolves too.
+            Species::Wolf | Species::Villager | Species::Warden => &[],
         }
     }
 }
@@ -1062,7 +1066,7 @@ impl Entities {
         chunk_loaded: impl Fn(IVec3) -> bool,
     ) -> Collected {
         let mut collected = Collected::default();
-        let mut deaths: Vec<(Vec3, Species)> = Vec::new();
+        let mut deaths: Vec<(Vec3, Species, u8)> = Vec::new(); // (pos, species, slime tier)
         let mut shots: Vec<(Vec3, Vec3)> = Vec::new(); // skeleton arrows (pos, vel), spawned post-loop
         let mut arrow_hits: Vec<(usize, Vec3, f32)> = Vec::new(); // player arrows -> (mob idx, pos, dmg)
         let mut births: Vec<(Vec3, Species)> = Vec::new(); // P17 babies, spawned post-loop
@@ -1202,7 +1206,7 @@ impl Entities {
                         }
                         if m.health <= 0.0 {
                             e.dead = true;
-                            deaths.push((e.pos, m.species)); // killed (tables give no loot/xp)
+                            deaths.push((e.pos, m.species, 0)); // killed (tables give no loot/xp)
                         }
                         e.kind = Kind::Mob(m);
                         continue; // skip the generic mob AI for this entity
@@ -1427,7 +1431,7 @@ impl Entities {
                         // already consumed (creeper detonated) — no loot
                     } else if m.health <= 0.0 {
                         e.dead = true;
-                        deaths.push((e.pos, m.species)); // killed → drops loot
+                        deaths.push((e.pos, m.species, m.slime_tier)); // killed → drops loot
                         // P18: a slime splits into smaller slimes (large→3, medium→2); the smallest
                         // (tier 0) does NOT split. Children spawn post-loop (after retain), no aliasing.
                         if m.species == Species::Slime && m.slime_tier > 0 {
@@ -1564,13 +1568,21 @@ impl Entities {
         }
         self.list.retain(|e| !e.dead);
         // Killed mobs drop their species loot + experience.
-        for (pos, species) in deaths {
+        for (pos, species, tier) in deaths {
             collected.sounds.push((crate::audio::Sfx::MobDeath, pos)); // S9
             collected.deaths.push(pos); // U10: sculk-catalyst spread + death vibration
             let drop_at = pos + Vec3::new(0.0, 0.3, 0.0);
             self.spawn_xp(drop_at, species.xp_drop());
-            for &(item, count) in species.loot() {
-                self.spawn_item(drop_at, ItemStack::new(item, count));
+            // S13: roll each table entry's count independently; only the smallest slime body
+            // sheds slimeballs (its parents already dropped XP above, matching vanilla).
+            if species != Species::Slime || tier == 0 {
+                for &(item, min, max) in species.loot() {
+                    let span = (max - min) as u64 + 1;
+                    let count = min + (self.next_seed() % span) as u8;
+                    if count > 0 {
+                        self.spawn_item(drop_at, ItemStack::new(item, count));
+                    }
+                }
             }
             // S6: zombies rarely carry produce — the bootstrap source for carrots/potatoes
             // (vanilla's rare drop; farms take over once you have one).
@@ -2189,8 +2201,27 @@ mod tests {
         }
         let _ = es.update(0.016, o, |_| false, |_| false, |_| false, |_, _| None, |_| true);
         assert_eq!(es.species_summary(), "passive:0 hostile:0", "the cow died");
-        // Two item drops (beef, leather) + one XP orb remain as entities.
-        assert!(es.count() >= 3, "cow should drop loot + xp (count = {})", es.count());
+        // S13: counts are ranged (beef 1-3, leather 0-2) — only beef>=1 + the XP orb are certain.
+        assert!(es.count() >= 2, "cow should drop loot + xp (count = {})", es.count());
+        assert!(
+            es.list.iter().any(|e| matches!(&e.kind, Kind::Item(s) if s.item == crate::item::BEEF)),
+            "a beef drop must exist"
+        );
+    }
+
+    #[test]
+    fn s13_loot_tables_are_ranged_and_sane() {
+        for (i, &s) in Species::ALL.iter().enumerate() {
+            for &(item, min, max) in s.loot() {
+                assert!(min <= max, "species #{i} loot {item}: min {min} > max {max}");
+                assert!(max >= 1, "species #{i} loot {item}: a 0-max entry is dead weight");
+                assert!(crate::item::is_known(item), "species #{i} loot {item} unregistered");
+            }
+        }
+        // The S13 additions: slimes and endermen finally have tables; wolves stay empty.
+        assert!(!Species::Slime.loot().is_empty());
+        assert!(!Species::Enderman.loot().is_empty());
+        assert!(Species::Wolf.loot().is_empty());
     }
 
     #[test]

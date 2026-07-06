@@ -92,6 +92,18 @@ fn build_recipes() -> Vec<Recipe> {
     // Torches: coal or charcoal over a stick -> 4 torches.
     r.push(shaped(&["O", "S"], &[('O', item::COAL), ('S', S)], block::TORCH, 4));
     r.push(shaped(&["O", "S"], &[('O', item::CHARCOAL), ('S', S)], block::TORCH, 4));
+    // S13: every shipped interactive/deco block becomes craftable, plus the utility line.
+    r.push(shaped(&["PP", "PP", "PP"], &[('P', P)], block::WOODEN_DOOR, 3));
+    r.push(shaped(&["PPP", "PPP"], &[('P', P)], block::WOODEN_TRAPDOOR, 2));
+    r.push(shaped(&["PSP", "PSP"], &[('P', P), ('S', S)], block::WOODEN_FENCE, 3));
+    r.push(shaped(&["GGG", "GGG"], &[('G', block::GLASS)], block::GLASS_PANE, 16));
+    r.push(shaped(&["CCC", "CCC"], &[('C', C)], block::COBBLESTONE_WALL, 6));
+    r.push(shaped(&["S", "C"], &[('S', S), ('C', C)], block::LEVER, 1));
+    r.push(shapeless(&[block::STONE], block::BUTTON, 1));
+    r.push(shapeless(&[item::IRON_INGOT, item::FLINT], item::FLINT_AND_STEEL, 1));
+    r.push(shaped(&[" I", "I "], &[('I', item::IRON_INGOT)], item::SHEARS, 1));
+    r.push(shaped(&["P P", " P "], &[('P', P)], item::BOWL, 4));
+    r.push(shapeless(&[block::RED_MUSHROOM, block::BROWN_MUSHROOM, item::BOWL], item::MUSHROOM_STEW, 1));
     // S12: a bucket — three iron ingots in a V.
     r.push(shaped(&["I I", " I "], &[('I', item::IRON_INGOT)], item::BUCKET, 1));
     // S11: a bed — wool over planks.
@@ -303,13 +315,47 @@ mod tests {
         // The recipe set should cover the full tool/armor progression, and every ingredient/output
         // must be a known item (catches id drift as new materials/blocks land).
         let recipes = RECIPES.get_or_init(build_recipes);
-        assert!(recipes.len() >= 40, "expected a full recipe set, got {}", recipes.len());
+        assert!(recipes.len() >= 95, "expected a full recipe set, got {}", recipes.len());
         for r in recipes {
             assert!(item::is_known(r.output), "unknown recipe output {}", r.output);
             for &c in &r.cells {
                 assert!(c == EMPTY || item::is_known(c), "unknown ingredient {c}");
             }
         }
+    }
+
+    #[test]
+    fn s13_recipes_craftable() {
+        let (p, g, c, s, i) = (P, block::GLASS, C, S, item::IRON_INGOT);
+        // A door: 2x3 planks, position-invariant (matched in the right columns here).
+        let grid = [0, p, p, 0, p, p, 0, p, p];
+        assert_eq!(match_grid(&grid), Some((block::WOODEN_DOOR, 3)));
+        // A trapdoor: 3x2 planks.
+        let grid = [p, p, p, p, p, p, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((block::WOODEN_TRAPDOOR, 2)));
+        // A fence: plank-stick-plank sandwich.
+        let grid = [p, s, p, p, s, p, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((block::WOODEN_FENCE, 3)));
+        // 6 glass -> 16 panes; 6 cobblestone -> 6 walls.
+        let grid = [g, g, g, g, g, g, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((block::GLASS_PANE, 16)));
+        let grid = [c, c, c, c, c, c, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((block::COBBLESTONE_WALL, 6)));
+        // A lever: stick over cobblestone; a button: one smooth stone, shapeless.
+        let grid = [0, s, 0, 0, c, 0, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((block::LEVER, 1)));
+        let grid = [0, 0, 0, 0, block::STONE, 0, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((block::BUTTON, 1)));
+        // Flint and steel (shapeless pair) + shears (diagonal ingots).
+        let grid = [item::FLINT, 0, 0, 0, i, 0, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((item::FLINT_AND_STEEL, 1)));
+        let grid = [0, i, 0, i, 0, 0, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((item::SHEARS, 1)));
+        // Bowls (4 from a plank V) + mushroom stew (shapeless: both mushrooms + a bowl).
+        let grid = [p, 0, p, 0, p, 0, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((item::BOWL, 4)));
+        let grid = [block::RED_MUSHROOM, 0, item::BOWL, 0, block::BROWN_MUSHROOM, 0, 0, 0, 0];
+        assert_eq!(match_grid(&grid), Some((item::MUSHROOM_STEW, 1)));
     }
 
     #[test]

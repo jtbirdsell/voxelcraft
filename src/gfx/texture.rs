@@ -157,6 +157,12 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::BED_TOP => [0.55, 0.15, 0.15],
         T::BED_SIDE => [0.45, 0.16, 0.14],
         T::BUCKET_EMPTY => [0.75, 0.75, 0.78],
+        T::SLIMEBALL => [0.45, 0.75, 0.40],
+        T::ENDER_PEARL => [0.10, 0.45, 0.45],
+        T::SHEARS => [0.70, 0.72, 0.75],
+        T::FLINT_STEEL => [0.55, 0.52, 0.50],
+        T::BOWL => [0.48, 0.34, 0.20],
+        T::STEW => [0.72, 0.52, 0.38],
         T::BUCKET_WATER => [0.45, 0.55, 0.80],
         T::BUCKET_LAVA => [0.85, 0.50, 0.25],
         T::HEART => [0.90, 0.15, 0.25],
@@ -803,6 +809,62 @@ fn paint_item(tile: u32, x: u32, y: u32) -> [u8; 4] {
             }
             CLEAR
         }
+        T::SLIMEBALL => {
+            if r2 <= 30 {
+                let core = r2 <= 12;
+                return fill(if core { [0.55, 0.85, 0.50] } else { [0.40, 0.68, 0.36] });
+            }
+            CLEAR
+        }
+        T::ENDER_PEARL => {
+            if r2 <= 26 {
+                let swirl = hashf(x / 2, y / 2, 41) > 0.6;
+                return fill(if swirl { [0.25, 0.75, 0.70] } else { [0.06, 0.32, 0.34] });
+            }
+            CLEAR
+        }
+        T::SHEARS => {
+            // Two crossed blades + a pivot dot.
+            let d1 = (xi - yi).abs() <= 1 && (3..=12).contains(&yi);
+            let d2 = (xi + yi - 15).abs() <= 1 && (3..=12).contains(&yi);
+            if d1 || d2 {
+                return fill([0.78, 0.80, 0.84]);
+            }
+            if (xi - 8).abs() <= 1 && (yi - 8).abs() <= 1 {
+                return fill([0.45, 0.35, 0.25]);
+            }
+            CLEAR
+        }
+        T::FLINT_STEEL => {
+            // A dark flint wedge + a steel C-loop.
+            if yi >= 9 && (xi - 4).abs() + (yi - 11) <= 4 {
+                return fill([0.20, 0.20, 0.24]);
+            }
+            let dxs = xi - 10;
+            let dys = yi - 6;
+            let ring = dxs * dxs + dys * dys;
+            if (8..=16).contains(&ring) && xi <= 12 {
+                return fill([0.72, 0.72, 0.76]);
+            }
+            CLEAR
+        }
+        T::BOWL => {
+            if (7..=11).contains(&yi) && (xi - 8).abs() <= 5 - (yi - 7) / 2 {
+                let rim = yi == 7;
+                return fill(if rim { [0.60, 0.44, 0.28] } else { [0.42, 0.29, 0.17] });
+            }
+            CLEAR
+        }
+        T::STEW => {
+            if (6..=11).contains(&yi) && (xi - 8).abs() <= 5 - (yi - 6) / 2 {
+                if yi <= 7 {
+                    let chunk = hashf(x, y, 43) > 0.7;
+                    return fill(if chunk { [0.85, 0.30, 0.25] } else { [0.72, 0.52, 0.38] });
+                }
+                return fill([0.42, 0.29, 0.17]);
+            }
+            CLEAR
+        }
         T::BUCKET_EMPTY | T::BUCKET_WATER | T::BUCKET_LAVA => {
             // A tin pail: tapered body + handle arc; filled variants show their liquid at the brim.
             let body = (3..=12).contains(&yi)
@@ -921,7 +983,18 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
         return paint_glass(x, y);
     }
     if (T::TOOL_BASE..=T::ITEM_SPRITE_END).contains(&tile)
-        || matches!(tile, T::BUCKET_EMPTY | T::BUCKET_WATER | T::BUCKET_LAVA)
+        || matches!(
+            tile,
+            T::BUCKET_EMPTY
+                | T::BUCKET_WATER
+                | T::BUCKET_LAVA
+                | T::SLIMEBALL
+                | T::ENDER_PEARL
+                | T::SHEARS
+                | T::FLINT_STEEL
+                | T::BOWL
+                | T::STEW
+        )
     {
         return paint_item(tile, x, y);
     }
@@ -1343,9 +1416,9 @@ mod tests {
         assert_eq!(build_atlas().len(), (ATLAS_W * ATLAS_H * 4) as usize);
         assert!(ATLAS_W.is_power_of_two() && ATLAS_H.is_power_of_two(), "PoT for any future mips");
         // An unassigned slot reads the magenta missing-texture color (the base_color `_` fallback).
-        // (Tiles 64+ are being filled by the underground overhaul; pick a far slot that stays free.)
+        // (The item-sprite band now runs through 203 (S13); probe past it — bump when tiles land.)
         assert_eq!(crate::block::tile::MAGENTA, 63);
-        assert_eq!(base_color(200), [1.0, 0.0, 1.0]);
+        assert_eq!(base_color(210), [1.0, 0.0, 1.0]);
     }
 
     #[test]

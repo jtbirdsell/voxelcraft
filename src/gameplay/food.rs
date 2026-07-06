@@ -40,6 +40,7 @@ pub fn food(item: ItemId) -> Option<Food> {
         item::CARROT => f(3, 3.6),
         item::POTATO => f(1, 0.6),
         item::BAKED_POTATO => f(5, 6.0),
+        item::MUSHROOM_STEW => f(6, 7.2),
         _ => None,
     }
 }
