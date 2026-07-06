@@ -904,6 +904,83 @@ impl Inventory {
         Some(stack)
     }
 
+    /// S14: `insert` visiting slots in an explicit ORDER — one full merge pass, then one
+    /// empty-fill pass, preserving durability. Vanilla's screens differ only in visit order
+    /// (see `pickup_order`/`backpack_order`); leftover comes back to the caller.
+    pub fn insert_slots(&mut self, mut stack: ItemStack, order: &[usize]) -> Option<ItemStack> {
+        let cap = max_stack(stack.item);
+        for &i in order {
+            if let Some(s) = &mut self.slots[i] {
+                if s.item == stack.item && s.count < cap {
+                    let moved = (cap - s.count).min(stack.count);
+                    s.count += moved;
+                    stack.count -= moved;
+                    if stack.count == 0 {
+                        return None;
+                    }
+                }
+            }
+        }
+        for &i in order {
+            if self.slots[i].is_none() {
+                let moved = cap.min(stack.count);
+                self.slots[i] = Some(ItemStack {
+                    item: stack.item,
+                    count: moved,
+                    durability: stack.durability,
+                });
+                stack.count -= moved;
+                if stack.count == 0 {
+                    return None;
+                }
+            }
+        }
+        Some(stack)
+    }
+
+    /// S14: shift-click quick-move within the player inventory (vanilla priorities): an armor
+    /// piece equips into its empty armor slot first; armor slots unequip back to the backpack
+    /// (hotbar first); otherwise hotbar and main trade regions. Leftover stays in the source slot.
+    pub fn quick_move(&mut self, slot: usize) {
+        if slot >= SLOTS {
+            return;
+        }
+        let Some(stack) = self.slots[slot] else { return };
+        self.slots[slot] = None;
+        let leftover = if slot >= HOTBAR + MAIN {
+            // Unequipped armor lands in the backpack first (vanilla 9..45 forward).
+            self.insert_slots(stack, &backpack_order())
+        } else if is_armor(stack.item) && self.slots[armor_slot(stack.item)].is_none() {
+            self.slots[armor_slot(stack.item)] = Some(stack);
+            None
+        } else if slot < HOTBAR {
+            self.insert_slots(stack, &(HOTBAR..HOTBAR + MAIN).collect::<Vec<_>>())
+        } else {
+            self.insert_slots(stack, &(0..HOTBAR).collect::<Vec<_>>())
+        };
+        if let Some(rest) = leftover {
+            self.slots[slot] = Some(rest);
+        }
+    }
+
+    /// S14: number-key hover swap — exchange `slot` with hotbar slot `n`. Armor slots only accept
+    /// the matching piece (or hand their piece to an empty hotbar slot).
+    pub fn swap_with_hotbar(&mut self, slot: usize, n: usize) {
+        if slot >= SLOTS || n >= HOTBAR || slot == n {
+            return;
+        }
+        if slot >= HOTBAR + MAIN {
+            let ok = match self.slots[n] {
+                None => true,
+                Some(s) => is_armor(s.item) && armor_slot(s.item) == slot,
+            };
+            if !ok {
+                return;
+            }
+        }
+        self.slots.swap(slot, n);
+    }
+
     /// Drop one of the selected stack (Q): returns the single-item stack to spawn (preserving tool
     /// durability), or None if empty. Decrements the slot unless in creative.
     pub fn drop_one_selected(&mut self) -> Option<ItemStack> {
@@ -954,6 +1031,18 @@ impl Inventory {
     pub fn return_held(&mut self) -> Option<ItemStack> {
         self.held.take().and_then(|h| self.insert(h))
     }
+}
+
+/// S14: vanilla's container→player fill order (`moveItemStackTo(.., reverse=true)`) — the hotbar
+/// right-to-left, then the backpack bottom-right upward. "Shift-clicked loot lands bottom-right."
+pub fn pickup_order() -> Vec<usize> {
+    (0..HOTBAR).rev().chain((HOTBAR..HOTBAR + MAIN).rev()).collect()
+}
+
+/// S14: vanilla's player-screen return order (armor unequip, craft-grid handback — 9..45
+/// forward): the backpack from its top-left, then the hotbar.
+pub fn backpack_order() -> Vec<usize> {
+    (HOTBAR..HOTBAR + MAIN).chain(0..HOTBAR).collect()
 }
 
 #[cfg(test)]
@@ -1129,6 +1218,81 @@ mod tests {
         // Stage tiles: young vs mature differ; the id+face face_tile stays state-free (N2 lock).
         assert_ne!(block::crop_tile(block::WHEAT_CROP, 0), block::crop_tile(block::WHEAT_CROP, 7));
         assert_eq!(block::face_tile(block::WHEAT_CROP, [0, 1, 0]), block::crop_tile(block::WHEAT_CROP, 7));
+    }
+
+    #[test]
+    fn s14_fill_orders_match_vanilla() {
+        let stone = item_of_block(crate::block::STONE);
+        // Container→player: loot lands bottom-right (hotbar slot 9 first).
+        let mut inv = Inventory::new(false);
+        inv.slots = [None; SLOTS];
+        assert!(inv.insert_slots(ItemStack::new(stone, 5), &pickup_order()).is_none());
+        assert_eq!(inv.slots[HOTBAR - 1].unwrap().count, 5, "loot fills the hotbar from the right");
+        // Player-screen returns land top-left of the backpack.
+        let mut inv2 = Inventory::new(false);
+        inv2.slots = [None; SLOTS];
+        assert!(inv2.insert_slots(ItemStack::new(stone, 5), &backpack_order()).is_none());
+        assert_eq!(inv2.slots[HOTBAR].unwrap().count, 5, "returns land in the first main slot");
+        // Merging beats position: a matching stack elsewhere absorbs before any empty slot.
+        let mut inv3 = Inventory::new(false);
+        inv3.slots = [None; SLOTS];
+        inv3.slots[20] = Some(ItemStack::new(stone, 60));
+        assert!(inv3.insert_slots(ItemStack::new(stone, 4), &pickup_order()).is_none());
+        assert_eq!(inv3.slots[20].unwrap().count, 64);
+    }
+
+    #[test]
+    fn s14_quick_move_and_swap() {
+        use crate::block;
+        let stone = item_of_block(block::STONE);
+        let mut inv = Inventory::new(false);
+        inv.slots = [None; SLOTS];
+        // Hotbar -> main, merging into a partial stack there first.
+        inv.slots[2] = Some(ItemStack::new(stone, 40));
+        inv.slots[9] = Some(ItemStack::new(stone, 50));
+        inv.quick_move(2);
+        assert_eq!(inv.slots[9].unwrap().count, 64, "merges into the existing main stack first");
+        assert_eq!(inv.slots[10].unwrap().count, 26, "the rest fills the next empty main slot");
+        assert!(inv.slots[2].is_none());
+        // Main -> hotbar.
+        inv.quick_move(9);
+        assert_eq!(inv.slots[0].unwrap().count, 64);
+        assert!(inv.slots[9].is_none());
+        // Armor auto-equips from anywhere; a second helmet stays put.
+        let helmet = armor_id(1, 0);
+        inv.slots[5] = Some(ItemStack::new(helmet, 1));
+        inv.quick_move(5);
+        assert_eq!(inv.slots[HOTBAR + MAIN].unwrap().item, helmet, "iron helmet equipped");
+        assert!(inv.slots[5].is_none());
+        inv.slots[5] = Some(ItemStack::new(helmet, 1));
+        inv.quick_move(5);
+        assert!(inv.slots[5].is_none(), "second helmet quick-moves to the backpack instead");
+        // Unequip: armor slot -> backpack.
+        inv.quick_move(HOTBAR + MAIN);
+        assert!(inv.slots[HOTBAR + MAIN].is_none());
+        // Full destination: leftover stays in the source slot.
+        let mut full = Inventory::new(false);
+        full.slots = [None; SLOTS];
+        for i in HOTBAR..HOTBAR + MAIN {
+            full.slots[i] = Some(ItemStack::new(stone, 64));
+        }
+        full.slots[0] = Some(ItemStack::new(stone, 10));
+        full.quick_move(0);
+        assert_eq!(full.slots[0].unwrap().count, 10, "nowhere to go: stack stays");
+        // Number-swap: plain slots trade; armor slots reject a non-matching piece.
+        let mut sw = Inventory::new(false);
+        sw.slots = [None; SLOTS];
+        sw.slots[20] = Some(ItemStack::new(stone, 7));
+        sw.slots[3] = Some(ItemStack::new(item_of_block(block::DIRT), 5));
+        sw.swap_with_hotbar(20, 3);
+        assert_eq!(sw.slots[3].unwrap().count, 7);
+        assert_eq!(sw.slots[20].unwrap().count, 5);
+        sw.slots[HOTBAR + MAIN] = Some(ItemStack::new(armor_id(1, 0), 1));
+        sw.swap_with_hotbar(HOTBAR + MAIN, 3);
+        assert_eq!(sw.slots[3].unwrap().count, 7, "dirt can't enter the helmet slot");
+        sw.slots[4] = Some(ItemStack::new(armor_id(3, 0), 1));
+        sw.swap_with_hotbar(HOTBAR + MAIN, 4);
+        assert_eq!(sw.slots[4].unwrap().item, armor_id(1, 0), "helmet-for-helmet swap works");
     }
 
     #[test]

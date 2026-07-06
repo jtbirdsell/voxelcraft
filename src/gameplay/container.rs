@@ -31,6 +31,37 @@ impl Container {
         self.slots[i] = s;
     }
 
+    /// S14: shift-click destination — merge into matching stacks, then fill empties (durability
+    /// preserved). Returns the leftover that did not fit.
+    pub fn insert(&mut self, mut stack: ItemStack) -> Option<ItemStack> {
+        let cap = item::max_stack(stack.item);
+        for s in self.slots.iter_mut().flatten() {
+            if s.item == stack.item && s.count < cap {
+                let moved = (cap - s.count).min(stack.count);
+                s.count += moved;
+                stack.count -= moved;
+                if stack.count == 0 {
+                    return None;
+                }
+            }
+        }
+        for slot in self.slots.iter_mut() {
+            if slot.is_none() {
+                let moved = cap.min(stack.count);
+                *slot = Some(ItemStack {
+                    item: stack.item,
+                    count: moved,
+                    durability: stack.durability,
+                });
+                stack.count -= moved;
+                if stack.count == 0 {
+                    return None;
+                }
+            }
+        }
+        Some(stack)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.slots.iter().all(Option::is_none)
     }
@@ -57,6 +88,21 @@ mod tests {
         c.click(0, &mut held, true); // drop one into empty slot
         assert_eq!(c.slots[0].unwrap().count, 1);
         assert_eq!(held.unwrap().count, 9);
+    }
+
+    #[test]
+    fn s14_insert_merges_then_fills() {
+        let mut c = Container::new(3);
+        let stone = item::item_of_block(block::STONE);
+        c.slots[1] = Some(ItemStack::new(stone, 60));
+        assert!(c.insert(ItemStack::new(stone, 10)).is_none());
+        assert_eq!(c.slots[1].unwrap().count, 64, "tops off the partial stack first");
+        assert_eq!(c.slots[0].unwrap().count, 6, "remainder starts a new stack");
+        // Fill it, then overflow comes back.
+        c.slots[0] = Some(ItemStack::new(stone, 64));
+        c.slots[2] = Some(ItemStack::new(stone, 64));
+        let rest = c.insert(ItemStack::new(stone, 5));
+        assert_eq!(rest.unwrap().count, 5, "full container returns the leftover");
     }
 
     #[test]

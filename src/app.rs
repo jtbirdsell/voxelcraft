@@ -199,6 +199,9 @@ pub struct App {
     window: Option<Arc<Window>>,
     state: Option<State>,
     grabbed: bool,
+    /// S14: live keyboard modifier state (ModifiersChanged) — shift-click and Ctrl-Q read this,
+    /// since gameplay key handling is suspended while a GUI screen is open.
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl App {
@@ -207,6 +210,7 @@ impl App {
             window: None,
             state: None,
             grabbed: false,
+            modifiers: winit::keyboard::ModifiersState::default(),
         }
     }
 
@@ -345,7 +349,7 @@ impl App {
         self.set_grab(true);
     }
 
-    fn inventory_click(&mut self, button: MouseButton) {
+    fn inventory_click(&mut self, button: MouseButton, shift: bool) {
         let Some(state) = &mut self.state else { return };
         let right = match button {
             MouseButton::Left => false,
@@ -354,101 +358,169 @@ impl App {
         };
         let (w, h) = (state.gpu.config.width, state.gpu.config.height);
         let Some(session) = state.session.as_mut() else { return };
-        let (cx, cy) = session.cursor;
-        let hit = |x: f32, y: f32| {
-            cx >= x && cx < x + overlay::INV_SLOT && cy >= y && cy < y + overlay::INV_SLOT
-        };
-        for (slot_i, x, y) in overlay::inventory_slot_rects(w, h) {
-            if hit(x, y) {
-                session.inventory.click_slot(slot_i, right);
-                return;
-            }
-        }
-        // F1: clicking a creative-palette cell grabs a stack of that item onto the cursor (left = full
-        // stack, right = one). The old held stack is simply discarded — creative items are infinite.
-        if session.screen == Screen::Inventory && session.inventory.creative {
-            for (i, x, y) in overlay::creative_palette_rects(w, h) {
-                if hit(x, y) {
-                    let idx = session.creative_page * overlay::PAL_PER_PAGE + i;
-                    if let Some(&it) = session.creative_palette.get(idx) {
-                        let count = if right { 1 } else { item::max_stack(it) };
-                        session.inventory.held = Some(item::ItemStack::new(it, count));
-                    } else {
-                        session.inventory.held = None; // clicked an empty palette cell = trash the cursor
-                    }
-                    return;
-                }
-            }
-        }
-        // Furnace screen: move items between held and the input/fuel slots; output is take-only.
-        if let Screen::Furnace(pos) = session.screen {
-            let f = session.game.furnace_mut(pos);
-            for (kind, x, y) in overlay::furnace_slot_rects(w, h) {
-                if hit(x, y) {
-                    let mut held = session.inventory.held;
-                    match kind {
-                        overlay::FurnaceSlot::Input => {
-                            let mut s = f.input;
-                            item::slot_click(&mut held, &mut s, right);
-                            f.input = s;
-                        }
-                        overlay::FurnaceSlot::Fuel => {
-                            let mut s = f.fuel;
-                            item::slot_click(&mut held, &mut s, right);
-                            f.fuel = s;
-                        }
-                        overlay::FurnaceSlot::Output => take_furnace_output(&mut held, &mut f.output),
-                    }
-                    session.inventory.held = held;
-                    return;
-                }
-            }
+        let Some(slot) = hovered_slot(session, w, h) else { return };
+        // S14: shift+left-click with an empty cursor is the quick-move verb (vanilla); any other
+        // click keeps the classic pick/place/merge/swap behavior below.
+        if shift && !right && session.inventory.held.is_none() {
+            quick_move_click(session, slot);
             return;
         }
-        // Chest screen: move items between the held cursor stack and the 27 container slots.
-        if let Screen::Chest(pos) = session.screen {
-            let mut held = session.inventory.held;
-            let c = session.game.chest_mut(pos);
-            for (i, x, y) in overlay::chest_slot_rects(w, h) {
-                if hit(x, y) {
-                    c.click(i, &mut held, right);
-                    session.inventory.held = held;
-                    return;
-                }
-            }
-            return;
-        }
-        // Equipped-armor slots: only the matching piece may be placed; taking a piece out is allowed.
-        for (slot_i, x, y) in overlay::armor_slot_rects(w, h) {
-            if hit(x, y) {
+        match slot {
+            // Equipped-armor slots: only the matching piece may be placed; taking out is allowed.
+            SlotRef::Player(i) if i >= item::HOTBAR + item::MAIN => {
                 let allowed = match session.inventory.held {
                     None => true,
-                    Some(h) => item::is_armor(h.item) && item::armor_slot(h.item) == slot_i,
+                    Some(hs) => item::is_armor(hs.item) && item::armor_slot(hs.item) == i,
                 };
                 if allowed {
                     let mut held = session.inventory.held;
-                    let mut s = session.inventory.slots[slot_i];
+                    let mut s = session.inventory.slots[i];
                     item::slot_click(&mut held, &mut s, right);
                     session.inventory.held = held;
-                    session.inventory.slots[slot_i] = s;
+                    session.inventory.slots[i] = s;
                 }
-                return;
             }
-        }
-        let size = session.screen.craft_size();
-        for (cell, x, y) in overlay::craft_cell_rects(w, h, size) {
-            if hit(x, y) {
+            SlotRef::Player(i) => session.inventory.click_slot(i, right),
+            // F1: a creative-palette cell grabs a stack of that item onto the cursor (left = full
+            // stack, right = one). The old held stack is simply discarded — creative is infinite.
+            SlotRef::Palette(i) => {
+                let idx = session.creative_page * overlay::PAL_PER_PAGE + i;
+                if let Some(&it) = session.creative_palette.get(idx) {
+                    let count = if right { 1 } else { item::max_stack(it) };
+                    session.inventory.held = Some(item::ItemStack::new(it, count));
+                } else {
+                    session.inventory.held = None; // an empty palette cell = trash the cursor
+                }
+            }
+            SlotRef::Craft(cell) => {
                 let mut held = session.inventory.held;
                 let mut c = session.craft[cell];
                 item::slot_click(&mut held, &mut c, right);
                 session.inventory.held = held;
                 session.craft[cell] = c;
-                return;
+            }
+            SlotRef::CraftOut => craft_take_output(session),
+            // Chest: move items between the held cursor stack and the container slots.
+            SlotRef::Chest(i) => {
+                let Screen::Chest(pos) = session.screen else { return };
+                let mut held = session.inventory.held;
+                session.game.chest_mut(pos).click(i, &mut held, right);
+                session.inventory.held = held;
+            }
+            // Furnace: move items between held and the input/fuel slots; output is take-only.
+            SlotRef::FurnaceIn | SlotRef::FurnaceFuel | SlotRef::FurnaceOut => {
+                let Screen::Furnace(pos) = session.screen else { return };
+                let mut held = session.inventory.held;
+                let f = session.game.furnace_mut(pos);
+                match slot {
+                    SlotRef::FurnaceIn => {
+                        let mut s = f.input;
+                        item::slot_click(&mut held, &mut s, right);
+                        f.input = s;
+                    }
+                    SlotRef::FurnaceFuel => {
+                        let mut s = f.fuel;
+                        item::slot_click(&mut held, &mut s, right);
+                        f.fuel = s;
+                    }
+                    _ => take_furnace_output(&mut held, &mut f.output),
+                }
+                session.inventory.held = held;
             }
         }
-        let (ox, oy) = overlay::craft_output_rect(w, h, size);
-        if hit(ox, oy) {
-            craft_take_output(session);
+    }
+
+    /// S14: number key over a slot — swap it with hotbar slot `n` (vanilla hover-swap). Armor
+    /// slots only accept a matching piece; take-only outputs and the creative palette don't swap.
+    fn hover_swap(&mut self, n: usize) {
+        let Some(state) = &mut self.state else { return };
+        let (w, h) = (state.gpu.config.width, state.gpu.config.height);
+        let Some(session) = state.session.as_mut() else { return };
+        // Vanilla gates the hotkey verbs on an empty cursor (a drag stays a drag).
+        if session.inventory.held.is_some() {
+            return;
+        }
+        let Some(slot) = hovered_slot(session, w, h) else { return };
+        if hidden_craft_cell(session, slot) {
+            return;
+        }
+        match slot {
+            SlotRef::Player(i) => session.inventory.swap_with_hotbar(i, n),
+            SlotRef::Craft(cell) => {
+                std::mem::swap(&mut session.craft[cell], &mut session.inventory.slots[n]);
+            }
+            SlotRef::Chest(i) => {
+                let Screen::Chest(pos) = session.screen else { return };
+                std::mem::swap(
+                    &mut session.game.chest_mut(pos).slots[i],
+                    &mut session.inventory.slots[n],
+                );
+            }
+            SlotRef::FurnaceIn | SlotRef::FurnaceFuel => {
+                let Screen::Furnace(pos) = session.screen else { return };
+                let f = session.game.furnace_mut(pos);
+                let cell = if slot == SlotRef::FurnaceIn { &mut f.input } else { &mut f.fuel };
+                std::mem::swap(cell, &mut session.inventory.slots[n]);
+            }
+            // The palette hands a full stack straight to that hotbar slot (vanilla creative).
+            SlotRef::Palette(i) => {
+                let idx = session.creative_page * overlay::PAL_PER_PAGE + i;
+                if let Some(&it) = session.creative_palette.get(idx) {
+                    session.inventory.slots[n] = Some(item::ItemStack::new(it, item::max_stack(it)));
+                }
+            }
+            SlotRef::CraftOut | SlotRef::FurnaceOut => {}
+        }
+    }
+
+    /// S14: Q over a slot — toss one item (Ctrl-Q: the whole stack) out of the open screen, ahead
+    /// of the camera like the gameplay drop. Creative copies without consuming (mirrors
+    /// `drop_one_selected`); the palette and the craft preview aren't real stacks, so no drop.
+    fn hover_drop(&mut self, all: bool) {
+        let Some(state) = &mut self.state else { return };
+        let (w, h) = (state.gpu.config.width, state.gpu.config.height);
+        let Some(session) = state.session.as_mut() else { return };
+        if session.inventory.held.is_some() {
+            return;
+        }
+        let Some(slot) = hovered_slot(session, w, h) else { return };
+        if hidden_craft_cell(session, slot) {
+            return;
+        }
+        let creative = session.inventory.creative;
+        let take = |cell: &mut Option<item::ItemStack>| -> Option<item::ItemStack> {
+            let s = (*cell)?;
+            let n = if all { s.count } else { 1 };
+            if !creative {
+                if n >= s.count {
+                    *cell = None;
+                } else {
+                    cell.as_mut().unwrap().count -= n;
+                }
+            }
+            Some(item::ItemStack { item: s.item, count: n, durability: s.durability })
+        };
+        let dropped = match slot {
+            SlotRef::Player(i) => take(&mut session.inventory.slots[i]),
+            SlotRef::Craft(cell) => take(&mut session.craft[cell]),
+            SlotRef::Chest(i) => {
+                let Screen::Chest(pos) = session.screen else { return };
+                take(&mut session.game.chest_mut(pos).slots[i])
+            }
+            SlotRef::FurnaceIn | SlotRef::FurnaceFuel | SlotRef::FurnaceOut => {
+                let Screen::Furnace(pos) = session.screen else { return };
+                let f = session.game.furnace_mut(pos);
+                match slot {
+                    SlotRef::FurnaceIn => take(&mut f.input),
+                    SlotRef::FurnaceFuel => take(&mut f.fuel),
+                    _ => take(&mut f.output),
+                }
+            }
+            SlotRef::CraftOut | SlotRef::Palette(_) => None,
+        };
+        if let Some(d) = dropped {
+            let pos = session.camera.position + session.camera.forward() * 1.2;
+            session.game.spawn_item(pos, d);
         }
     }
 
@@ -476,9 +548,36 @@ impl App {
             self.toggle_inventory();
             return;
         }
+        // S14: while a GUI screen is open the hover verbs replace gameplay keys — a number key
+        // swaps the hovered slot with that hotbar slot, Q tosses from the hovered slot (Ctrl-Q:
+        // the whole stack). Everything else is still swallowed below.
+        let screen_open =
+            self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None);
+        if pressed && !repeat && screen_open {
+            let digit = match code {
+                KeyCode::Digit1 => Some(0),
+                KeyCode::Digit2 => Some(1),
+                KeyCode::Digit3 => Some(2),
+                KeyCode::Digit4 => Some(3),
+                KeyCode::Digit5 => Some(4),
+                KeyCode::Digit6 => Some(5),
+                KeyCode::Digit7 => Some(6),
+                KeyCode::Digit8 => Some(7),
+                KeyCode::Digit9 => Some(8),
+                _ => None,
+            };
+            if let Some(n) = digit {
+                self.hover_swap(n);
+                return;
+            }
+            if code == KeyCode::KeyQ {
+                self.hover_drop(self.modifiers.control_key());
+                return;
+            }
+        }
         // While a GUI screen is open, swallow gameplay key PRESSES but let RELEASES through, so a
         // movement key held across the open/close edge can't get stuck on.
-        if pressed && self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None) {
+        if pressed && screen_open {
             return;
         }
         let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) else { return };
@@ -2476,6 +2575,209 @@ fn create_session(
     }
 }
 
+/// S14: a resolved reference to whichever GUI slot the cursor is over — shared by click routing,
+/// the number-key swap, and hover-drop so all three agree on regions and priority.
+#[derive(Clone, Copy, PartialEq)]
+enum SlotRef {
+    /// Player inventory slot: hotbar [0,9), main [9,36), armor [36,40).
+    Player(usize),
+    Palette(usize),
+    Craft(usize),
+    CraftOut,
+    Chest(usize),
+    FurnaceIn,
+    FurnaceFuel,
+    FurnaceOut,
+}
+
+/// Hit-test the cursor against the active screen's slot regions (`session.cursor` stays live while
+/// a screen is open). The region set + priority mirror the original click handler: the player grid
+/// first; the furnace/chest screens expose ONLY their own slots beyond it (armor + craft cells
+/// belong to the inventory/crafting screens).
+fn hovered_slot(session: &Session, w: u32, h: u32) -> Option<SlotRef> {
+    let (cx, cy) = session.cursor;
+    let hit = |x: f32, y: f32| {
+        cx >= x && cx < x + overlay::INV_SLOT && cy >= y && cy < y + overlay::INV_SLOT
+    };
+    for (slot_i, x, y) in overlay::inventory_slot_rects(w, h) {
+        if hit(x, y) {
+            return Some(SlotRef::Player(slot_i));
+        }
+    }
+    if session.screen == Screen::Inventory && session.inventory.creative {
+        for (i, x, y) in overlay::creative_palette_rects(w, h) {
+            if hit(x, y) {
+                return Some(SlotRef::Palette(i));
+            }
+        }
+    }
+    if matches!(session.screen, Screen::Furnace(_)) {
+        for (kind, x, y) in overlay::furnace_slot_rects(w, h) {
+            if hit(x, y) {
+                return Some(match kind {
+                    overlay::FurnaceSlot::Input => SlotRef::FurnaceIn,
+                    overlay::FurnaceSlot::Fuel => SlotRef::FurnaceFuel,
+                    overlay::FurnaceSlot::Output => SlotRef::FurnaceOut,
+                });
+            }
+        }
+        return None;
+    }
+    if matches!(session.screen, Screen::Chest(_)) {
+        for (i, x, y) in overlay::chest_slot_rects(w, h) {
+            if hit(x, y) {
+                return Some(SlotRef::Chest(i));
+            }
+        }
+        return None;
+    }
+    for (slot_i, x, y) in overlay::armor_slot_rects(w, h) {
+        if hit(x, y) {
+            return Some(SlotRef::Player(slot_i));
+        }
+    }
+    let size = session.screen.craft_size();
+    for (cell, x, y) in overlay::craft_cell_rects(w, h, size) {
+        if hit(x, y) {
+            return Some(SlotRef::Craft(cell));
+        }
+    }
+    let (ox, oy) = overlay::craft_output_rect(w, h, size);
+    if hit(ox, oy) {
+        return Some(SlotRef::CraftOut);
+    }
+    None
+}
+
+/// S14: true when `slot` is a craft cell/output on the CREATIVE inventory screen — the palette is
+/// drawn over the craft band there, but the cells still hit-test (plain clicks keep that
+/// long-standing quirk; the S14 verbs refuse to feed an invisible grid).
+fn hidden_craft_cell(session: &Session, slot: SlotRef) -> bool {
+    session.inventory.creative
+        && session.screen == Screen::Inventory
+        && matches!(slot, SlotRef::Craft(_) | SlotRef::CraftOut)
+}
+
+/// S14: merge `stack` into a lone Option slot (same item with room, or empty) — the furnace
+/// input/fuel quick-move destination. Returns the leftover; a different occupant moves nothing.
+fn merge_into_slot(
+    slot: &mut Option<item::ItemStack>,
+    mut stack: item::ItemStack,
+) -> Option<item::ItemStack> {
+    match slot {
+        None => {
+            *slot = Some(stack);
+            None
+        }
+        Some(s) if s.item == stack.item && !item::is_tool(stack.item) => {
+            let room = item::max_stack(s.item).saturating_sub(s.count);
+            let moved = room.min(stack.count);
+            s.count += moved;
+            stack.count -= moved;
+            if stack.count == 0 { None } else { Some(stack) }
+        }
+        Some(_) => Some(stack),
+    }
+}
+
+/// S14: the shift-click quick-move verb (cursor is empty — the caller checks). Vanilla per-screen
+/// priorities: player slots feed the open container (chest directly; furnaces route smeltables to
+/// input and fuels to fuel, else fall back to the hotbar/main trade); container/craft slots come
+/// back to the inventory; the craft output crafts repeatedly straight into the inventory.
+fn quick_move_click(session: &mut Session, slot: SlotRef) {
+    if hidden_craft_cell(session, slot) {
+        return;
+    }
+    match slot {
+        SlotRef::Player(i) => match session.screen {
+            Screen::Chest(pos) => {
+                let Some(stack) = session.inventory.slots.get(i).copied().flatten() else { return };
+                session.inventory.slots[i] = None;
+                if let Some(rest) = session.game.chest_mut(pos).insert(stack) {
+                    session.inventory.slots[i] = Some(rest);
+                }
+            }
+            Screen::Furnace(pos) => {
+                let Some(stack) = session.inventory.slots.get(i).copied().flatten() else { return };
+                let f = session.game.furnace_mut(pos);
+                let dest = if crate::smelting::smelt_output(stack.item).is_some() {
+                    Some(&mut f.input)
+                } else if crate::smelting::fuel_value(stack.item).is_some() {
+                    Some(&mut f.fuel)
+                } else {
+                    None
+                };
+                match dest {
+                    Some(d) => session.inventory.slots[i] = merge_into_slot(d, stack),
+                    // Not furnace-usable: the plain hotbar/main trade (vanilla).
+                    None => session.inventory.quick_move(i),
+                }
+            }
+            _ => session.inventory.quick_move(i),
+        },
+        SlotRef::Chest(i) => {
+            let Screen::Chest(pos) = session.screen else { return };
+            let Some(stack) = session.game.chest_mut(pos).slots.get(i).copied().flatten() else {
+                return;
+            };
+            session.game.chest_mut(pos).slots[i] = None;
+            if let Some(rest) = session.inventory.insert_slots(stack, &item::pickup_order()) {
+                session.game.chest_mut(pos).slots[i] = Some(rest);
+            }
+        }
+        SlotRef::FurnaceIn | SlotRef::FurnaceFuel | SlotRef::FurnaceOut => {
+            let Screen::Furnace(pos) = session.screen else { return };
+            let f = session.game.furnace_mut(pos);
+            let cell = match slot {
+                SlotRef::FurnaceIn => &mut f.input,
+                SlotRef::FurnaceFuel => &mut f.fuel,
+                _ => &mut f.output,
+            };
+            let Some(stack) = cell.take() else { return };
+            if let Some(rest) = session.inventory.insert_slots(stack, &item::pickup_order()) {
+                *cell = Some(rest);
+            }
+        }
+        SlotRef::Craft(cell) => {
+            let Some(stack) = session.craft[cell] else { return };
+            session.craft[cell] = None;
+            if let Some(rest) = session.inventory.insert_slots(stack, &item::backpack_order()) {
+                session.craft[cell] = Some(rest);
+            }
+        }
+        SlotRef::CraftOut => {
+            // Craft-all: repeat while the grid still matches, inserting each result into the
+            // inventory. A dry-run on a copy keeps a partial fit from eating ingredients.
+            for _ in 0..64 {
+                let ids: [u16; 9] =
+                    std::array::from_fn(|i| session.craft[i].map(|s| s.item).unwrap_or(0));
+                let Some((out_item, out_count)) = crafting::match_grid(&ids) else { break };
+                let mut probe = session.inventory.clone();
+                let out = item::ItemStack::new(out_item, out_count);
+                if probe.insert_slots(out, &item::pickup_order()).is_some() {
+                    break;
+                }
+                session.inventory = probe;
+                for cell in session.craft.iter_mut() {
+                    if let Some(s) = cell {
+                        s.count -= 1;
+                        if s.count == 0 {
+                            *cell = None;
+                        }
+                    }
+                }
+            }
+        }
+        // Creative: shift-click sends a full stack of the palette item to the inventory (vanilla).
+        SlotRef::Palette(i) => {
+            let idx = session.creative_page * overlay::PAL_PER_PAGE + i;
+            if let Some(&it) = session.creative_palette.get(idx) {
+                let _ = session.inventory.insert(item::ItemStack::new(it, item::max_stack(it)));
+            }
+        }
+    }
+}
+
 fn maybe_select(session: &mut Session, pressed: bool, index: usize) {
     if pressed {
         session.inventory.select(index);
@@ -3437,6 +3739,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => self.set_grab(false),
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(), // S14
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
                 let pressed = btn_state == ElementState::Pressed;
                 // M35: menu scenes swallow the mouse — a left press activates the hovered widget.
@@ -3448,7 +3751,8 @@ impl ApplicationHandler for App {
                 }
                 let screen_open = self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None);
                 if pressed && screen_open {
-                    self.inventory_click(button);
+                    let shift = self.modifiers.shift_key();
+                    self.inventory_click(button, shift);
                 } else if pressed && !self.grabbed {
                     self.set_grab(true);
                 } else if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {

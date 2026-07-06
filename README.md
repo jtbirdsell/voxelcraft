@@ -111,8 +111,9 @@ here so it's the default. GL has no hardware RT (software DDA tracer only).
 | **F** | Toggle fly / walk (**Creative worlds only**) |
 | **Left-click (hold)** | Mine the targeted block (progressive, hardness-timed) |
 | **Right-click** | Place block; open a crafting table / furnace / chest; **open/close a door or trapdoor**; **till with a hoe / plant seeds / bonemeal crops**; **hold to eat** the selected food |
-| **Q** | Drop one of the selected item |
-| **1–9 / scroll** | Select hotbar slot |
+| **Q** | Drop one of the selected item; **over a slot in any screen: drop from that slot (Ctrl-Q: the whole stack)** |
+| **1–9 / scroll** | Select hotbar slot; **over a slot in any screen: swap it with that hotbar slot** |
+| **Shift-click** | **Quick-move a stack** — hotbar ↔ backpack, into an open chest, furnace items route to input/fuel by kind, armor auto-equips; shift-click the craft output to **craft everything** straight into your inventory |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
 | **R** | Cycle ray-traced lighting: off → shadows → shadows + GI |
 | **G** | Cycle difficulty: Peaceful → Easy → Normal → Hard |
@@ -328,6 +329,12 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Inventory verbs** (S14): the full vanilla click vocabulary — **shift-click quick-move** with
+  per-screen routing (hotbar ↔ backpack, straight into an open chest, furnaces route smeltables to
+  the input and fuels to the fuel slot, armor auto-equips), **shift-click the craft output to
+  craft-all** into your inventory, **number-key hover-swap** (point at any slot, press 1-9 to trade
+  it with that hotbar slot — armor slots only accept their matching piece), and **Q-drop on hover**
+  (Ctrl-Q tosses the whole stack) in every screen, chests and furnaces included.
 - **Recipes & loot completion** (S13): every shipped interactive/deco block is now **craftable in
   survival** — doors, trapdoors, fences, glass panes, cobblestone walls, levers, buttons — plus
   **flint & steel** (portal lighter-in-waiting), **shears**, and **bowls + mushroom stew** (eating
