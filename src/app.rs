@@ -68,6 +68,8 @@ impl Screen {
 #[allow(dead_code)] // menu scenes are constructed in N3; the enum lands now so the split is stable.
 enum Scene {
     MainMenu,
+    /// S10: the death screen (world frozen; Respawn / Save & Quit).
+    Dead,
     WorldSelect,
     CreateWorld,
     Settings { return_to: Box<Scene> },
@@ -157,6 +159,12 @@ struct Session {
     was_wet: bool,
     /// Stride accumulator (blocks walked) toward the next footstep.
     step_accum: f32,
+    /// S10: red damage-flash strength (decays); set on any health-drop edge.
+    hurt_flash: f32,
+    /// S10: directional damage cue — (world angle of the source, remaining seconds).
+    hurt_dir: Option<(f32, f32)>,
+    /// S10: transient HUD message line ("Autosaved", errors...) + remaining seconds.
+    toast: Option<(String, f32)>,
     /// Block currently being mined + accumulated progress (0..1) for hold-to-break.
     mine_target: Option<IVec3>,
     mine_progress: f32,
@@ -454,7 +462,13 @@ impl App {
             return;
         }
         if code == KeyCode::KeyP && pressed && !repeat {
-            self.save_world();
+            let ok = self.save_world();
+            if let Some(se) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+                se.toast = Some((
+                    if ok { "Saved".into() } else { "SAVE FAILED — see log".into() },
+                    2.0,
+                ));
+            }
             return;
         }
         if code == KeyCode::KeyE && pressed && !repeat {
@@ -484,7 +498,7 @@ impl App {
                     session.player.flying = !session.player.flying;
                     session.player.velocity = Vec3::ZERO;
                 } else {
-                    log::info!("Flying requires a Creative world.");
+                    session.toast = Some(("Flying requires a Creative world".into(), 2.0));
                 }
             }
             KeyCode::KeyR if pressed && !repeat => {
@@ -555,6 +569,7 @@ impl App {
                 menu::build_settings(w, h, s, diff, state.settings_tab, ui)
             }
             Scene::Paused => menu::build_pause(w, h, ui),
+            Scene::Dead => menu::build_death(w, h, ui),
             Scene::InGame => return None,
         })
     }
@@ -626,6 +641,20 @@ impl App {
             W::Quit => {
                 self.save_world();
                 event_loop.exit();
+            }
+            // Death screen (S10).
+            W::DeadRespawn => {
+                self.respawn_player();
+                self.set_scene(Scene::InGame);
+                if let Some(state) = self.state.as_mut() {
+                    state.last_frame = Instant::now();
+                }
+            }
+            W::DeadSaveQuit => {
+                // Respawn FIRST so the save never contains a dead player (and the drops land at
+                // the death site before the world writes out).
+                self.respawn_player();
+                self.to_main_menu();
             }
             // Pause.
             W::Resume => self.resume_game(),
@@ -744,6 +773,24 @@ impl App {
             state.menu.caret = 0;
         }
         self.enter_world(info.dir, WorldSource::New { seed: info.seed, mode });
+    }
+
+    /// S10: drop the inventory at the death site and revive at the spawn point — the Respawn
+    /// button's body (also runs before a Save & Quit from the death screen).
+    fn respawn_player(&mut self) {
+        let Some(state) = self.state.as_mut() else { return };
+        let Some(se) = state.session.as_mut() else { return };
+        let death_pos = se.player.position + Vec3::new(0.0, 1.0, 0.0);
+        // One entity per stack (carries count + tool durability) — tools drop too, not vanish.
+        for stack in se.inventory.drain_all() {
+            se.game.spawn_item(death_pos, stack);
+        }
+        se.player.respawn();
+        se.camera.position = se.player.eye();
+        se.prev_health = se.player.health;
+        se.fall_top = se.player.position.y;
+        se.hurt_flash = 0.0;
+        se.hurt_dir = None;
     }
 
     /// Replace the scene and re-evaluate cursor grab.
@@ -971,12 +1018,37 @@ impl App {
             .and_then(|s| s.session.as_ref())
             .is_some_and(|se| se.autosave >= AUTOSAVE_SECS);
         if autosave_due {
-            if self.save_world() {
+            let ok = self.save_world();
+            if ok {
                 log::info!("autosaved");
             }
             if let Some(se) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
                 se.autosave = 0.0;
+                se.toast = Some((
+                    if ok { "Autosaved".into() } else { "AUTOSAVE FAILED — see log".into() },
+                    2.0,
+                ));
             }
+        }
+        // S10: death → the death screen (pre-borrow peek, like autosave). The world freezes in
+        // Scene::Dead; the drain/respawn moved into the Respawn button.
+        let died = self
+            .state
+            .as_ref()
+            .and_then(|s| s.session.as_ref())
+            .is_some_and(|se| !se.player.creative && se.player.is_dead());
+        if died {
+            if let Some(state) = self.state.as_mut() {
+                if let Some(audio) = &state.audio {
+                    audio.play(crate::audio::Sfx::PlayerHurt, 1.0);
+                }
+                if let Some(se) = state.session.as_mut() {
+                    se.input = Input::default(); // dying mid-sprint must not auto-run on respawn
+                }
+                state.scene = Scene::Dead;
+            }
+            self.apply_grab_for_scene();
+            return;
         }
         let Some(state) = &mut self.state else { return };
         let now = Instant::now();
@@ -1093,11 +1165,28 @@ impl App {
                     audio.play(crate::audio::Sfx::PlayerHurt, 0.9);
                 }
             }
+            if health < session.prev_health - 0.05 {
+                session.hurt_flash = 0.35; // S10 (fires with the hurt sound, env damage included)
+            }
             if on_ground {
                 session.fall_top = pos.y;
             }
             session.was_on_ground = on_ground;
             session.prev_health = health;
+        }
+        // S10: decay the transient feedback.
+        session.hurt_flash = (session.hurt_flash - dt).max(0.0);
+        if let Some((_, t)) = session.hurt_dir.as_mut() {
+            *t -= dt;
+            if *t <= 0.0 {
+                session.hurt_dir = None;
+            }
+        }
+        if let Some((_, t)) = session.toast.as_mut() {
+            *t -= dt;
+            if *t <= 0.0 {
+                session.toast = None;
+            }
         }
         session.camera.position = session.player.eye();
         // M34-VM5: optional camera head-bob, folded into the real camera transform BEFORE the camera
@@ -1124,22 +1213,6 @@ impl App {
         }
         .to_radians();
         session.camera.fovy += (target_fov - session.camera.fovy) * (10.0 * dt).min(1.0);
-
-        // Survival: a hard fall or starvation can kill; respawn at spawn. Creative is immortal (S1).
-        if !session.player.creative && session.player.is_dead() {
-            log::info!("You died — respawning at spawn.");
-            if let Some(audio) = &state.audio {
-                audio.play(crate::audio::Sfx::PlayerHurt, 1.0); // the death gasp (screen lands S10)
-            }
-            // Drop the whole inventory at the death site, then respawn empty.
-            let death_pos = session.player.position + Vec3::new(0.0, 1.0, 0.0);
-            // One entity per stack (carries count + tool durability) — tools drop too, not vanish.
-            for stack in session.inventory.drain_all() {
-                session.game.spawn_item(death_pos, stack);
-            }
-            session.player.respawn();
-            session.camera.position = session.player.eye();
-        }
 
         // Stream chunks, advance fluids/entities; collect any picked-up item drops into inventory.
         let mut collected = session.game.update(
@@ -1179,6 +1252,10 @@ impl App {
                 audio.play_at(sfx, 1.0, pos, cp, cf);
             }
         }
+        // S10: particle bursts raised inside the entity tick (hearts...).
+        for (b, pos) in std::mem::take(&mut collected.bursts) {
+            session.game.spawn_burst(b, pos);
+        }
 
         // P14 shield raise-timer: hold right-click with a SHIELD (no screen open) to raise it. Updated
         // HERE (above the damage loop) so shield_ready reflects this frame. Pre-empts eat/place below.
@@ -1204,9 +1281,13 @@ impl App {
         let shield_up = session.shield_item.is_some() && session.shield_progress >= SHIELD_RAISE_DELAY;
         let fwd = session.camera.forward();
         let mut incoming = 0.0;
+        let mut strongest: Option<(f32, Vec3)> = None;
         for (amount, src) in std::mem::take(&mut collected.player_damage) {
             if shield_up && crate::player::shield_blocks(fwd, session.player.position, src) {
                 continue; // fully blocked
+            }
+            if strongest.is_none_or(|(a, _)| amount > a) {
+                strongest = Some((amount, src));
             }
             incoming += amount;
         }
@@ -1216,6 +1297,12 @@ impl App {
             if session.player.health < before - 0.05 {
                 if let Some(audio) = &state.audio {
                     audio.play(crate::audio::Sfx::PlayerHurt, 0.9);
+                }
+                session.hurt_flash = 0.35; // S10
+                if let Some((_, src)) = strongest {
+                    // World angle of the attacker (yaw 0 = +X, toward +Z), shown 0.8 s.
+                    let d = src - session.player.position;
+                    session.hurt_dir = Some((d.z.atan2(d.x), 0.8));
                 }
             }
             session.prev_health = session.player.health;
@@ -1277,7 +1364,13 @@ impl App {
             };
             // Sprint-attack: extra horizontal knockback (and it can't crit — see is_critical_hit).
             let kb_mult = if sprinting && session.player.on_ground { 1.5 } else { 1.0 };
-            session.game.attack_nearest(eye, fwd, REACH, dmg, crit, sweep, kb_mult);
+            let landed = session.game.attack_nearest(eye, fwd, REACH, dmg, crit, sweep, kb_mult);
+            if landed && crit {
+                // S10: crit stars where the hit connected.
+                session
+                    .game
+                    .spawn_burst(crate::game::Burst::Crit, eye + fwd * mob_dist.unwrap_or(1.5));
+            }
             if let Some(audio) = &state.audio {
                 let at = eye + fwd * mob_dist.unwrap_or(1.5);
                 audio.play_at(crate::audio::Sfx::MobHit, 0.9, at, eye, fwd); // S9
@@ -1339,6 +1432,10 @@ impl App {
                                 let (cp, cf) = (session.camera.position, session.camera.forward());
                                 audio.play_at(brk, 0.9, hit.as_vec3() + Vec3::splat(0.5), cp, cf);
                             }
+                            // S10: textured shards of the broken block.
+                            session
+                                .game
+                                .spawn_burst(crate::game::Burst::Break(id), hit.as_vec3() + Vec3::splat(0.5));
                         }
                         if removed && !session.inventory.creative {
                             // Pickaxe blocks need a matching tool of sufficient harvest level to drop.
@@ -1790,9 +1887,14 @@ impl App {
 
         let frustum = Frustum::from_view_proj(session.camera.view_proj(aspect));
         let entity_mesh = session.game.build_entity_mesh(&state.gpu, &state.renderer);
+        let particle_mesh =
+            session.game.build_particle_mesh(&state.gpu, &state.renderer, session.camera.forward());
         let mut visible = session.game.visible_meshes(&frustum);
         if let Some(em) = &entity_mesh {
             visible.push(em);
+        }
+        if let Some(pm) = &particle_mesh {
+            visible.push(pm); // S10 (no BLAS — the TLAS ignores dynamic meshes)
         }
         let highlight = target.as_ref().map(|h| {
             let prog = if session.mine_target == Some(h.block) {
@@ -1870,6 +1972,10 @@ impl App {
                     0.0
                 }
             },
+            session.hurt_flash,
+            // Camera-relative attacker angle (yaw 0 = +X): rel 0 = ahead of the crosshair.
+            session.hurt_dir.map(|(world, t)| (world - session.camera.yaw, (t / 0.8).clamp(0.0, 1.0))),
+            session.toast.as_ref().map(|(m, _)| m.as_str()),
             debug_lines.as_deref(),
         );
         if let Screen::Chest(pos) = session.screen {
@@ -2182,7 +2288,10 @@ fn create_session(
     player.creative = inventory.creative;
     player.difficulty = difficulty;
     if let Some(l) = &level {
-        player.restore_state(l.health, l.hunger, l.air, l.saturation, l.xp, l.level);
+        // S10: never load INTO death — a save written at 0 HP (crash on the death screen) revives
+        // with fresh stats at the saved position instead of instantly re-dying on frame one.
+        let health = if l.health <= 0.0 { 20.0 } else { l.health };
+        player.restore_state(health, l.hunger, l.air, l.saturation, l.xp, l.level);
     }
     let spawn_health = player.health;
     let camera = Camera::new(player.eye(), yaw, pitch);
@@ -2215,6 +2324,9 @@ fn create_session(
         was_on_ground: false,
         was_wet: false,
         step_accum: 0.0,
+        hurt_flash: 0.0,
+        hurt_dir: None,
+        toast: None,
         melee_cd: 0.0,
         melee_was_held: false,
         melee_prev_sel: 0,
@@ -2509,6 +2621,7 @@ impl ApplicationHandler for App {
                     &ui,
                 ),
                 "pause" => crate::menu::build_pause(w, h, &ui),
+                "dead" => crate::menu::build_death(w, h, &ui), // S10
                 _ => crate::menu::build_main(w, h, &ui),
             };
             let path = std::env::var("VOXELCRAFT_SHOT").unwrap_or_else(|_| "menu.png".into());
@@ -2642,6 +2755,37 @@ impl ApplicationHandler for App {
             if let Ok(Ok(n)) = std::env::var("VOXELCRAFT_TICKS").map(|s| s.trim().parse::<u32>()) {
                 for _ in 0..n {
                     let _ = game.update(&gpu, &renderer, player.position, 1.0 / 60.0, 1.0);
+                }
+            }
+
+            // Debug: VOXELCRAFT_BURST="x,y,z,kind;..." stages particle bursts for the shot
+            // (kind: break:<block_id> | smoke | hearts | crit), advanced a few sim ticks so the
+            // spray has opened up. Plain shots never run game.update, so step here.
+            if let Ok(spec) = std::env::var("VOXELCRAFT_BURST") {
+                for part in spec.split(';') {
+                    let f: Vec<&str> = part.split(',').map(|t| t.trim()).collect();
+                    if f.len() == 4 {
+                        let (Ok(x), Ok(y), Ok(z)) =
+                            (f[0].parse::<f32>(), f[1].parse::<f32>(), f[2].parse::<f32>())
+                        else {
+                            continue;
+                        };
+                        let kind = match f[3] {
+                            "smoke" => Some(crate::game::Burst::Smoke),
+                            "hearts" => Some(crate::game::Burst::Hearts),
+                            "crit" => Some(crate::game::Burst::Crit),
+                            k => k
+                                .strip_prefix("break:")
+                                .and_then(|id| id.parse().ok())
+                                .map(crate::game::Burst::Break),
+                        };
+                        if let Some(k) = kind {
+                            game.spawn_burst(k, Vec3::new(x, y, z));
+                        }
+                    }
+                }
+                for _ in 0..6 {
+                    game.step_particles_debug(0.03);
                 }
             }
 
@@ -2869,6 +3013,9 @@ impl ApplicationHandler for App {
                 if survival_demo { 0.7 } else { 0.0 }, // draw_charge: show the bow-draw bar in the demo
                 if survival_demo { 1.0 } else { 0.0 }, // shield_charge: show the READY shield cue in the demo
                 if std::env::var("VOXELCRAFT_DARK").is_ok() { 0.7 } else { 0.0 }, // F3 Darkness demo
+                if survival_demo { 0.2 } else { 0.0 }, // S10: hurt flash visible in the demo HUD
+                if survival_demo { Some((0.8, 0.8)) } else { None }, // S10: attacker cue demo
+                survival_demo.then_some("Autosaved"), // S10: toast demo
                 Some(&dbg),
             );
             let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();
@@ -2939,6 +3086,11 @@ impl ApplicationHandler for App {
             // screenshot previously only drew chunk meshes — so mobs never appeared in shots).
             if let Some(em) = &entity_mesh {
                 all.push(em);
+            }
+            // S10: staged particle bursts render in shots too.
+            let particle_mesh = game.build_particle_mesh(&gpu, &renderer, camera.forward());
+            if let Some(pm) = &particle_mesh {
+                all.push(pm);
             }
             // P21: timed multi-frame benchmark (native path only — DLSS does internal submits that
             // would skew per-pass attribution; on the Mac dlss_render is None anyway).

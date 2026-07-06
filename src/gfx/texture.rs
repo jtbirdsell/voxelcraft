@@ -153,6 +153,9 @@ fn base_color(tile: u32) -> [f32; 3] {
         T::CROP_CARROT_MATURE => [0.35, 0.55, 0.22],
         T::CROP_POTATO_MATURE => [0.38, 0.52, 0.26],
         T::SAPLING => [0.30, 0.50, 0.20],
+        T::HEART => [0.90, 0.15, 0.25],
+        T::CRIT => [0.95, 0.85, 0.35],
+        T::SMOKE => [0.40, 0.40, 0.42],
         T::FOOD_POTATO => [0.85, 0.70, 0.40],
         T::FOOD_BAKED_POTATO => [0.75, 0.55, 0.30],
         _ => [1.0, 0.0, 1.0],
@@ -217,6 +220,34 @@ fn paint_plant(tile: u32, x: u32, y: u32) -> [u8; 4] {
                 } else {
                     [to_u8(0.74), to_u8(0.62), to_u8(0.26), 255]
                 };
+            }
+            [0, 0, 0, 0]
+        }
+        T::HEART => {
+            // A chunky heart: two lobes + a point.
+            let lx = (x as i32 - 5).pow(2) + (y as i32 - 6).pow(2) <= 9;
+            let rx = (x as i32 - 10).pow(2) + (y as i32 - 6).pow(2) <= 9;
+            let body = (y as i32) >= 6 && (dx.abs() * 3 + (y as i32 - 6) * 2) <= 16 && y <= 13;
+            if lx || rx || body {
+                return [to_u8(0.90), to_u8(0.15), to_u8(0.25), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::CRIT => {
+            // A four-point star.
+            let ax = dx.abs();
+            let ay = (y as i32 - 8).abs();
+            if ax + ay <= 5 && (ax <= 1 || ay <= 1) {
+                return [to_u8(0.95), to_u8(0.85), to_u8(0.35), 255];
+            }
+            [0, 0, 0, 0]
+        }
+        T::SMOKE => {
+            // A soft round blob with a ragged noisy rim.
+            let r2 = dx * dx + (y as i32 - 8).pow(2);
+            if r2 <= 25 && (r2 <= 16 || hashf(x, y, 31) > 0.4) {
+                let g = 0.35 + hashf(x, y, 32) * 0.2;
+                return [to_u8(g), to_u8(g), to_u8(g * 1.05), 255];
             }
             [0, 0, 0, 0]
         }
@@ -852,6 +883,9 @@ fn paint(tile: u32, x: u32, y: u32) -> [u8; 4] {
             | T::CROP_CARROT_MATURE
             | T::CROP_POTATO_MATURE
             | T::SAPLING
+            | T::HEART
+            | T::CRIT
+            | T::SMOKE
     ) {
         return paint_plant(tile, x, y);
     }

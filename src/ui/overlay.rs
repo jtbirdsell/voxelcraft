@@ -724,6 +724,10 @@ pub fn build_ui(
     shield_charge: f32,
     // F3: Warden Darkness intensity (0 = none, ~0.85 = near-black) — a pulsing full-screen dim.
     darkness: f32,
+    // S10: red damage flash 0..~0.35, camera-relative attacker cue (angle_rel, alpha), toast line.
+    hurt_flash: f32,
+    hurt_dir: Option<(f32, f32)>,
+    toast: Option<&str>,
     debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
@@ -734,10 +738,20 @@ pub fn build_ui(
     if darkness > 0.0 {
         push_px_rect(&mut v, sw, sh, 0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, darkness.clamp(0.0, 0.9)]);
     }
+    // S10: damage flash — a red wash under the HUD, gone in ~a third of a second.
+    if hurt_flash > 0.0 {
+        push_px_rect(&mut v, sw, sh, 0.0, 0.0, sw, sh, [0.55, 0.02, 0.02, (hurt_flash * 1.3).min(0.45)]);
+    }
 
     // Crosshair.
     let white = [0.95, 0.95, 0.95, 0.85];
     let (cx, cy) = (sw * 0.5, sh * 0.5);
+    // S10: directional damage cue — a red marker orbiting the crosshair toward the attacker
+    // (angle 0 = dead ahead -> above the crosshair; screen y grows downward).
+    if let Some((rel, alpha)) = hurt_dir {
+        let (mx, my) = (cx + rel.sin() * 90.0, cy - rel.cos() * 90.0);
+        push_px_rect(&mut v, sw, sh, mx - 8.0, my - 8.0, 16.0, 16.0, [0.85, 0.10, 0.10, alpha.clamp(0.0, 0.9)]);
+    }
     push_px_rect(&mut v, sw, sh, cx - 9.0, cy - 1.5, 18.0, 3.0, white);
     push_px_rect(&mut v, sw, sh, cx - 1.5, cy - 9.0, 3.0, 18.0, white);
 
@@ -818,6 +832,12 @@ pub fn build_ui(
         let tw = text_width(name, 2.0);
         let name_y = if survival { y - 84.0 } else { y - 52.0 };
         push_text(&mut v, sw, sh, (sw - tw) * 0.5, name_y, 2.0, name, [0.95, 0.95, 0.95, 1.0]);
+    }
+    // S10: toast line — transient status messages ("Autosaved", save failures), above the name line.
+    if let Some(msg) = toast {
+        let tw = text_width(msg, 1.8);
+        let ty = if survival { y - 116.0 } else { y - 84.0 };
+        push_text(&mut v, sw, sh, (sw - tw) * 0.5, ty, 1.8, msg, [0.95, 0.9, 0.55, 0.95]);
     }
 
     // Survival HUD, stacked above the hotbar: XP bar (bottom) → health/hunger → air bubbles.

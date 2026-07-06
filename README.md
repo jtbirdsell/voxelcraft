@@ -328,6 +328,13 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Particles + legible consequences** (S10): a GI-lit billboard particle system riding the same
+  deferred pipeline as mobs — breaking a block sprays **shards textured with that block's own
+  tile**, explosions billow smoke, breeding pops **hearts**, critical hits burst **stars**. Damage
+  is finally visible: a red **hurt flash** on every health drop, a **directional damage marker**
+  orbiting the crosshair toward your attacker, and a proper **"You Died!" screen** (Respawn /
+  Save & Quit — your items drop where you fell; saves can never contain a dead player). A HUD
+  **toast line** surfaces autosaves, save failures, and denied actions.
 - **Audio, synthesized in code** (S9): no sound files anywhere — every effect is generated at
   startup (`audio/synth.rs`, the same ethos as the procedural textures) and mixed through rodio.
   Positional world sounds with distance falloff + stereo pan: footsteps keyed by the block
@@ -415,7 +422,8 @@ verify each change without a human in the loop. Companion debug knobs: `VOXELCRA
 armor bars), `VOXELCRAFT_DARK=1` (the Warden's pulsing **Darkness** screen dim),
 `VOXELCRAFT_HELD=<item_id>` + `VOXELCRAFT_VM_POSE=swing|eat|draw|shield|equip|idle` +
 `VOXELCRAFT_VM_T=<0..1>` (force the first-person held item + an animation pose),
-`VOXELCRAFT_MENU=main|worlds|create|settings|pause` (render one menu screen to a PNG, no world).
+`VOXELCRAFT_MENU=main|worlds|create|settings|pause|dead` (render one menu screen to a PNG, no world),
+`VOXELCRAFT_BURST="x,y,z,break:<id>|smoke|hearts|crit;..."` (stage particle bursts in a shot).
 Rendering knobs:
 `VOXELCRAFT_BACKEND=vulkan|dx12|gl|metal`, `VOXELCRAFT_TRACER=dda|hwrt`
 (software DDA vs hardware ray query), `VOXELCRAFT_RENDER_SCALE=0.25..1.0` (Metal-only sub-native

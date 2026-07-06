@@ -66,6 +66,9 @@ pub enum WidgetId {
     Resume,
     PauseSettings,
     SaveQuit,
+    // Death screen (S10)
+    DeadRespawn,
+    DeadSaveQuit,
 }
 
 /// Which settings tab is showing.
@@ -279,6 +282,26 @@ pub fn build_pause(sw: f32, sh: f32, ui: &UiState) -> Built {
 
 /// `pending_delete` arms one row's delete control into a red "Delete?" confirm (a second click on the
 /// same row commits) — the two-step guard against a one-misclick `remove_dir_all`.
+/// S10: the death screen — same translucent-dim treatment as Pause (the world behind is frozen).
+pub fn build_death(sw: f32, sh: f32, ui: &UiState) -> Built {
+    let (mut v, mut rects) = (Vec::new(), Vec::new());
+    push_px_rect(&mut v, sw, sh, 0.0, 0.0, sw, sh, [0.25, 0.0, 0.0, 0.65]);
+    title(&mut v, sw, sh, sh * 0.24, 5.0, "You Died!");
+    label_centered(
+        &mut v,
+        sw,
+        sh,
+        Rect { x: 0.0, y: sh * 0.36, w: sw, h: 24.0 },
+        1.6,
+        "Your items dropped where you fell.",
+        DIM,
+    );
+    let col = Column::centered(sw, sh * 0.46, BTN_W, ROW_H, GAP);
+    emit(&mut v, &mut rects, WidgetId::DeadRespawn, col.row(0), sw, sh, "Respawn", ui);
+    emit(&mut v, &mut rects, WidgetId::DeadSaveQuit, col.row(1), sw, sh, "Save & Quit to Menu", ui);
+    (v, rects)
+}
+
 pub fn build_world_select(
     sw: f32,
     sh: f32,
@@ -476,6 +499,14 @@ mod tests {
     /// full-width WorldRow it sits inside), and a click elsewhere on the row to WorldRow.
     fn hit(rects: &[(WidgetId, Rect)], p: (f32, f32)) -> Option<WidgetId> {
         rects.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id)
+    }
+
+    #[test]
+    fn death_screen_has_respawn_and_quit() {
+        let (verts, rects) = build_death(1600.0, 900.0, &ui());
+        assert!(!verts.is_empty());
+        assert!(rects.iter().any(|(id, _)| *id == WidgetId::DeadRespawn));
+        assert!(rects.iter().any(|(id, _)| *id == WidgetId::DeadSaveQuit));
     }
 
     #[test]

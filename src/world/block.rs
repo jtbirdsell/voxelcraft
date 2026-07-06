@@ -1455,6 +1455,10 @@ pub mod tile {
     pub const CROP_CARROT_MATURE: u32 = 186;
     pub const CROP_POTATO_MATURE: u32 = 187;
     pub const SAPLING: u32 = 188; // S7
+    // S10 particle sprites.
+    pub const HEART: u32 = 189;
+    pub const CRIT: u32 = 190;
+    pub const SMOKE: u32 = 191;
 }
 
 /// Tint class for a face: 0 = use texel as-is, 1 = multiply by foliage (grass/leaves) biome tint,

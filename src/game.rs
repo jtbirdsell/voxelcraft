@@ -254,6 +254,34 @@ const HOSTILE_Y_RANGE: i32 = 24; // S5: vertical sample half-range around the pl
 const PACK_SIZE: usize = 4; // animals spawn in clusters of this size
 const PACK_RADIUS: i32 = 3; // pack scatter radius (blocks)
 
+/// S10 particles: transient billboard sprites (break shards, explosion smoke, breeding hearts,
+/// crit stars), simulated on the main thread and re-meshed every frame like the entity batch —
+/// so they ride the same GI-lit opaque pipeline (alpha-cutout) and the S4b no-BLAS dynamic path.
+struct Particle {
+    pos: Vec3,
+    vel: Vec3,
+    size: f32,
+    life: f32,
+    max_life: f32,
+    gravity: f32,
+    tile: u32,
+    uv: [f32; 2],
+    uv_size: f32,
+    emission: f32,
+}
+
+/// A particle burst request (the visual twin of the S9 sound feed).
+#[derive(Clone, Copy)]
+pub enum Burst {
+    /// Block-break shards textured with the broken block's own tile.
+    Break(BlockId),
+    Smoke,
+    Hearts,
+    Crit,
+}
+
+const PARTICLE_CAP: usize = 2048;
+
 /// Binary sky-light at `wp` (0 or 15): 15 if no skylight-blocking block sits anywhere in the column
 /// above, up to `top`. Mirrors the mesher's open-to-sky model (light.rs) but reads live via `block_at`.
 /// Pure (closure-parameterized) so it is unit-testable without a GPU-backed Game.
@@ -479,6 +507,8 @@ pub struct Game {
 
     /// Natural-spawn cadence + a small RNG for spawn placement (M31).
     spawn_timer: f32,
+    /// S10: live particles (transient; never persisted).
+    particles: Vec<Particle>,
     spawn_rng: u64,
 
     /// Random-block-tick cadence + RNG (U9): drives amethyst/dripstone/cave-vine growth in near chunks.
@@ -576,6 +606,7 @@ impl Game {
             chests: FxHashMap::default(),
             difficulty: crate::rules::Difficulty::Normal,
             spawn_timer: 0.0,
+            particles: Vec::new(),
             spawn_rng: seed ^ 0x5FA1_2E37_9B1D_C0DE,
             tick_timer: 0.0,
             tick_rng: seed ^ 0x7A1C_9E37_55C0_1DEF,
@@ -814,6 +845,7 @@ impl Game {
         self.step_dripleaf(gpu, renderer, camera_pos, dt);
 
         // Natural spawning: one gated attempt per interval around the player (M31).
+        self.step_particles(dt); // S10
         self.spawn_timer += dt;
         if self.spawn_timer >= SPAWN_INTERVAL {
             self.spawn_timer -= SPAWN_INTERVAL;
@@ -861,6 +893,7 @@ impl Game {
         for (center, radius) in std::mem::take(&mut collected.explosions) {
             let dmg = self.apply_explosion(gpu, renderer, center, radius, camera_pos);
             collected.sounds.push((crate::audio::Sfx::Explosion, center)); // S9
+            self.spawn_burst(Burst::Smoke, center); // S10
             if dmg > 0.0 {
                 collected.player_damage.push((dmg, center)); // source = blast center
             }
@@ -2275,6 +2308,158 @@ impl Game {
     }
 
     /// Build one GPU mesh for all entities this frame (mobs + items), lit by the chunk pass.
+    /// S10: emit one particle burst. Bounded by PARTICLE_CAP (oldest evicted — bursts are short).
+    pub fn spawn_burst(&mut self, kind: Burst, pos: Vec3) {
+        let mut r = self.next_rand();
+        let mut rf = move || {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            (r >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut push = |p: Particle| {
+            if self.particles.len() >= PARTICLE_CAP {
+                self.particles.remove(0);
+            }
+            self.particles.push(p);
+        };
+        match kind {
+            Burst::Break(id) => {
+                let tile = block::face_tile(id, [0, 1, 0]);
+                for _ in 0..10 {
+                    let dir = Vec3::new(rf() - 0.5, rf() * 0.8, rf() - 0.5) * 2.0;
+                    push(Particle {
+                        pos: pos + dir * 0.2,
+                        vel: dir * 2.2 + Vec3::Y * 1.6,
+                        size: 0.09 + rf() * 0.05,
+                        life: 0.45 + rf() * 0.35,
+                        max_life: 0.8,
+                        gravity: 16.0,
+                        tile,
+                        // A random quarter of the block texture, vanilla-shard style.
+                        uv: [rf() * 0.75, rf() * 0.75],
+                        uv_size: 0.25,
+                        emission: block::emission(id),
+                    });
+                }
+            }
+            Burst::Smoke => {
+                for _ in 0..22 {
+                    let dir = Vec3::new(rf() - 0.5, rf() * 0.6 + 0.4, rf() - 0.5);
+                    push(Particle {
+                        pos: pos + dir * 0.8,
+                        vel: dir * 2.0 + Vec3::Y * (0.8 + rf() * 1.6),
+                        size: 0.25 + rf() * 0.25,
+                        life: 0.8 + rf() * 0.7,
+                        max_life: 1.5,
+                        gravity: -0.6, // smoke rises
+                        tile: block::tile::SMOKE,
+                        uv: [0.0, 0.0],
+                        uv_size: 1.0,
+                        emission: 0.0,
+                    });
+                }
+            }
+            Burst::Hearts => {
+                for _ in 0..5 {
+                    push(Particle {
+                        pos: pos + Vec3::new(rf() - 0.5, 0.9 + rf() * 0.5, rf() - 0.5),
+                        vel: Vec3::Y * (0.5 + rf() * 0.5),
+                        size: 0.16,
+                        life: 0.8 + rf() * 0.3,
+                        max_life: 1.1,
+                        gravity: 0.0,
+                        tile: block::tile::HEART,
+                        uv: [0.0, 0.0],
+                        uv_size: 1.0,
+                        emission: 0.15,
+                    });
+                }
+            }
+            Burst::Crit => {
+                for _ in 0..8 {
+                    let dir = Vec3::new(rf() - 0.5, rf() - 0.2, rf() - 0.5) * 2.0;
+                    push(Particle {
+                        pos,
+                        vel: dir * 3.0,
+                        size: 0.11,
+                        life: 0.3 + rf() * 0.15,
+                        max_life: 0.45,
+                        gravity: 5.0,
+                        tile: block::tile::CRIT,
+                        uv: [0.0, 0.0],
+                        uv_size: 1.0,
+                        emission: 0.5,
+                    });
+                }
+            }
+        }
+    }
+
+    /// S10: integrate + expire particles (called from `update`).
+    fn step_particles(&mut self, dt: f32) {
+        let mut i = 0;
+        while i < self.particles.len() {
+            let p = &mut self.particles[i];
+            p.life -= dt;
+            if p.life <= 0.0 {
+                self.particles.swap_remove(i);
+                continue;
+            }
+            p.vel.y -= p.gravity * dt;
+            let v = p.vel;
+            p.pos += v * dt;
+            i += 1;
+        }
+    }
+
+    /// S10: headless-verification stepper (the SHOT path stages bursts without running update).
+    pub fn step_particles_debug(&mut self, dt: f32) {
+        self.step_particles(dt);
+    }
+
+    /// S10: camera-facing billboard quads for every live particle, uploaded through the no-BLAS
+    /// dynamic path each frame (like the entity mesh). Shrinks as life runs out.
+    pub fn build_particle_mesh(
+        &self,
+        gpu: &Gpu,
+        renderer: &ChunkRenderer,
+        cam_fwd: Vec3,
+    ) -> Option<GpuMesh> {
+        if self.particles.is_empty() {
+            return None;
+        }
+        let right = cam_fwd.cross(Vec3::Y).normalize_or_zero();
+        let up = right.cross(cam_fwd).normalize_or_zero();
+        let mut geom = crate::mesher::Geometry::default();
+        for p in &self.particles {
+            let s = p.size * (0.35 + 0.65 * (p.life / p.max_life).clamp(0.0, 1.0));
+            let (r, u) = (right * s, up * s);
+            let quad = [p.pos - r - u, p.pos + r - u, p.pos + r + u, p.pos - r + u];
+            let uvs = [
+                [p.uv[0], p.uv[1] + p.uv_size],
+                [p.uv[0] + p.uv_size, p.uv[1] + p.uv_size],
+                [p.uv[0] + p.uv_size, p.uv[1]],
+                [p.uv[0], p.uv[1]],
+            ];
+            let base = geom.vertices.len() as u32;
+            for (k, corner) in quad.iter().enumerate() {
+                geom.vertices.push(crate::mesher::Vertex {
+                    position: corner.to_array(),
+                    normal: [0.0, 1.0, 0.0],
+                    uv: uvs[k],
+                    tile: p.tile,
+                    light: [1.0, 1.0],
+                    shade: [p.emission, 0.0],
+                });
+            }
+            geom.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        let mut mesh = crate::mesher::MeshData::default();
+        mesh.opaque = geom;
+        Some(renderer.upload_dynamic_mesh(gpu, &mesh))
+    }
+
     pub fn build_entity_mesh(&self, gpu: &Gpu, renderer: &ChunkRenderer) -> Option<GpuMesh> {
         let data = self.entities.build_mesh();
         if data.is_empty() {

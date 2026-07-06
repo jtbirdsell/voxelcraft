@@ -519,6 +519,8 @@ pub struct Collected {
     /// skeleton shots, mob voices, explosions...). Drained by the app each frame; also the feed
     /// S10's particles extend.
     pub sounds: Vec<(crate::audio::Sfx, Vec3)>,
+    /// S10: particle bursts raised inside the tick (breeding hearts...), drained like `sounds`.
+    pub bursts: Vec<(crate::game::Burst, Vec3)>,
 }
 
 struct Entity {
@@ -1586,6 +1588,7 @@ impl Entities {
         }
         // P17 babies bred this frame (deferred — couldn't push into self.list mid-iteration).
         for (pos, species) in births {
+            collected.bursts.push((crate::game::Burst::Hearts, pos)); // S10
             self.spawn_baby(pos, species);
         }
         for (pos, tier) in slime_births {

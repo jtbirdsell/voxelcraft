@@ -204,6 +204,9 @@ impl Player {
     /// Apply incoming damage, reduced by `armor` defense points (Minecraft-style: each point blocks
     /// 4%, capped at 80%). Environmental sources that ignore armor pass `armor = 0`.
     fn apply_damage(&mut self, raw: f32, armor: u32) {
+        if raw <= 0.0 {
+            return; // safe landings pass 0.0 — not damage (S10: keeps the hurt edge clean)
+        }
         let reduction = (armor as f32 * 0.04).min(0.8);
         self.health = (self.health - raw * (1.0 - reduction)).max(0.0);
     }
