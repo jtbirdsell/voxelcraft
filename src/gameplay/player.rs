@@ -319,6 +319,25 @@ impl Player {
         self.air_max_y = self.position.y;
         self.on_ground = false;
         self.darkness = 0.0;
+        // Boundary review: a fresh life doesn't inherit the last one's banked exhaustion or a
+        // mid-flight regen cadence.
+        self.exhaustion = 0.0;
+        self.regen_timer = 0.0;
+    }
+
+    /// Boundary review: programmatic teleports (`/tp`) must not carry the fall tracker across
+    /// the jump — the pre-teleport altitude would land as (often lethal) fall damage.
+    pub fn reset_fall(&mut self) {
+        self.air_max_y = self.position.y;
+    }
+
+    /// The fixed no-bed respawn point (the world spawn once loaded/created).
+    pub fn respawn_point(&self) -> Vec3 {
+        self.respawn_point
+    }
+
+    pub fn set_respawn_point(&mut self, at: Vec3) {
+        self.respawn_point = at;
     }
 
     /// S8 vanilla survival tick: spend banked exhaustion into saturation/hunger, regen on the
@@ -544,7 +563,7 @@ impl Player {
             }
         } else {
             // S8: sprinting needs hunger in the tank (the key alone doesn't make you sprint).
-            let sprinting = input.sprint && !input.sneak && self.can_sprint();
+            let sprinting = input.sprint && !input.sneak && self.can_sprint() && wish != Vec3::ZERO;
             let speed = if input.sneak {
                 SNEAK_SPEED
             } else if sprinting {
@@ -554,7 +573,7 @@ impl Player {
             };
             self.velocity.x = wish.x * speed;
             self.velocity.z = wish.z * speed;
-            if sprinting && wish != Vec3::ZERO {
+            if sprinting {
                 self.add_exhaustion(SPRINT_SPEED * dt * EXH_SPRINT_PER_M); // S8: 0.1/m sprinted
             }
             self.velocity.y -= GRAVITY * dt;
@@ -954,7 +973,6 @@ mod tests {
     #[test]
     fn difficulty_starvation_floors_and_peaceful_regen() {
         use crate::rules::Difficulty;
-        let input = Input::default();
         // Hard: starvation is lethal (floor 0).
         let mut p = Player::new(Vec3::ZERO, false);
         p.difficulty = Difficulty::Hard;

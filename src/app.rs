@@ -208,6 +208,9 @@ struct Session {
     viewbob_env: Option<bool>,
     /// S16: the console's input line (live only while `screen == Screen::Console`).
     console: String,
+    /// Boundary review: set when a right-click press consumed the hold for a world interaction
+    /// (planting a carrot); blocks the eat timer until the button is released.
+    eat_hold_blocked: bool,
 }
 
 pub struct App {
@@ -268,6 +271,7 @@ impl App {
             // Runtime source of truth for mode is the inventory's creative flag (S1).
             mode: session.inventory.creative as u8,
             bed: session.player.bed_respawn.map(|v| v.to_array()),
+            world_spawn: Some(session.player.respawn_point().to_array()),
         };
         let dir = &session.world_dir;
         let mut ok = true;
@@ -280,6 +284,9 @@ impl App {
         let mut inv = session.inventory.clone();
         if let Some(h) = inv.held.take() {
             let _ = inv.insert(h);
+        }
+        for cell in session.craft.iter().flatten() {
+            let _ = inv.insert(*cell); // the craft grid rides the same fold (close mid-craft)
         }
         if let Err(e) = persistence::save_state(
             dir,
@@ -993,6 +1000,13 @@ impl App {
         for stack in se.inventory.drain_all() {
             se.game.spawn_item(death_pos, stack);
         }
+        // Boundary review: dying mid-craft must not strand the grid (survive-death exploit via
+        // a parked stack, or silent loss on Save & Quit) — its stacks join the drop.
+        for cell in se.craft.iter_mut() {
+            if let Some(s) = cell.take() {
+                se.game.spawn_item(death_pos, s);
+            }
+        }
         // S11: wake at the bed while it stands. An UNLOADED bed chunk is trusted (dying far from
         // home is the whole point of a bed); only a resident cell that is no longer a bed
         // invalidates the anchor.
@@ -1470,6 +1484,7 @@ impl App {
         } else if session.player.submerged {
             base_fov - 4.0
         } else if session.input.sprint
+            && !session.input.sneak
             && session.player.can_sprint()
             && (session.input.forward || session.input.back)
         {
@@ -1488,6 +1503,14 @@ impl App {
             dt,
             session.environment.day_factor(),
         );
+        // Boundary review: a broken bed (mined or blown up) voids a matching respawn anchor —
+        // the unloaded-chunk trust in respawn_player would otherwise wake players at a ghost bed.
+        for cell in session.game.take_broken_beds() {
+            if session.player.bed_respawn.map(|bp| bp.floor().as_ivec3()) == Some(cell) {
+                session.player.bed_respawn = None;
+                session.toast = Some(("Your bed was destroyed".into(), 2.5));
+            }
+        }
         // U11: a sculk shriek this frame pulses Darkness onto the player (render effect deferred).
         let dark = session.game.take_pending_darkness();
         if dark > 0.0 {
@@ -1735,11 +1758,27 @@ impl App {
                             session.inventory.damage_selected(1);
                             session.player.add_exhaustion(crate::player::EXH_MINE); // S8
                         }
-                        // S6: a crop can't float — breaking its support pops it as a drop.
+                        // S6/boundary review: floor plants can't float — breaking the support
+                        // pops the column above (sugar-cane stacks chain; hanging types exempt).
                         if removed {
-                            let above = hit + IVec3::Y;
-                            let (aid, ast) = session.game.block_state_at(above);
-                            if block::is_crop(aid) || aid == block::SAPLING {
+                            let mut above = hit + IVec3::Y;
+                            loop {
+                                let (aid, ast) = session.game.block_state_at(above);
+                                let floor_plant = block::is_crop(aid)
+                                    || matches!(
+                                        aid,
+                                        block::SAPLING
+                                            | block::POPPY
+                                            | block::DANDELION
+                                            | block::TALL_GRASS
+                                            | block::FERN
+                                            | block::RED_MUSHROOM
+                                            | block::BROWN_MUSHROOM
+                                            | block::SUGAR_CANE
+                                    );
+                                if !floor_plant {
+                                    break;
+                                }
                                 session.game.set_block(&state.gpu, &state.renderer, above, block::AIR);
                                 if !session.inventory.creative {
                                     if let Some((di, dc)) = block::drops(aid, ast) {
@@ -1749,6 +1788,7 @@ impl App {
                                         );
                                     }
                                 }
+                                above += IVec3::Y;
                             }
                         }
                         session.mine_target = None;
@@ -1808,6 +1848,7 @@ impl App {
         // is a no-op for them.) Gameplay-only — suppressed while any screen is open or drawing a bow.
         let edible = session.screen == Screen::None
             && session.input.place_held
+            && !session.eat_hold_blocked
             && !item::is_bow(sel_item)
             && !item::is_shield(sel_item)
             && crate::food::food(sel_item).is_some_and(|f| session.player.can_eat(f.always_edible));
@@ -1847,6 +1888,9 @@ impl App {
         } else {
             session.eat_progress = 0.0;
             session.eat_item = None;
+            if !session.input.place_held {
+                session.eat_hold_blocked = false; // a fresh press may eat again
+            }
         }
 
         // M34-VM3: a use/place click pulses one view-model swing (captured before the flag is consumed).
@@ -1874,7 +1918,11 @@ impl App {
                         session.game.is_targetable_at(p)
                             || block::is_fluid(session.game.block_at(p))
                     })
-                    .filter(|h| block::is_fluid(session.game.block_at(h.block)))
+                    .filter(|h| {
+                        // Sources only (state 0): scooping a flowing tail would duplicate fluid.
+                        let (id, st) = session.game.block_state_at(h.block);
+                        block::is_fluid(id) && st == 0
+                    })
                     .map(|h| h.block)
                 }
             {
@@ -2012,6 +2060,8 @@ impl App {
                     };
                     if session.game.set_block(&state.gpu, &state.renderer, hit.block + IVec3::Y, crop) {
                         session.inventory.consume_selected();
+                        // Planting a carrot/potato consumed this hold — don't start EATING one.
+                        session.eat_hold_blocked = true;
                         if let Some(audio) = &state.audio {
                             audio.play_at(crate::audio::Sfx::StepLeaves, 0.6, hit.block.as_vec3() + Vec3::splat(0.5), session.camera.position, session.camera.forward());
                         }
@@ -2655,6 +2705,7 @@ fn create_session(
             difficulty: difficulty.as_u8(),
             mode: inventory.creative as u8,
             bed: None,
+            world_spawn: None,
         });
     }
     if let Ok(Ok(rays)) = std::env::var("VOXELCRAFT_GI_RAYS").map(|s| s.trim().parse::<u32>()) {
@@ -2670,6 +2721,9 @@ fn create_session(
         let health = if l.health <= 0.0 { 20.0 } else { l.health };
         player.restore_state(health, l.hunger, l.air, l.saturation, l.xp, l.level);
         player.bed_respawn = l.bed.map(Vec3::from); // S11
+        // Boundary review: the no-bed respawn is the world's FIXED spawn, not wherever the
+        // player last saved. Legacy saves (field absent) freeze it at this first load.
+        player.set_respawn_point(l.world_spawn.map(Vec3::from).unwrap_or(spawn));
     }
     let spawn_health = player.health;
     let camera = Camera::new(player.eye(), yaw, pitch);
@@ -2720,6 +2774,7 @@ fn create_session(
         view_model: crate::viewmodel::ViewModel::default(),
         viewbob_env: std::env::var("VOXELCRAFT_VIEWBOB").ok().map(|v| v != "0" && v != "off"),
         console: String::new(),
+        eat_hold_blocked: false,
     }
 }
 
@@ -2838,14 +2893,21 @@ fn run_command(session: &mut Session, input: &str) -> String {
             let p = session.player.position;
             // Clamp y inside the world column: below bedrock there is no floor and no void
             // damage (out-of-range cells read as loaded air), so a low tp would fall forever.
+            // X/Z clamp to vanilla's +/-30M and non-finite input is rejected outright — a NaN
+            // position poisons the camera, the streamer, and (via autosave) the level header.
             let to = Vec3::new(
-                coords[0].resolve(p.x),
+                coords[0].resolve(p.x).clamp(-3.0e7, 3.0e7),
                 coords[1].resolve(p.y).clamp(1.0, (crate::world::WORLD_HEIGHT - 2) as f32),
-                coords[2].resolve(p.z),
+                coords[2].resolve(p.z).clamp(-3.0e7, 3.0e7),
             );
+            if !to.is_finite() {
+                return "Coordinates must be finite".into();
+            }
             session.player.position = to;
             session.player.velocity = Vec3::ZERO;
             session.player.on_ground = false;
+            // The pre-teleport altitude must not land as fall damage at the destination.
+            session.player.reset_fall();
             session.camera.position = session.player.eye();
             session.fall_top = to.y; // the jump itself deals no fall damage
             // S2 deferred validation re-arms: physics pauses until the target chunks are
@@ -3100,6 +3162,7 @@ pub fn persist_selftest() {
         difficulty: 3, // Hard
         mode: 0,       // Survival
         bed: Some([7.0, 99.0, 7.0]),
+        world_spawn: Some([1.0, 2.0, 3.0]),
     };
     let mut chest_slots = vec![None; crate::container::CHEST_SLOTS];
     chest_slots[2] = Some(item::ItemStack::new(block::DIAMOND_ORE, 9));
@@ -3265,9 +3328,10 @@ impl ApplicationHandler for App {
         // P21: resolve the platform quality tier (maxed off-Metal == pre-P21 behavior; tuned-down
         // on macOS/Metal) + its env overrides, then thread it through renderer/game construction.
         let quality = crate::quality::Quality::resolve(gpu.backend);
-        // S15: what the tier actually resolved to — the reference point for "the render-distance
-        // slider was never touched" in apply_live_settings.
-        let rd_tier = quality.render_distance;
+        // S15: the RAW tier value — the reference point for "the render-distance slider was
+        // never touched" in apply_live_settings. Read from the tier, not the resolve: the S15
+        // env seeding feeds resolve, so its output reflects the SETTING, not the tier.
+        let rd_tier = crate::quality::Quality::tier(gpu.backend).render_distance;
         let renderer = ChunkRenderer::new(&gpu, &quality);
 
         // M33-G8: bring up the DLSS SDK (Tensor-core denoise + upscale). `None` => native-resolution
@@ -3947,6 +4011,12 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                // Boundary review: closing the window on the death screen would save the
+                // UN-DROPPED inventory at 0 HP, and the load-time revive guard resurrects the
+                // player with it — a one-click death-penalty bypass. Die properly first.
+                if self.state.as_ref().is_some_and(|s| matches!(s.scene, Scene::Dead)) {
+                    self.respawn_player();
+                }
                 self.save_world();
                 event_loop.exit();
             }

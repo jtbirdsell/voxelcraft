@@ -40,6 +40,10 @@ pub struct Level {
     /// S11: the bed respawn anchor (the bed's foot cell), appended at offset 59 as
     /// has(u8) + xyz(3xf32). Absent in older saves → None.
     pub bed: Option<[f32; 3]>,
+    /// Boundary review: the FIXED no-bed respawn point, appended at offset 72 as
+    /// has(u8) + xyz(3xf32). Absent in older saves → None (the loader freezes it at the load
+    /// position, stopping the "respawn wherever you last saved" drift).
+    pub world_spawn: Option<[f32; 3]>,
 }
 
 /// One chest's persisted contents (P3), saved in the chest section of `save_state.bin` (v4+).
@@ -231,6 +235,8 @@ pub fn create_world_in(
         level: 0,
         difficulty: 2, // Normal
         mode: mode.as_u8(),
+        // The created world's fixed spawn matches the initial player position above.
+        world_spawn: Some([8.0, 96.0, 24.0]),
         bed: None,
     };
     save_level(&dir, &level)?;
@@ -359,6 +365,12 @@ pub fn load_level(dir: &Path) -> Option<Level> {
         } else {
             None
         },
+        // World spawn at 72..85; absent/flag-0 -> None.
+        world_spawn: if d.len() >= 85 && d[72] == 1 {
+            Some([rd_f32(&d, 73), rd_f32(&d, 77), rd_f32(&d, 81)])
+        } else {
+            None
+        },
     })
 }
 
@@ -386,6 +398,11 @@ pub fn save_level(dir: &Path, level: &Level) -> std::io::Result<()> {
     b.push(level.bed.is_some() as u8);
     let bed = level.bed.unwrap_or([0.0; 3]);
     for c in bed {
+        b.extend_from_slice(&c.to_le_bytes());
+    }
+    // Boundary review: the fixed world spawn (flag + xyz), additive at offset 72.
+    b.push(level.world_spawn.is_some() as u8);
+    for c in level.world_spawn.unwrap_or([0.0; 3]) {
         b.extend_from_slice(&c.to_le_bytes());
     }
     atomic_write(&dir.join("level.bin"), &b)
@@ -866,9 +883,11 @@ mod tests {
             difficulty: 3, // Hard
             mode: 0,       // Survival
             bed: Some([4.5, 100.0, -2.5]),
+            world_spawn: Some([16.0, 96.0, 16.0]),
         };
         save_level(&dir, &level).unwrap();
         let ll = load_level(&dir).unwrap();
+        assert_eq!(ll.world_spawn, Some([16.0, 96.0, 16.0]));
         assert_eq!(ll.seed, 0xDEAD_BEEF);
         assert_eq!(ll.spawn, [1.5, 2.5, 3.5]);
         assert!((ll.time - 0.33).abs() < 1e-6);
@@ -1036,6 +1055,7 @@ mod tests {
             difficulty: 2,
             mode: 0,
             bed: None,
+            world_spawn: None,
         }
     }
 

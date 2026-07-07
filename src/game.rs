@@ -505,6 +505,9 @@ pub struct Game {
     /// Active fluid cells (kind + remaining horizontal reach) and a frontier of cells still to
     /// evaluate for spreading. Flood is monotonic (fluids only enter air), so it terminates.
     fluid: FxHashMap<IVec3, (BlockId, u8)>,
+    /// Boundary review: bed cells broken this frame (mined or exploded) — the session drains
+    /// these to void a matching respawn anchor.
+    broken_beds: Vec<IVec3>,
     fluid_frontier: VecDeque<IVec3>,
     fluid_timer: f32,
 
@@ -615,6 +618,7 @@ impl Game {
             upload_budget: 64,
             fluid: FxHashMap::default(),
             fluid_frontier: VecDeque::new(),
+            broken_beds: Vec::new(),
             fluid_timer: 0.0,
             entities: Entities::new(),
             furnaces: FxHashMap::default(),
@@ -1023,6 +1027,52 @@ impl Game {
                 }
             }
         }
+        // Boundary review: the batched carve bypasses set_block_state, so run its special-block
+        // hooks here — containers spill their contents, and bed/door partner halves OUTSIDE the
+        // blast radius go too (an orphaned half-bed would otherwise persist into the save).
+        let mut extra: Vec<(IVec3, BlockId, u8)> = Vec::new();
+        for &(p, _, _) in &changes {
+            let (id, st) = self.block_state_at(p);
+            match id {
+                block::FURNACE => {
+                    if let Some(f) = self.furnaces.remove(&p) {
+                        let c = p.as_vec3() + Vec3::splat(0.5);
+                        for stack in f.contents() {
+                            self.entities.spawn_item(c, stack);
+                        }
+                    }
+                }
+                block::CHEST => {
+                    if let Some(ch) = self.chests.remove(&p) {
+                        let c = p.as_vec3() + Vec3::splat(0.5);
+                        for stack in ch.contents() {
+                            self.entities.spawn_item(c, stack);
+                        }
+                    }
+                }
+                block::WOODEN_DOOR => {
+                    let partner = if block::door_half(st) == block::DOOR_LOWER {
+                        p + IVec3::Y
+                    } else {
+                        p - IVec3::Y
+                    };
+                    if self.block_at(partner) == block::WOODEN_DOOR {
+                        extra.push((partner, block::AIR, 0));
+                    }
+                }
+                block::BED => {
+                    self.broken_beds.push(p);
+                    let (dx, dz) = block::bed_partner_offset(st);
+                    let partner = p + IVec3::new(dx, 0, dz);
+                    if self.block_at(partner) == block::BED {
+                        extra.push((partner, block::AIR, 0));
+                        self.broken_beds.push(partner);
+                    }
+                }
+                _ => {}
+            }
+        }
+        changes.extend(extra);
         self.apply_fluid_changes(gpu, renderer, &changes);
         self.wake_fluids_around_list(&changes); // S12: craters at a lake edge flood
         explosion_damage((player_pos - center).length(), radius)
@@ -1243,6 +1293,10 @@ impl Game {
         // S11: breaking either bed half removes the other (same pattern; the partner offset comes
         // from the broken half's facing + head flag). The single bed item drops from the mined cell.
         if old == block::BED && id != block::BED {
+            // Boundary review: surface the break so the session can void a matching respawn
+            // anchor — the unloaded-chunk trust in respawn_player would otherwise wake players
+            // at a bed that no longer exists (a ghost anchor persisted to level.bin).
+            self.broken_beds.push(wp);
             let (dx, dz) = block::bed_partner_offset(old_state);
             let partner = wp + IVec3::new(dx, 0, dz);
             if self.block_at(partner) == block::BED {
@@ -1389,11 +1443,18 @@ impl Game {
             if let Some(product) = fluid_meet(kind, below_id, is_source(self, below)) {
                 changes.push((below, product, 0));
                 self.fluid.remove(&below);
+                // The interrupted flow re-evaluates over the newly hardened block (else it stalls).
+                self.fluid_frontier.push_back(pos);
             } else if self.is_air_loaded(below) {
                 // Fall straight down; landing resets horizontal reach to full.
                 self.fluid.insert(below, (kind, 0));
                 changes.push((below, kind, 0));
                 created.push(below);
+            } else if below_id == kind && level > 0 {
+                // A FLOWING cell that landed on its own kind ends there (vanilla): without this,
+                // cascades into a lake spread raised sheets across its whole surface. Sources
+                // (level 0, e.g. bucket-placed on deep water) still spread like any source.
+                continue;
             } else {
                 let max_spread = if kind == block::LAVA { LAVA_SPREAD } else { WATER_SPREAD };
                 if level < max_spread {
@@ -1403,6 +1464,7 @@ impl Game {
                         if let Some(product) = fluid_meet(kind, nid, is_source(self, n)) {
                             changes.push((n, product, 0));
                             self.fluid.remove(&n);
+                            self.fluid_frontier.push_back(pos); // keep flowing past the product
                             continue;
                         }
                         if !self.fluid.contains_key(&n) && self.is_air_loaded(n) {
@@ -1453,19 +1515,21 @@ impl Game {
             chunk.set_state(lx, ly, lz, id, st);
             mutated.insert(cpos);
             affected.insert(cpos);
-            if lx == 0 {
+            // S4a light-reach rule (mirrors set_block_state): an edit within 15 blocks of a seam
+            // can change the neighbor's BAKED light, and the chunk below re-lights sky shafts —
+            // the old boundary-only (0/31) rule left stale light on batch edits (growth, fluids).
+            if lx <= 14 {
                 affected.insert(cpos - IVec3::X);
-            } else if lx == 31 {
+            } else if lx >= 17 {
                 affected.insert(cpos + IVec3::X);
             }
-            if ly == 0 {
-                affected.insert(cpos - IVec3::Y);
-            } else if ly == 31 {
+            affected.insert(cpos - IVec3::Y);
+            if ly >= 17 {
                 affected.insert(cpos + IVec3::Y);
             }
-            if lz == 0 {
+            if lz <= 14 {
                 affected.insert(cpos - IVec3::Z);
-            } else if lz == 31 {
+            } else if lz >= 17 {
                 affected.insert(cpos + IVec3::Z);
             }
         }
@@ -1517,19 +1581,21 @@ impl Game {
             chunk.set_state(lx, ly, lz, id, state);
             mutated.insert(cpos);
             affected.insert(cpos);
-            if lx == 0 {
+            // S4a light-reach rule (mirrors set_block_state): an edit within 15 blocks of a seam
+            // can change the neighbor's BAKED light, and the chunk below re-lights sky shafts —
+            // the old boundary-only (0/31) rule left stale light on batch edits (growth, fluids).
+            if lx <= 14 {
                 affected.insert(cpos - IVec3::X);
-            } else if lx == 31 {
+            } else if lx >= 17 {
                 affected.insert(cpos + IVec3::X);
             }
-            if ly == 0 {
-                affected.insert(cpos - IVec3::Y);
-            } else if ly == 31 {
+            affected.insert(cpos - IVec3::Y);
+            if ly >= 17 {
                 affected.insert(cpos + IVec3::Y);
             }
-            if lz == 0 {
+            if lz <= 14 {
                 affected.insert(cpos - IVec3::Z);
-            } else if lz == 31 {
+            } else if lz >= 17 {
                 affected.insert(cpos + IVec3::Z);
             }
         }
@@ -1585,10 +1651,15 @@ impl Game {
                 }
             }
         }
-        // Phase 2: dispatch growth into a batch.
+        // Phase 2: dispatch growth into a batch. Duplicate same-cell samples are dropped — one
+        // leaf must not roll its decay drop twice, one sapling must not stamp two trees.
+        let mut seen: FxHashSet<IVec3> = FxHashSet::default();
         let mut changes: Vec<(IVec3, BlockId, u8)> = Vec::new();
         let mut drops: Vec<(IVec3, crate::item::ItemId, u8)> = Vec::new();
         for (wp, id) in candidates {
+            if !seen.insert(wp) {
+                continue;
+            }
             rng ^= rng << 13;
             rng ^= rng >> 7;
             rng ^= rng << 17;
@@ -1633,7 +1704,10 @@ impl Game {
         // S7: leaves with no log within reach decay (and can shed a sapling/apple). Player-placed
         // leaves carry state 1 (persistent) and never decay, like vanilla.
         if matches!(id, block::LEAVES | block::AZALEA_LEAVES) {
-            if self.block_state_at(wp).1 == 0 && !log_within(wp, 4, &|p| self.block_at(p)) {
+            // Range 5, not 4: both tree stampers leave the crown-level 5x5 corners 5 leaf-steps
+            // from the top log — range 4 decayed the 4 crown corners of every INTACT tree (and
+            // persisted each pristine chunk it touched). Guarded by the stamped-tree test.
+            if self.block_state_at(wp).1 == 0 && !log_within(wp, 5, &|p| self.block_at(p)) {
                 changes.push((wp, block::AIR, 0));
                 if let Some((di, dc)) = block::leaf_drop(rnd as u64) {
                     drops.push((wp, di, dc));
@@ -2269,6 +2343,11 @@ impl Game {
         true
     }
 
+    /// Boundary review: drain the bed cells broken since the last frame.
+    pub fn take_broken_beds(&mut self) -> Vec<IVec3> {
+        std::mem::take(&mut self.broken_beds)
+    }
+
     /// Furnace state at `pos`, creating an empty one (the player just opened it).
     pub fn furnace_mut(&mut self, pos: IVec3) -> &mut FurnaceState {
         self.furnaces.entry(pos).or_default()
@@ -2730,6 +2809,27 @@ mod furnace_tests {
         assert_eq!(grow_decision(block::POTATO_CROP, 0, block::FARMLAND, block::AIR, 0, 7, true), None); // mature
         assert!(random_tickable(block::BUDDING_AMETHYST) && !random_tickable(block::STONE));
         assert!(random_tickable(block::WHEAT_CROP)); // S6
+    }
+
+    #[test]
+    fn every_stamped_leaf_survives_decay() {
+        // The crown-level 5x5 corners sit 5 leaf-steps from the top log — the decay range must
+        // reach them or intact trees erode (the Phase A boundary review's headline finding).
+        let base = IVec3::new(0, 100, 0);
+        for trunk in 4..=6 {
+            let ch = tree_changes(base, trunk, &|_| block::AIR);
+            let map: FxHashMap<IVec3, BlockId> =
+                ch.iter().map(|&(p, id, _)| (p, id)).collect();
+            let block_at = |p: IVec3| map.get(&p).copied().unwrap_or(block::AIR);
+            for &(p, id, _) in &ch {
+                if id == block::LEAVES {
+                    assert!(
+                        log_within(p, 5, &block_at),
+                        "leaf at {p} of an intact trunk-{trunk} tree would decay"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

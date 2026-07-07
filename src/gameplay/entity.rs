@@ -1578,7 +1578,10 @@ impl Entities {
             if species != Species::Slime || tier == 0 {
                 for &(item, min, max) in species.loot() {
                     let span = (max - min) as u64 + 1;
-                    let count = min + (self.next_seed() % span) as u8;
+                    // next_seed() is ODD-ONLY (a seed guarantee): raw `% 2` would flip every
+                    // 0-1 range into "always 1" (ender pearls at 100%). Remix, then roll.
+                    let r = self.next_seed().wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33;
+                    let count = min + (r % span) as u8;
                     if count > 0 {
                         self.spawn_item(drop_at, ItemStack::new(item, count));
                     }
@@ -1587,7 +1590,7 @@ impl Entities {
             // S6: zombies rarely carry produce — the bootstrap source for carrots/potatoes
             // (vanilla's rare drop; farms take over once you have one).
             if species == Species::Zombie {
-                let r = self.next_seed();
+                let r = self.next_seed().wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33; // de-bias
                 if r % 100 < 5 {
                     let item = if (r >> 8) % 2 == 0 { crate::item::CARROT } else { crate::item::POTATO };
                     self.spawn_item(drop_at, ItemStack::new(item, 1));

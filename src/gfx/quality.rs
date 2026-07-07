@@ -97,11 +97,7 @@ impl Quality {
     /// Resolve the startup tier from the active backend, then fold in per-knob env overrides.
     /// The volume/render-distance invariant is enforced LAST so it also guards env combinations.
     pub fn resolve(backend: wgpu::Backend) -> Self {
-        let mut q = if backend == wgpu::Backend::Metal {
-            Self::metal()
-        } else {
-            Self::maxed()
-        };
+        let mut q = Self::tier(backend);
         q.apply_env();
         // The volume's half-extent (chunks×16 blocks) must reach past the fog wall plus the
         // 24-block water-edge fade: chunks×16 ≥ (rd−1)×32 + 24 → chunks ≥ 2×rd (the maxed tier
@@ -119,6 +115,16 @@ impl Quality {
         }
         log::info!("quality tier ({backend:?}): {q:?}");
         q
+    }
+
+    /// The backend's raw tier BEFORE env overrides — S15's live render-distance path needs the
+    /// true tier value ("the slider was never touched"), which a seeded resolve can't provide.
+    pub fn tier(backend: wgpu::Backend) -> Self {
+        if backend == wgpu::Backend::Metal {
+            Self::metal()
+        } else {
+            Self::maxed()
+        }
     }
 
     /// Fog wall distance derived from the render distance (the pre-P21 FOG_END formula).

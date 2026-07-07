@@ -127,7 +127,14 @@ impl Audio {
         self.music.set_volume(self.music_vol);
         if want_bright != self.music_bright && self.music_vol <= 0.001 {
             self.music_bright = want_bright;
-            self.music.stop(); // drop the stale palette's queue; a fresh segment queues below
+            // rodio 0.20 gotcha: Sink::stop() only FLAGS the queue — until the audio callback's
+            // next periodic pass drains it, sound_count stays > 0 and a same-frame append() walks
+            // into sleep_until_end(), a blocking recv() on the MAIN thread (frame hitch; a
+            // permanent freeze if the device stalls). A fresh sink never has that state.
+            if let Ok(fresh) = rodio::Sink::try_new(&self.handle) {
+                fresh.set_volume(self.music_vol);
+                self.music = fresh;
+            }
         }
         if self.music.len() <= 1 {
             self.seg_ix = (self.seg_ix + 1) % 2;

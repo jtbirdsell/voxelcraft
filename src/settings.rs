@@ -103,19 +103,22 @@ impl Settings {
     /// Apply one `key=value` line; unknown keys / unparseable values are ignored (keep the default).
     fn apply_kv(&mut self, k: &str, v: &str) {
         match k {
+            // Numeric fields clamp to their slider ranges: a hand-edited cfg feeds the env
+            // seeding (S15) and an oversized render_distance would drive the voxel volume past
+            // wgpu's 3D-texture limit — a persistent crash on world entry.
             "fov" => {
-                if let Ok(x) = v.parse() {
-                    self.fov = x;
+                if let Ok(x) = v.parse::<f32>() {
+                    self.fov = x.clamp(50.0, 110.0);
                 }
             }
             "sensitivity" => {
-                if let Ok(x) = v.parse() {
-                    self.sensitivity = x;
+                if let Ok(x) = v.parse::<f32>() {
+                    self.sensitivity = x.clamp(0.0005, 0.006);
                 }
             }
             "render_distance" => {
-                if let Ok(x) = v.parse() {
-                    self.render_distance = x;
+                if let Ok(x) = v.parse::<i32>() {
+                    self.render_distance = x.clamp(4, 32);
                 }
             }
             "view_bob" => self.view_bob = v == "1" || v == "true" || v == "on",
@@ -130,8 +133,8 @@ impl Settings {
                 }
             }
             "supersample" => {
-                if let Ok(x) = v.parse() {
-                    self.supersample = x;
+                if let Ok(x) = v.parse::<f32>() {
+                    self.supersample = x.clamp(1.0, 4.0);
                 }
             }
             "gi_mode" => {
@@ -140,8 +143,8 @@ impl Settings {
                 }
             }
             "gi_rays" => {
-                if let Ok(x) = v.parse() {
-                    self.gi_rays = x;
+                if let Ok(x) = v.parse::<u32>() {
+                    self.gi_rays = x.clamp(1, 16);
                 }
             }
             "tracer" => {
@@ -270,6 +273,19 @@ mod tests {
             back.apply_kv(k.trim(), v.trim());
         }
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn out_of_range_values_clamp_to_slider_bounds() {
+        let mut s = Settings::default();
+        s.apply_kv("render_distance", "9999");
+        s.apply_kv("gi_rays", "0");
+        s.apply_kv("fov", "500");
+        s.apply_kv("supersample", "40");
+        assert_eq!(s.render_distance, 32, "a hand-edited cfg cannot blow the voxel volume");
+        assert_eq!(s.gi_rays, 1);
+        assert_eq!(s.fov, 110.0);
+        assert_eq!(s.supersample, 4.0);
     }
 
     #[test]
