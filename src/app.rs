@@ -36,7 +36,6 @@ const REACH: f32 = 6.0;
 const EAT_TIME: f32 = 1.6; // seconds to eat a food (hold right-click)
 const SHIELD_RAISE_DELAY: f32 = 0.25; // seconds a shield must be up before it blocks (MC ~5 ticks)
 const AUTOSAVE_SECS: f32 = 300.0; // S3: autosave cadence (vanilla saves every 5 min)
-const SENSITIVITY: f32 = 0.0022;
 
 /// Active GUI screen. Gameplay input is suppressed while any screen is open (M15b; grows later).
 #[derive(PartialEq, Clone, Copy)]
@@ -123,6 +122,17 @@ struct State {
     create_mode: crate::rules::GameMode,
     /// Active settings tab (the "Back" target rides in `Scene::Settings { return_to }`).
     settings_tab: crate::menu::SettingsTab,
+    /// S15: first visible row of the world-select list (mouse wheel scrolls it).
+    world_scroll: usize,
+    /// S15: startup `VOXELCRAFT_RENDER_DISTANCE` override, captured before settings seeding — a
+    /// dev env var keeps beating the Settings slider for live render-distance changes.
+    rd_env: Option<i32>,
+    /// S15: the tier-resolved render distance at startup — what "the slider was never touched"
+    /// means (the Metal tier tunes below the Windows-default Settings value).
+    rd_tier: i32,
+    /// S15: the last render-distance REQUEST (not the applied value) — the restart hint fires
+    /// when the request changes past the cap, since the applied value may already sit at it.
+    rd_want: i32,
 }
 
 /// Everything that exists only while a world is loaded — created on Play/Create, dropped on Quit to
@@ -191,8 +201,9 @@ struct Session {
     creative_page: usize,
     /// M34-VM first-person view-model animation state (held item + swing/use/bob).
     view_model: crate::viewmodel::ViewModel,
-    /// M34-VM5: whether the world camera also head-bobs when walking (VOXELCRAFT_VIEWBOB=0 disables).
-    viewbob: bool,
+    /// M34-VM5/S15: env override for the walking head-bob (`VOXELCRAFT_VIEWBOB`); `None` defers
+    /// to the live Settings view-bob toggle.
+    viewbob_env: Option<bool>,
 }
 
 pub struct App {
@@ -654,9 +665,15 @@ impl App {
         let s = &state.settings;
         Some(match &state.scene {
             Scene::MainMenu => menu::build_main(w, h, ui),
-            Scene::WorldSelect => {
-                menu::build_world_select(w, h, &state.worlds, state.world_sel, state.world_pending_delete, ui)
-            }
+            Scene::WorldSelect => menu::build_world_select(
+                w,
+                h,
+                &state.worlds,
+                state.world_sel,
+                state.world_pending_delete,
+                state.world_scroll,
+                ui,
+            ),
             Scene::CreateWorld => {
                 menu::build_create(w, h, &state.create_name, &state.create_seed, state.create_mode, ui)
             }
@@ -800,6 +817,7 @@ impl App {
         if let Some(state) = self.state.as_mut() {
             state.worlds = persistence::list_worlds();
             state.world_sel = 0;
+            state.world_scroll = 0;
             state.world_pending_delete = None;
         }
         self.set_scene(Scene::WorldSelect);
@@ -970,6 +988,7 @@ impl App {
             state.scene = Scene::InGame;
             state.last_frame = Instant::now();
         }
+        self.apply_live_settings(); // S15: a live-changed render distance carries into new worlds
         self.apply_grab_for_scene();
     }
 
@@ -990,6 +1009,36 @@ impl App {
             f(&mut state.settings);
             state.settings.save();
         }
+        self.apply_live_settings(); // S15
+    }
+
+    /// S15/N5: push the live-appliable settings into the running world. FOV, sensitivity, and
+    /// view-bob are read per-frame; render distance mutates the streamer AND `quality` (fog
+    /// derives from it per-frame), clamped to what the voxel volume can light — the full request
+    /// applies on restart, where `Quality::resolve` grows the volume to fit.
+    fn apply_live_settings(&mut self) {
+        let Some(state) = self.state.as_mut() else { return };
+        // A slider still at the built-in default is NOT a user request — the platform tier's
+        // resolved value stands (Metal tunes below the Windows-default 12; treating the default
+        // as intent would bump the tier + toast on every first world entry there).
+        let asked = state.settings.render_distance;
+        let user_rd = (asked != crate::settings::Settings::default().render_distance).then_some(asked);
+        let want = state.rd_env.or(user_rd).unwrap_or(state.rd_tier).clamp(4, 32);
+        let cap = (state.quality.volume_chunks_xz / 2).max(4);
+        let rd = want.min(cap);
+        state.quality.render_distance = rd;
+        if let Some(se) = state.session.as_mut() {
+            se.game.set_render_distance(rd);
+            // The restart hint keys on the REQUEST changing — at the default tier the applied
+            // value already sits at the cap and never moves, so the old gate never fired.
+            if want > cap && want != state.rd_want {
+                se.toast = Some((
+                    format!("Render distance {want} needs a restart (volume caps it at {cap})"),
+                    3.0,
+                ));
+            }
+        }
+        state.rd_want = want;
     }
 
     /// Difficulty has no persisted-settings home (it rides the world): cycle it live on the session.
@@ -1022,6 +1071,7 @@ impl App {
             _ => {}
         }
         s.save();
+        self.apply_live_settings(); // S15: render distance (+fog) applies immediately
     }
 
     fn focus_field(&mut self, id: crate::menu::WidgetId) {
@@ -1184,10 +1234,11 @@ impl App {
             audio.tick_music(session.environment.day_factor(), dt);
         }
 
-        // Apply mouse look.
+        // Apply mouse look (S15/N5: sensitivity is a live setting).
+        let sens = state.settings.sensitivity;
         let (yaw_d, pitch_d) = session.input.take_look();
-        session.camera.yaw += yaw_d * SENSITIVITY;
-        session.camera.pitch = (session.camera.pitch - pitch_d * SENSITIVITY).clamp(-1.5533, 1.5533);
+        session.camera.yaw += yaw_d * sens;
+        session.camera.pitch = (session.camera.pitch - pitch_d * sens).clamp(-1.5533, 1.5533);
 
         // Player physics (disjoint field borrows: player mut, game/input shared).
         let yaw = session.camera.yaw;
@@ -1312,24 +1363,26 @@ impl App {
         // M34-VM5: optional camera head-bob, folded into the real camera transform BEFORE the camera
         // uniform rolls prev_view_proj — so DLSS motion vectors include it and stay correct. Uses the
         // previous frame's smoothed walk-bob phase (a one-frame lag is imperceptible).
-        if session.viewbob {
+        if session.viewbob_env.unwrap_or(state.settings.view_bob) {
             let b = session.view_model.camera_bob();
             let right = session.camera.forward().cross(Vec3::Y).normalize_or_zero();
             session.camera.position += right * b.x + Vec3::Y * b.y;
         }
 
         // Sprinting widens the FOV slightly (and swimming narrows it); ease toward the target.
+        // S15/N5: the base is the live Settings FOV (the old constants were base 70 + deltas).
+        let base_fov = state.settings.fov;
         let target_fov = if session.player.flying {
-            70_f32
+            base_fov
         } else if session.player.submerged {
-            66.0
+            base_fov - 4.0
         } else if session.input.sprint
             && session.player.can_sprint()
             && (session.input.forward || session.input.back)
         {
-            78.0
+            base_fov + 8.0
         } else {
-            70.0
+            base_fov
         }
         .to_radians();
         session.camera.fovy += (target_fov - session.camera.fovy) * (10.0 * dt).min(1.0);
@@ -2571,7 +2624,7 @@ fn create_session(
         creative_palette: item::creative_palette(),
         creative_page: 0,
         view_model: crate::viewmodel::ViewModel::default(),
-        viewbob: std::env::var("VOXELCRAFT_VIEWBOB").map_or(true, |v| v != "0" && v != "off"),
+        viewbob_env: std::env::var("VOXELCRAFT_VIEWBOB").ok().map(|v| v != "0" && v != "off"),
     }
 }
 
@@ -3003,6 +3056,34 @@ impl ApplicationHandler for App {
         if self.state.is_some() {
             return;
         }
+        // S15/N5: resolution order is env override > persisted setting > built-in default. Seed
+        // the VOXELCRAFT_* vars from saved settings BEFORE anything reads them — the
+        // frame_gen::requested() probe below, Streamline/DLSS init inside Gpu::new, and
+        // Quality::resolve — so the Graphics tab's "(restart)" promise is real. Headless runs
+        // (SHOT/BENCH/MENU/ATLAS) skip seeding: a stray saves/settings.cfg must never change
+        // verification output.
+        let settings = crate::settings::Settings::load();
+        let rd_env: Option<i32> = std::env::var("VOXELCRAFT_RENDER_DISTANCE")
+            .ok()
+            .and_then(|v| v.trim().parse().ok());
+        let headless = [
+            "VOXELCRAFT_SHOT",
+            "VOXELCRAFT_BENCH",
+            "VOXELCRAFT_MENU",
+            "VOXELCRAFT_ATLAS",
+            "VOXELCRAFT_FG_TEST",
+        ]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some());
+        if !headless {
+            for (k, v) in settings.env_seed_pairs() {
+                if std::env::var_os(k).is_none() {
+                    // SAFETY: main thread, before any worker/audio/driver thread exists; nothing
+                    // reads the environment concurrently this early in startup.
+                    unsafe { std::env::set_var(k, v) };
+                }
+            }
+        }
         let attrs = Window::default_attributes()
             .with_title("Voxelcraft")
             .with_inner_size(LogicalSize::new(1600.0, 900.0))
@@ -3026,6 +3107,9 @@ impl ApplicationHandler for App {
         // P21: resolve the platform quality tier (maxed off-Metal == pre-P21 behavior; tuned-down
         // on macOS/Metal) + its env overrides, then thread it through renderer/game construction.
         let quality = crate::quality::Quality::resolve(gpu.backend);
+        // S15: what the tier actually resolved to — the reference point for "the render-distance
+        // slider was never touched" in apply_live_settings.
+        let rd_tier = quality.render_distance;
         let renderer = ChunkRenderer::new(&gpu, &quality);
 
         // M33-G8: bring up the DLSS SDK (Tensor-core denoise + upscale). `None` => native-resolution
@@ -3061,7 +3145,7 @@ impl ApplicationHandler for App {
                 crate::persistence::WorldInfo { dir: "saves/worlds/flat".into(), name: "Flatlands".into(), seed: 42 },
             ];
             let (verts, _rects) = match which.as_str() {
-                "worlds" => crate::menu::build_world_select(w, h, &worlds, 0, None, &ui),
+                "worlds" => crate::menu::build_world_select(w, h, &worlds, 0, None, 0, &ui),
                 "create" => {
                     crate::menu::build_create(w, h, "New World", "", crate::rules::GameMode::default(), &ui)
                 }
@@ -3683,7 +3767,7 @@ impl ApplicationHandler for App {
             quality,
             gpu_watchdog: crate::gpu::GpuWatchdog::new(),
             menu: crate::menu::UiState::default(),
-            settings: crate::settings::Settings::load(),
+            settings,
             worlds: Vec::new(),
             world_sel: 0,
             world_pending_delete: None,
@@ -3691,6 +3775,10 @@ impl ApplicationHandler for App {
             create_seed: String::new(),
             create_mode: crate::rules::GameMode::default(),
             settings_tab: crate::menu::SettingsTab::General,
+            world_scroll: 0,
+            rd_env,
+            rd_tier,
+            rd_want: rd_env.unwrap_or(rd_tier),
         });
         self.set_grab(skip_menu);
     }
@@ -3791,6 +3879,22 @@ impl ApplicationHandler for App {
                         state.menu.hovered = Self::build_menu(state, w, h).and_then(|(_, rects)| {
                             rects.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id)
                         });
+                    }
+                }
+            }
+            // S15: wheel in a menu — scroll the world-select list.
+            WindowEvent::MouseWheel { delta, .. } if self.in_menu() => {
+                let dir = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
+                    MouseScrollDelta::PixelDelta(p) => -(p.y.signum() as i32),
+                };
+                if dir != 0 {
+                    if let Some(state) = self.state.as_mut() {
+                        if matches!(state.scene, Scene::WorldSelect) {
+                            let max = state.worlds.len().saturating_sub(crate::menu::WORLD_ROWS);
+                            state.world_scroll =
+                                (state.world_scroll as i32 + dir).clamp(0, max as i32) as usize;
+                        }
                     }
                 }
             }

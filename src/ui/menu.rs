@@ -109,6 +109,8 @@ const CONFIRM: [f32; 4] = [0.62, 0.22, 0.24, 1.0]; // armed-delete "Delete?" but
 const CONFIRM_HOVER: [f32; 4] = [0.74, 0.28, 0.30, 1.0];
 
 const BTN_W: f32 = 360.0;
+/// Visible rows in the world-select list (S15: the wheel scrolls longer lists).
+pub const WORLD_ROWS: usize = 6;
 const ROW_H: f32 = 46.0;
 const GAP: f32 = 12.0;
 const LABEL_SCALE: f32 = 2.0;
@@ -308,6 +310,7 @@ pub fn build_world_select(
     worlds: &[WorldInfo],
     selected: usize,
     pending_delete: Option<usize>,
+    scroll: usize,
     ui: &UiState,
 ) -> Built {
     let (mut v, mut rects) = (Vec::new(), Vec::new());
@@ -315,9 +318,16 @@ pub fn build_world_select(
     title(&mut v, sw, sh, sh * 0.10, 4.0, "Select World");
     let list_w = 520.0;
     let col = Column::centered(sw, sh * 0.22, list_w, 56.0, 10.0);
-    let max_rows = 6;
-    for (i, w) in worlds.iter().take(max_rows).enumerate() {
-        let r = col.row(i);
+    // S15: a window of WORLD_ROWS rows starting at `scroll` (wheel-scrolled, clamped); the widget
+    // ids keep the ABSOLUTE index so play/delete stay correct on any page.
+    let scroll = scroll.min(worlds.len().saturating_sub(WORLD_ROWS));
+    if scroll > 0 {
+        let r0 = col.row(0);
+        let hint = Rect { x: r0.x, y: r0.y - 26.0, w: r0.w, h: 18.0 };
+        label_centered(&mut v, sw, sh, hint, 1.2, &format!("{scroll} more above - scroll"), DIM);
+    }
+    for (row, (i, w)) in worlds.iter().enumerate().skip(scroll).take(WORLD_ROWS).enumerate() {
+        let r = col.row(row);
         let armed = pending_delete == Some(i);
         let del_hover = ui.hovered == Some(WidgetId::DeleteWorld(i));
         // The delete control sits inside the full-width row rect; size it wider when armed for "Delete?".
@@ -342,6 +352,12 @@ pub fn build_world_select(
         // inset) delete control resolves to DeleteWorld, not the full-width WorldRow underneath it.
         rects.push((WidgetId::DeleteWorld(i), del));
         rects.push((WidgetId::WorldRow(i), r));
+    }
+    let below = worlds.len().saturating_sub(scroll + WORLD_ROWS);
+    if below > 0 {
+        let rl = col.row(WORLD_ROWS - 1);
+        let hint = Rect { x: rl.x, y: rl.y + rl.h + 8.0, w: rl.w, h: 18.0 };
+        label_centered(&mut v, sw, sh, hint, 1.2, &format!("{below} more below - scroll"), DIM);
     }
     if worlds.is_empty() {
         label_centered(&mut v, sw, sh, col.row(0), 1.8, "No worlds yet — create one.", DIM);
@@ -510,8 +526,25 @@ mod tests {
     }
 
     #[test]
+    fn s15_world_select_scrolls_past_six() {
+        // 10 worlds, scrolled by 3: rows 3..9 visible with ABSOLUTE ids; 0..3 and 9 clipped.
+        let many: Vec<WorldInfo> = (0..10)
+            .map(|i| WorldInfo { dir: format!("saves/worlds/w{i}").into(), name: format!("W{i}"), seed: i })
+            .collect();
+        let (_, rects) = build_world_select(1600.0, 900.0, &many, 0, None, 3, &ui());
+        assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(3)));
+        assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(8)));
+        assert!(!rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(2)));
+        assert!(!rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(9)));
+        // An oversized scroll clamps to the last window instead of blanking the list.
+        let (_, rects) = build_world_select(1600.0, 900.0, &many, 0, None, 99, &ui());
+        assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(9)));
+        assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(4)));
+    }
+
+    #[test]
     fn world_select_lists_rows() {
-        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, None, &ui());
+        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, None, 0, &ui());
         assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(0)));
         assert!(rects.iter().any(|(id, _)| *id == WidgetId::WorldRow(1)));
         assert!(rects.iter().any(|(id, _)| *id == WidgetId::CreateNew));
@@ -519,7 +552,7 @@ mod tests {
 
     #[test]
     fn delete_x_wins_over_row_then_row_elsewhere() {
-        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, None, &ui());
+        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, None, 0, &ui());
         let row = rects.iter().find(|(id, _)| *id == WidgetId::WorldRow(0)).unwrap().1;
         let del = rects.iter().find(|(id, _)| *id == WidgetId::DeleteWorld(0)).unwrap().1;
         // Center of the X resolves to delete...
@@ -530,7 +563,7 @@ mod tests {
 
     #[test]
     fn armed_delete_renders_wider_and_still_hit_tests_to_delete() {
-        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, Some(1), &ui());
+        let (_, rects) = build_world_select(1600.0, 900.0, &worlds(), 0, Some(1), 0, &ui());
         let del = rects.iter().find(|(id, _)| *id == WidgetId::DeleteWorld(1)).unwrap().1;
         assert!(del.w > 100.0, "armed delete widens for the 'Delete?' label");
         assert_eq!(hit(&rects, (del.x + del.w * 0.5, del.y + del.h * 0.5)), Some(WidgetId::DeleteWorld(1)));

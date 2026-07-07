@@ -2244,6 +2244,32 @@ impl Game {
     }
 
     /// Furnace state at `pos`, creating an empty one (the player just opened it).
+    /// S15: live render-distance change — swap the streaming radius and rebuild the
+    /// nearest-first ring (same construction as `new`). Far chunks unload on the next update
+    /// tick; new ones stream in. Returns whether the distance actually changed.
+    pub fn set_render_distance(&mut self, rd: i32) -> bool {
+        if rd == self.render_distance {
+            return false;
+        }
+        self.render_distance = rd;
+        let r = rd + 1;
+        let mut offsets = Vec::new();
+        for dz in -r..=r {
+            for dx in -r..=r {
+                let dist2 = dx * dx + dz * dz;
+                if dist2 <= r * r {
+                    offsets.push((dx, dz, dist2));
+                }
+            }
+        }
+        offsets.sort_by_key(|&(_, _, d2)| d2);
+        self.offsets = offsets;
+        // Force a full re-center pass so the new ring streams/unloads immediately (the same
+        // sentinel `new` uses for the first frame).
+        self.center = IVec3::new(i32::MIN, 0, i32::MIN);
+        true
+    }
+
     pub fn furnace_mut(&mut self, pos: IVec3) -> &mut FurnaceState {
         self.furnaces.entry(pos).or_default()
     }

@@ -329,6 +329,15 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Settings that actually apply** (S15): the General tab is **fully live** — FOV (the sprint/swim
+  widen/narrow ride on it as offsets), mouse sensitivity, view-bob, and **render distance**, which
+  retunes the chunk streamer and fog on the spot (clamped to what the lighting volume covers; the
+  full request applies after a restart, where the volume grows to fit). The Graphics tab's
+  "(restart)" promise is now real: saved settings seed the `VOXELCRAFT_*` startup pipeline —
+  DLSS mode/quality, supersampling, GI mode/rays, tracer, backend, frame generation — with env
+  vars still overriding for dev workflows, and headless verification runs immune to a stray
+  settings file. The world-select list **scrolls** past six worlds (mouse wheel, with
+  more-above/below hints) instead of silently truncating.
 - **Inventory verbs** (S14): the full vanilla click vocabulary — **shift-click quick-move** with
   per-screen routing (hotbar ↔ backpack, straight into an open chest, furnaces route smeltables to
   the input and fuels to the fuel slot, armor auto-equips), **shift-click the craft output to

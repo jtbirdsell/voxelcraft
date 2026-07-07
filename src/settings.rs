@@ -75,7 +75,9 @@ impl Default for Settings {
             gi_rays: 8,
             tracer: Tracer::Hardware,
             backend: Backend::Auto,
-            frame_gen: true,
+            // Mirrors frame_gen::requested(): FG is opt-in (env default OFF). The old `true` was
+            // a placebo — the toggle displayed on while the engine never enabled it.
+            frame_gen: false,
         }
     }
 }
@@ -189,6 +191,42 @@ impl Settings {
         )
     }
 
+    /// S15/N5: the `VOXELCRAFT_*` seeds this settings object implies — every field that differs
+    /// from the built-in default, as (env key, value). The caller sets each var ONLY when it is
+    /// absent, preserving the documented resolution order (env override > persisted > default).
+    pub fn env_seed_pairs(&self) -> Vec<(&'static str, String)> {
+        let d = Settings::default();
+        let mut out: Vec<(&'static str, String)> = Vec::new();
+        if self.dlss_mode != d.dlss_mode {
+            out.push(("VOXELCRAFT_DLSS", self.dlss_mode.as_str().into()));
+        }
+        if self.dlss_quality != d.dlss_quality {
+            out.push(("VOXELCRAFT_DLSS_QUALITY", self.dlss_quality.as_str().into()));
+        }
+        if (self.supersample - d.supersample).abs() > 1e-3 {
+            out.push(("VOXELCRAFT_SS", self.supersample.to_string()));
+        }
+        if self.gi_mode != d.gi_mode {
+            out.push(("VOXELCRAFT_GI", self.gi_mode.as_str().into()));
+        }
+        if self.gi_rays != d.gi_rays {
+            out.push(("VOXELCRAFT_GI_RAYS", self.gi_rays.to_string()));
+        }
+        if self.tracer != d.tracer {
+            out.push(("VOXELCRAFT_TRACER", self.tracer.as_str().into()));
+        }
+        if self.backend != d.backend && self.backend != Backend::Auto {
+            out.push(("VOXELCRAFT_BACKEND", self.backend.as_str().into()));
+        }
+        if self.frame_gen != d.frame_gen {
+            out.push(("VOXELCRAFT_FG", if self.frame_gen { "1" } else { "0" }.into()));
+        }
+        if self.render_distance != d.render_distance {
+            out.push(("VOXELCRAFT_RENDER_DISTANCE", self.render_distance.to_string()));
+        }
+        out
+    }
+
     /// Persist to `saves/settings.cfg` (best-effort; logs on failure). Tmp+rename so a crash
     /// mid-write can't truncate the file (S3 — same pattern as the world saves).
     pub fn save(&self) {
@@ -241,6 +279,21 @@ mod tests {
         s.apply_kv("fov", "not-a-number");
         s.apply_kv("dlss_mode", "bogus");
         assert_eq!(s, Settings::default());
+    }
+
+    #[test]
+    fn s15_env_seed_pairs_only_non_defaults() {
+        assert!(Settings::default().env_seed_pairs().is_empty(), "defaults seed nothing");
+        let mut s = Settings::default();
+        s.tracer = Tracer::Software;
+        s.render_distance = 16;
+        s.frame_gen = true;
+        s.backend = Backend::Auto; // Auto never seeds a backend
+        let pairs = s.env_seed_pairs();
+        assert_eq!(pairs.len(), 3, "exactly the changed fields seed: {pairs:?}");
+        assert!(pairs.contains(&("VOXELCRAFT_TRACER", "dda".into())));
+        assert!(pairs.contains(&("VOXELCRAFT_RENDER_DISTANCE", "16".into())));
+        assert!(pairs.contains(&("VOXELCRAFT_FG", "1".into())));
     }
 
     #[test]

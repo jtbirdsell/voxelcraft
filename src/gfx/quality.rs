@@ -110,7 +110,7 @@ impl Quality {
         let floor = 2 * q.render_distance;
         if q.volume_chunks_xz < floor {
             log::warn!(
-                "volume_chunks_xz {} < 2*(render_distance {}+1) = {floor}; clamping to {floor} \
+                "volume_chunks_xz {} < 2*render_distance ({}) = {floor}; clamping to {floor} \
                  (the tracer volume must reach past the fog wall)",
                 q.volume_chunks_xz,
                 q.render_distance
