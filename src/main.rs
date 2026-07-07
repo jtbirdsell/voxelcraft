@@ -21,7 +21,7 @@ mod world;
 // `crate::<module>` call sites keep resolving unchanged. New code can use the grouped paths
 // directly (e.g. `crate::gfx::camera`, `crate::world::worldgen`, `crate::gameplay::player`).
 pub(crate) use gameplay::{
-    container, crafting, entity, food, item, player, raycast, rules, smelting,
+    console, container, crafting, entity, food, item, player, raycast, rules, smelting,
 };
 pub(crate) use gfx::{
     bench, camera, capture, device as gpu, dlss, environment, frame_gen, frustum, quality,

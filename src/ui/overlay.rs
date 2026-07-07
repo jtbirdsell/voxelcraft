@@ -728,6 +728,8 @@ pub fn build_ui(
     hurt_flash: f32,
     hurt_dir: Option<(f32, f32)>,
     toast: Option<&str>,
+    // S16: the command console's input line (Some while the console is open).
+    console: Option<&str>,
     debug: Option<&[String]>,
 ) -> Vec<UiVertex> {
     let sw = width as f32;
@@ -827,11 +829,23 @@ pub fn build_ui(
         }
     }
     // Selected item name, centered above the hotbar (clears the survival bars when shown).
-    if let Some(stack) = inv.slots[inv.selected] {
+    // Hidden while the console is open — the input bar owns that band of the screen.
+    if let Some(stack) = inv.slots[inv.selected].filter(|_| console.is_none()) {
         let name = item::item_name(stack.item);
         let tw = text_width(name, 2.0);
         let name_y = if survival { y - 84.0 } else { y - 52.0 };
         push_text(&mut v, sw, sh, (sw - tw) * 0.5, name_y, 2.0, name, [0.95, 0.95, 0.95, 1.0]);
+    }
+    // S16: the command console — a chat-style input bar along the bottom-left.
+    if let Some(line) = console {
+        let bar_y = sh - 104.0; // above the hotbar row (which starts at sh-70)
+        let text = format!("> {line}");
+        let tw = text_width(&text, 2.0);
+        let w = (sw * 0.55).max(tw + 40.0);
+        push_px_rect(&mut v, sw, sh, 10.0, bar_y - 6.0, w, 30.0, [0.04, 0.05, 0.08, 0.88]);
+        push_text(&mut v, sw, sh, 18.0, bar_y, 2.0, &text, [0.92, 0.94, 0.98, 1.0]);
+        // A block caret at the end of the line.
+        push_px_rect(&mut v, sw, sh, 18.0 + tw + 3.0, bar_y - 1.0, 9.0, 18.0, [0.85, 0.88, 0.95, 0.9]);
     }
     // S10: toast line — transient status messages ("Autosaved", save failures), above the name line.
     if let Some(msg) = toast {

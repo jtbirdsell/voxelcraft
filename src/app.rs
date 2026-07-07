@@ -45,6 +45,8 @@ enum Screen {
     Crafting,
     /// A furnace's GUI, tagged with the furnace block position (its contents live in `Game`).
     Furnace(IVec3),
+    /// S16: the slash-command console (a bottom text bar; gameplay input suspended).
+    Console,
     /// A chest's GUI, tagged with the chest block position (its contents live in `Game`).
     Chest(IVec3),
 }
@@ -204,6 +206,8 @@ struct Session {
     /// M34-VM5/S15: env override for the walking head-bob (`VOXELCRAFT_VIEWBOB`); `None` defers
     /// to the live Settings view-bob toggle.
     viewbob_env: Option<bool>,
+    /// S16: the console's input line (live only while `screen == Screen::Console`).
+    console: String,
 }
 
 pub struct App {
@@ -535,6 +539,80 @@ impl App {
         }
     }
 
+    /// S16: open the chat-style command console (Slash pre-fills the "/").
+    fn open_console(&mut self, slash: bool) {
+        if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+            if session.screen != Screen::None {
+                return;
+            }
+            session.screen = Screen::Console;
+            session.input = Input::default();
+            session.console.clear();
+            if slash {
+                session.console.push('/');
+            }
+        }
+        self.set_grab(false);
+    }
+
+    /// True while the session's console is up (its keys route to text entry, not gameplay).
+    fn console_open(&self) -> bool {
+        self.state
+            .as_ref()
+            .and_then(|s| s.session.as_ref())
+            .is_some_and(|s| s.screen == Screen::Console)
+    }
+
+    /// S16: one key PRESS while the console is open — controls or text (releases pass through
+    /// to `handle_key` so a movement key held across the open edge can't stick).
+    fn console_key(&mut self, event: &winit::event::KeyEvent) {
+        let code = match event.physical_key {
+            PhysicalKey::Code(c) => Some(c),
+            _ => None,
+        };
+        match code {
+            Some(KeyCode::Escape) => {
+                if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+                    session.screen = Screen::None;
+                    session.console.clear();
+                }
+                self.set_grab(true);
+            }
+            Some(KeyCode::Enter) | Some(KeyCode::NumpadEnter) => self.console_submit(),
+            Some(KeyCode::Backspace) => {
+                if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+                    session.console.pop();
+                }
+            }
+            _ => {
+                if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+                    if let Some(txt) = &event.text {
+                        for ch in txt.chars() {
+                            // The 8x8 bitmap font is ASCII; keep the line toast-sized.
+                            if ch.is_ascii() && !ch.is_ascii_control() && session.console.len() < 96 {
+                                session.console.push(ch);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// S16: Enter — run the line as a command, surface the result as a toast, close the console.
+    fn console_submit(&mut self) {
+        if let Some(session) = self.state.as_mut().and_then(|s| s.session.as_mut()) {
+            let input = std::mem::take(&mut session.console);
+            session.screen = Screen::None;
+            let input = input.trim().to_string();
+            if !input.is_empty() {
+                let msg = run_command(session, &input);
+                session.toast = Some((msg, 3.0));
+            }
+        }
+        self.set_grab(true);
+    }
+
     fn handle_key(&mut self, code: KeyCode, pressed: bool, repeat: bool, _event_loop: &ActiveEventLoop) {
         if code == KeyCode::Escape && pressed {
             if self.state.as_ref().and_then(|s| s.session.as_ref()).is_some_and(|s| s.screen != Screen::None) {
@@ -558,6 +636,18 @@ impl App {
         if code == KeyCode::KeyE && pressed && !repeat {
             self.toggle_inventory();
             return;
+        }
+        // S16: T (chat-style) / Slash (pre-filled "/") open the command console while playing.
+        if pressed && !repeat && matches!(code, KeyCode::KeyT | KeyCode::Slash) {
+            let playing = self
+                .state
+                .as_ref()
+                .and_then(|s| s.session.as_ref())
+                .is_some_and(|s| s.screen == Screen::None);
+            if playing {
+                self.open_console(code == KeyCode::Slash);
+                return;
+            }
         }
         // S14: while a GUI screen is open the hover verbs replace gameplay keys — a number key
         // swaps the hovered slot with that hotbar slot, Q tosses from the hovered slot (Ctrl-Q:
@@ -1214,6 +1304,9 @@ impl App {
                 }
                 if let Some(se) = state.session.as_mut() {
                     se.input = Input::default(); // dying mid-sprint must not auto-run on respawn
+                    // S16: dying mid-command closes the console (else Respawn wakes into it).
+                    se.screen = Screen::None;
+                    se.console.clear();
                 }
                 state.scene = Scene::Dead;
             }
@@ -2258,6 +2351,7 @@ impl App {
             // Camera-relative attacker angle (yaw 0 = +X): rel 0 = ahead of the crosshair.
             session.hurt_dir.map(|(world, t)| (world - session.camera.yaw, (t / 0.8).clamp(0.0, 1.0))),
             session.toast.as_ref().map(|(m, _)| m.as_str()),
+            (session.screen == Screen::Console).then_some(session.console.as_str()),
             debug_lines.as_deref(),
         );
         if let Screen::Chest(pos) = session.screen {
@@ -2288,7 +2382,7 @@ impl App {
                 cook_frac,
                 session.cursor,
             ));
-        } else if session.screen != Screen::None {
+        } else if !matches!(session.screen, Screen::None | Screen::Console) {
             // F1: in the creative inventory screen, show the paged block/tool palette instead of craft.
             let palette = (session.screen == Screen::Inventory && session.inventory.creative)
                 .then_some((session.creative_palette.as_slice(), session.creative_page));
@@ -2625,6 +2719,7 @@ fn create_session(
         creative_page: 0,
         view_model: crate::viewmodel::ViewModel::default(),
         viewbob_env: std::env::var("VOXELCRAFT_VIEWBOB").ok().map(|v| v != "0" && v != "off"),
+        console: String::new(),
     }
 }
 
@@ -2648,6 +2743,11 @@ enum SlotRef {
 /// first; the furnace/chest screens expose ONLY their own slots beyond it (armor + craft cells
 /// belong to the inventory/crafting screens).
 fn hovered_slot(session: &Session, w: u32, h: u32) -> Option<SlotRef> {
+    // S16: the console is a text bar, not a slot screen — nothing to hit (blocks the S14 verbs
+    // and clicks from reaching the invisible inventory regions).
+    if session.screen == Screen::Console {
+        return None;
+    }
     let (cx, cy) = session.cursor;
     let hit = |x: f32, y: f32| {
         cx >= x && cx < x + overlay::INV_SLOT && cy >= y && cy < y + overlay::INV_SLOT
@@ -2700,6 +2800,64 @@ fn hovered_slot(session: &Session, w: u32, h: u32) -> Option<SlotRef> {
         return Some(SlotRef::CraftOut);
     }
     None
+}
+
+/// S16: apply one parsed console command to the session; the returned string becomes a toast.
+fn run_command(session: &mut Session, input: &str) -> String {
+    use crate::console::{parse, resolve_item, Command, HELP};
+    let cmd = match parse(input, |q| resolve_item(&session.creative_palette, q)) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match cmd {
+        Command::Help => HELP.into(),
+        Command::Seed => format!("Seed: {}", session.game.seed()),
+        Command::Gamemode(mode) => {
+            let creative = mode.is_creative();
+            session.inventory.creative = creative;
+            session.player.creative = creative;
+            if !creative {
+                session.player.flying = false; // flight is a creative ability (S1)
+            }
+            format!("Game mode set to {}", mode.name())
+        }
+        Command::Give { item, count } => {
+            let cap = item::max_stack(item) as u32;
+            let mut left = count;
+            while left > 0 {
+                let n = left.min(cap) as u8;
+                left -= n as u32;
+                if let Some(rest) = session.inventory.insert(item::ItemStack::new(item, n)) {
+                    // Inventory full — the rest lands at the player's feet.
+                    session.game.spawn_item(session.player.position + Vec3::Y, rest);
+                }
+            }
+            format!("Gave {count} x {}", item::item_name(item))
+        }
+        Command::Tp(coords) => {
+            let p = session.player.position;
+            // Clamp y inside the world column: below bedrock there is no floor and no void
+            // damage (out-of-range cells read as loaded air), so a low tp would fall forever.
+            let to = Vec3::new(
+                coords[0].resolve(p.x),
+                coords[1].resolve(p.y).clamp(1.0, (crate::world::WORLD_HEIGHT - 2) as f32),
+                coords[2].resolve(p.z),
+            );
+            session.player.position = to;
+            session.player.velocity = Vec3::ZERO;
+            session.player.on_ground = false;
+            session.camera.position = session.player.eye();
+            session.fall_top = to.y; // the jump itself deals no fall damage
+            // S2 deferred validation re-arms: physics pauses until the target chunks are
+            // resident, then lifts the player if the destination is inside solid.
+            session.spawn_checked = false;
+            format!("Teleported to {:.0} {:.0} {:.0}", to.x, to.y, to.z)
+        }
+        Command::TimeSet(t) => {
+            session.environment.time = t;
+            format!("Time set to {t:.2}")
+        }
+    }
 }
 
 /// S14: true when `slot` is a craft cell/output on the CREATIVE inventory screen — the palette is
@@ -3534,6 +3692,8 @@ impl ApplicationHandler for App {
             }
             // VOXELCRAFT_SURVIVAL=1 flips the HUD to survival mode with demo air/XP for verification.
             let survival_demo = std::env::var("VOXELCRAFT_SURVIVAL").is_ok();
+            // S16: VOXELCRAFT_CONSOLE=text renders the command bar in the shot.
+            let shot_console = std::env::var("VOXELCRAFT_CONSOLE").ok();
             let mut ui = overlay::build_ui(
                 gpu.config.width,
                 gpu.config.height,
@@ -3553,6 +3713,7 @@ impl ApplicationHandler for App {
                 if survival_demo { 0.2 } else { 0.0 }, // S10: hurt flash visible in the demo HUD
                 if survival_demo { Some((0.8, 0.8)) } else { None }, // S10: attacker cue demo
                 survival_demo.then_some("Autosaved"), // S10: toast demo
+                shot_console.as_deref(),              // S16: console-bar demo
                 Some(&dbg),
             );
             let screen_env = std::env::var("VOXELCRAFT_SCREEN").unwrap_or_default();
@@ -3924,6 +4085,14 @@ impl ApplicationHandler for App {
                     if pressed {
                         self.menu_key(&event, event_loop);
                     }
+                    return;
+                }
+                // S16: an open console consumes key PRESSES as text/controls; releases still fall
+                // through to handle_key (stuck-movement-key protection). The T/slash press that
+                // OPENS the console can't leak into the buffer: this check precedes handle_key,
+                // and the console isn't open yet on that event.
+                if pressed && self.console_open() {
+                    self.console_key(&event);
                     return;
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {

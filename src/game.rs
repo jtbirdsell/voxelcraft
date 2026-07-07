@@ -2243,7 +2243,6 @@ impl Game {
             .count()
     }
 
-    /// Furnace state at `pos`, creating an empty one (the player just opened it).
     /// S15: live render-distance change — swap the streaming radius and rebuild the
     /// nearest-first ring (same construction as `new`). Far chunks unload on the next update
     /// tick; new ones stream in. Returns whether the distance actually changed.
@@ -2270,6 +2269,7 @@ impl Game {
         true
     }
 
+    /// Furnace state at `pos`, creating an empty one (the player just opened it).
     pub fn furnace_mut(&mut self, pos: IVec3) -> &mut FurnaceState {
         self.furnaces.entry(pos).or_default()
     }

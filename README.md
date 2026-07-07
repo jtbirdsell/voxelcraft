@@ -114,6 +114,7 @@ here so it's the default. GL has no hardware RT (software DDA tracer only).
 | **Q** | Drop one of the selected item; **over a slot in any screen: drop from that slot (Ctrl-Q: the whole stack)** |
 | **1–9 / scroll** | Select hotbar slot; **over a slot in any screen: swap it with that hotbar slot** |
 | **Shift-click** | **Quick-move a stack** — hotbar ↔ backpack, into an open chest, furnace items route to input/fuel by kind, armor auto-equips; shift-click the craft output to **craft everything** straight into your inventory |
+| **T / `/`** | Open the **command console** (`/` pre-fills the slash): `/gamemode` `/give` `/tp` `/time` `/seed` `/help` |
 | **E** | Open / close inventory (with a 2×2 craft grid) |
 | **R** | Cycle ray-traced lighting: off → shadows → shadows + GI |
 | **G** | Cycle difficulty: Peaceful → Easy → Normal → Hard |
@@ -329,6 +330,13 @@ position, albedo + skylight) and an ACES tonemap.
   crosshair once it's ready, after a brief delay). A raised shield **fully blocks** melee, arrow, and
   explosion damage arriving from the **front** (a facing-vs-source test) — turn into the danger to soak it.
   Environmental damage (falling, lava, drowning, starvation) is never blocked.
+- **Command console** (S16): press **T** (or **`/`**) for a chat-style command bar —
+  `/gamemode <survival|creative>` flips mode live (persisted with the world), `/give <item> [n]`
+  takes display names in any spelling ("Iron Ingot", `iron_ingot`) or numeric ids and spills
+  overflow at your feet, `/tp <x y z>` with `~`-relative coordinates (teleporting into unloaded
+  terrain safely pauses physics until the chunks arrive, and the y-clamp keeps you inside the
+  world column), `/time <day|noon|night|midnight|0..1>`, and `/seed`. Results surface on the HUD
+  toast line; unknown input answers with usage hints, never silence.
 - **Settings that actually apply** (S15): the General tab is **fully live** — FOV (the sprint/swim
   widen/narrow ride on it as offsets), mouse sensitivity, view-bob, and **render distance**, which
   retunes the chunk streamer and fog on the spot (clamped to what the lighting volume covers; the
