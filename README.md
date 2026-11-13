@@ -512,7 +512,7 @@ Done: the full engine, world generation, lighting (ray-traced GI with DLSS Ray R
 denoising + Frame Generation), rendering, the block/item library and surface decoration, inventory,
 **progressive mining, tools + durability, crafting, furnace smelting, survival depth** (swimming/air,
 lava damage, sneak, XP & levels), **armor, full save/reload persistence**, and **typed mobs + combat**
-— twelve species with AI, natural spawning, breeding + babies, difficulty, melee (1.9-style timing,
+— thirteen species with AI, natural spawning, breeding + babies, difficulty, melee (1.9-style timing,
 crits, sweeps), skeleton arrows + creeper explosions, and the bow + shield. Next up: structures
 (dungeons/villages), particles + audio, redstone, and additional dimensions.
 
